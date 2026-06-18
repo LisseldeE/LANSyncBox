@@ -1,0 +1,8 @@
+__pycache__/
+.idea/
+output/
+标记文件/
+
+*.exe
+
+1.txt
