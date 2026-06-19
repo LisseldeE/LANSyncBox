@@ -1,19 +1,47 @@
-# LANSyncBox
+# LANSyncBox - LAN File Synchronization Tool
 
-LAN File Synchronization Tool
-
-## Introduction
+## Project Introduction
 
 LANSyncBox is a lightweight LAN file synchronization tool that supports real-time file synchronization between multiple computers. Connect within the same local network to share and sync files - no public network connection required.
 
+## Project Information
+
+- **Project Name**: LANSyncBox
+- **Project Version**: R2
+- **Project Author**: Lisselde_E
+- **Contact Email**: Lisselde.E@outlook.com
+- **Project Repository**: https://github.com/LisseldeE/LANSyncBox
+- **Domestic Build Download Mirror**: https://gitee.com/Lisselde_E/LANSyncBox (Recommended for users in China)
+
 ## Features
 
-- **Real-time Sync**: File additions, modifications, and deletions are synced to all connected clients instantly
-- **Custom Room Code**: Support for custom 6-digit room codes for easy sharing
-- **Password Protection**: Optional password verification for secure syncing
-- **Hide Mode**: "Hide files from others" option - files only sync to the host
-- **Auto Reconnect**: Automatic connection detection and incremental sync after reconnection
-- **System Tray**: Minimize to tray without interrupting daily work
+### Real-time Sync
+- File additions, modifications, and deletions are synced to all connected clients instantly
+- Support for custom 6-digit room codes for easy sharing
+- Optional password verification for secure syncing
+
+### Multi-client Sync
+- Host monitors all changes in sync folder
+- Changes synced to all connected clients in real-time
+- Receives files from clients, forwards based on "hide flag"
+- Maximum concurrent transfer limit (≤3 clients) to avoid high resource usage
+
+### Client Features
+- File changes uploaded to host (not directly to other clients)
+- "Hide files from others" toggle support
+- Real-time sync status display
+- Auto incremental sync after reconnection
+
+### Multi-language Support
+- Chinese/English interface switching
+- Real-time language switching without restart
+- Multi-language environment adaptation
+
+### System Tray
+- Minimized windows auto-hide to system tray
+- Tray menu shows current room code
+- Double-click tray icon to restore window
+- Click "Exit" to close all syncs and quit
 
 ## Usage
 
@@ -62,29 +90,51 @@ File conflicts are handled by the system file manager. Sync ensures consistency 
 - **Host Offline**: All clients notified "Room closed"
 - **Transfer Protocol**: TCP + custom protocol
 
-## System Tray
-
-- Minimized windows auto-hide to system tray
-- Tray menu shows current room code
-- Double-click tray icon to restore window
-- Click "Exit" to close all syncs and quit
-
-## Version Info
-
-**Current Version: R1**
-
-**Release Date: 2026.6.18**
-
-**Author: Lisselde.E**
-
-**Email: Lisselde.E@outlook.com**
-
 ## Change Log
 
 ### 2026.6.18 R1
-
+**#01**
 - Initial software build with sync functionality
 
----
+### 2026.6.19 R2
+**#01**
+- Implemented multi-language switching, adapted to multi-language environments
+- Optimized program update check logic
+- Fixed some issues in sync logic
+- Fixed abnormal delete signal error during file modification
+- Optimized program startup speed, improved user experience
 
-*For questions or suggestions, contact Lisselde.E@outlook.com*
+## Tech Stack
+
+- Python 3.x
+- PyQt5 (GUI Framework)
+- watchdog (File Monitoring)
+
+## Installation & Running
+
+### System Requirements
+- Python 3.6 or higher
+- Windows / macOS / Linux
+
+### Install Dependencies
+```bash
+pip install PyQt5 watchdog
+```
+
+### Run Program
+```bash
+python LANSyncBox.py
+```
+
+## Open Source License
+
+This project uses the MIT open source license, see [LICENSE](LICENSE) file for details.
+
+## Contact & Feedback
+
+**This application is under development, if you have any questions or new ideas, feel free to contact me!**
+
+- 📧 Email: Lisselde.E@outlook.com
+- 🐙 GitHub: https://github.com/LisseldeE/LANSyncBox
+
+Issues and Pull Requests are welcome!

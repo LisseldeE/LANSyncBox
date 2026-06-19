@@ -341,4 +341,9 @@ class FileEventHandler(FileSystemEventHandler):
             # 发送删除旧文件 + 创建新文件的信号
             print(f"[DEBUG] Existing file was renamed: {event.src_path} -> {event.dest_path}")
             self.watcher._handle_event('deleted', event.src_path)
-            self.watcher._handle_event('created', event.dest_path)
+            # 直接发出新文件名的创建信号（不延迟，确保删除和创建同时发送）
+            print(f"[DEBUG] Emitting create signal for renamed file: {event.dest_path}")
+            if os.path.isfile(event.dest_path):
+                self.watcher.file_created.emit(event.dest_path)
+            elif os.path.isdir(event.dest_path):
+                self.watcher.directory_created.emit(event.dest_path)

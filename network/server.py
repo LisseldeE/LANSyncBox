@@ -156,7 +156,7 @@ class SyncServer(QObject):
         Args:
             filepath: 文件路径
             exclude_client: 排除的客户端ID
-            hide_from_others: 是否对外隐藏
+            hide_from_others: 是否对外隐藏（注意：调用此函数前应已检查此条件）
         """
         print(f"[DEBUG] broadcast_file called: {filepath}, exclude: {exclude_client}, hide: {hide_from_others}")
         print(f"[DEBUG] Current clients: {list(self.clients.keys())}")
@@ -170,9 +170,6 @@ class SyncServer(QObject):
                 for client_id, client in self.clients.items():
                     if client_id == exclude_client:
                         print(f"[DEBUG] Skipping excluded client: {client_id}")
-                        continue
-                    if hide_from_others and not self.allow_peer_sync:
-                        print(f"[DEBUG] Skipping due to hide_from_others: {client_id}")
                         continue
                     print(f"[DEBUG] Sending to client: {client_id}")
                     client.send(message)

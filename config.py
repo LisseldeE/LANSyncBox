@@ -6,11 +6,18 @@ LANSyncBox 配置文件
 
 # 应用信息
 APP_NAME = "LANSyncBox"
-APP_VERSION = "R1"
+APP_VERSION = "R2"
 APP_AUTHOR = "Lisselde_E"
 APP_EMAIL = "Lisselde.E@outlook.com"
-APP_REPO = "LisseldeE/LANSyncBox"
-APP_ID = "LANSyncBox.LANSyncBox.R1"
+APP_REPO = "LisseldeE/LANSyncBox"  # GitHub 仓库
+APP_REPO_GITEE = "Lisselde_E/LANSyncBox"  # Gitee 仓库（用户名可能不同）
+APP_ID = "LANSyncBox.LANSyncBox.R2"
+
+# API 端点
+GITHUB_API = f"https://api.github.com/repos/{APP_REPO}/tags"
+GITEE_API = f"https://gitee.com/api/v5/repos/{APP_REPO_GITEE}/tags"
+GITHUB_RELEASES = f"https://github.com/{APP_REPO}/releases"
+GITEE_RELEASES = f"https://gitee.com/{APP_REPO_GITEE}/releases"
 
 # 网络配置
 DEFAULT_PORT = 9527

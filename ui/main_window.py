@@ -14,9 +14,12 @@ from PyQt5.QtGui import QIcon
 
 from config import STYLESHEET, APP_NAME, APP_VERSION, APP_ID, COLORS
 from ui.widgets import AnimatedButton
-from ui.create_room_dialog import CreateRoomDialog
-from ui.join_room_dialog import JoinRoomDialog
-from ui.sync_window import SyncWindow
+from i18n import I18n
+
+# 延迟导入：这些模块较重，在需要时才导入
+# from ui.create_room_dialog import CreateRoomDialog
+# from ui.join_room_dialog import JoinRoomDialog
+# from ui.sync_window import SyncWindow
 
 
 class MainWindow(QMainWindow):
@@ -57,7 +60,7 @@ class MainWindow(QMainWindow):
         self.tray_menu = QMenu()
         
         # 显示主窗口
-        show_main_action = QAction("显示主窗口", self)
+        show_main_action = QAction(I18n.t('main_create'), self)
         show_main_action.triggered.connect(self._show_window)
         self.tray_menu.addAction(show_main_action)
         
@@ -65,7 +68,7 @@ class MainWindow(QMainWindow):
         self.tray_menu.addSeparator()
         
         # 退出
-        quit_action = QAction("退出", self)
+        quit_action = QAction(I18n.t('main_exit'), self)
         quit_action.triggered.connect(self._quit_app)
         self.tray_menu.addAction(quit_action)
         
@@ -82,12 +85,12 @@ class MainWindow(QMainWindow):
         if self.sync_windows:
             for sync_win in self.sync_windows:
                 if sync_win.room_code:
-                    action = QAction(f"房间: {sync_win.room_code}", self)
+                    action = QAction(f"{I18n.t('sync_room')}{sync_win.room_code}", self)
                     action.triggered.connect(lambda checked, w=sync_win: self._show_sync_window(w))
                     self.tray_menu.addAction(action)
         else:
             # 没有同步窗口时，显示主窗口选项
-            show_main_action = QAction("显示主窗口", self)
+            show_main_action = QAction(I18n.t('main_create'), self)
             show_main_action.triggered.connect(self._show_window)
             self.tray_menu.addAction(show_main_action)
         
@@ -95,7 +98,7 @@ class MainWindow(QMainWindow):
         self.tray_menu.addSeparator()
         
         # 退出
-        quit_action = QAction("退出", self)
+        quit_action = QAction(I18n.t('main_exit'), self)
         quit_action.triggered.connect(self._quit_app)
         self.tray_menu.addAction(quit_action)
         
@@ -189,22 +192,11 @@ class MainWindow(QMainWindow):
         version_label.setAlignment(Qt.AlignCenter)
         main_layout.addWidget(version_label)
         
-        # 描述
-        desc_label = QLabel("局域网文件同步")
-        desc_label.setStyleSheet(f"""
-            QLabel {{
-                font-size: 11px;
-                color: {COLORS['text_primary']};
-            }}
-        """)
-        desc_label.setAlignment(Qt.AlignCenter)
-        main_layout.addWidget(desc_label)
-        
         main_layout.addSpacing(15)
         
         # 按钮区域 - 纵向排列
         # 创建连接按钮（主机端）
-        self.create_btn = AnimatedButton("创建连接")
+        self.create_btn = AnimatedButton(I18n.t('main_create'))
         self.create_btn.setObjectName("primaryBtn")
         self.create_btn.setMinimumHeight(38)
         self.create_btn.clicked.connect(self._on_create_clicked)
@@ -213,7 +205,7 @@ class MainWindow(QMainWindow):
         main_layout.addSpacing(8)
         
         # 加入连接按钮（连接端）
-        self.join_btn = AnimatedButton("加入连接")
+        self.join_btn = AnimatedButton(I18n.t('main_join'))
         self.join_btn.setObjectName("successBtn")
         self.join_btn.setMinimumHeight(38)
         self.join_btn.clicked.connect(self._on_join_clicked)
@@ -221,14 +213,75 @@ class MainWindow(QMainWindow):
         
         main_layout.addStretch()
         
-        # 底部关于按钮
-        about_btn = QPushButton("关于")
-        about_btn.setMinimumHeight(32)
-        about_btn.clicked.connect(self._show_about)
-        main_layout.addWidget(about_btn)
+        # 底部按钮区域
+        bottom_layout = QHBoxLayout()
+        bottom_layout.setSpacing(8)
+        
+        # 语言切换按钮
+        self.lang_btn = QPushButton("EN" if I18n.get_lang() == 'zh' else "中文")
+        self.lang_btn.setMinimumWidth(55)
+        self.lang_btn.setFixedHeight(32)
+        self.lang_btn.setStyleSheet("""
+            QPushButton {
+                background-color: #e9ecef;
+                color: #495057;
+                border: 1px solid #ced4da;
+                border-radius: 6px;
+                font-size: 11px;
+            }
+            QPushButton:hover {
+                background-color: #dee2e6;
+            }
+        """)
+        self.lang_btn.clicked.connect(self._toggle_lang)
+        bottom_layout.addWidget(self.lang_btn)
+        
+        bottom_layout.addStretch()
+        
+        # 关于按钮
+        self.about_btn = QPushButton(I18n.t('main_about'))
+        self.about_btn.setMinimumWidth(55)
+        self.about_btn.setFixedHeight(32)
+        self.about_btn.setStyleSheet("""
+            QPushButton {
+                background-color: #e9ecef;
+                color: #495057;
+                border: 1px solid #ced4da;
+                border-radius: 6px;
+                font-size: 11px;
+            }
+            QPushButton:hover {
+                background-color: #dee2e6;
+            }
+        """)
+        self.about_btn.clicked.connect(self._show_about)
+        bottom_layout.addWidget(self.about_btn)
+        
+        main_layout.addLayout(bottom_layout)
+    
+    def _toggle_lang(self):
+        """切换语言"""
+        current = I18n.get_lang()
+        new_lang = 'en' if current == 'zh' else 'zh'
+        I18n.set_lang(new_lang)
+        
+        # 更新按钮文本
+        self.lang_btn.setText("EN" if new_lang == 'zh' else "中文")
+        self.about_btn.setText(I18n.t('main_about'))
+        
+        # 更新界面文本
+        self.create_btn.setText(I18n.t('main_create'))
+        self.join_btn.setText(I18n.t('main_join'))
+        
+        # 更新托盘菜单
+        self._update_tray_menu()
     
     def _on_create_clicked(self):
         """创建连接按钮点击"""
+        # 延迟导入重量级模块
+        from ui.create_room_dialog import CreateRoomDialog
+        from ui.sync_window import SyncWindow
+        
         dialog = CreateRoomDialog(self)
         if dialog.exec_() == QDialog.Accepted:
             # 获取创建的房间信息
@@ -253,6 +306,10 @@ class MainWindow(QMainWindow):
     
     def _on_join_clicked(self):
         """加入连接按钮点击"""
+        # 延迟导入重量级模块
+        from ui.join_room_dialog import JoinRoomDialog
+        from ui.sync_window import SyncWindow
+        
         dialog = JoinRoomDialog(self)
         if dialog.exec_() == QDialog.Accepted:
             # 获取加入的房间信息

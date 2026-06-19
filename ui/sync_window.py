@@ -18,6 +18,7 @@ from network.server import SyncServer
 from network.client import SyncClient
 from sync.file_watcher import FileWatcher
 from room.room_manager import RoomManager
+from i18n import I18n
 
 
 class SyncWindow(QMainWindow):
@@ -83,26 +84,26 @@ class SyncWindow(QMainWindow):
         left_layout.setContentsMargins(0, 0, 0, 0)
         
         # 状态信息
-        mode_text = "主机端" if self.mode == 'host' else "连接端"
-        self.mode_label = QLabel(f"模式：{mode_text}")
+        mode_text = I18n.t('sync_role_host') if self.mode == 'host' else I18n.t('sync_role_client')
+        self.mode_label = QLabel(f"{I18n.t('common_mode')}：{mode_text}")
         self.mode_label.setStyleSheet(f"font-weight: bold; color: {COLORS['primary']}; font-size: 12px;")
         left_layout.addWidget(self.mode_label)
         
-        self.room_label = QLabel(f"房间：{self.room_code}")
+        self.room_label = QLabel(f"{I18n.t('sync_room')}{self.room_code}")
         self.room_label.setStyleSheet("font-size: 11px;")
         self.room_label.setCursor(QCursor(Qt.PointingHandCursor))
-        self.room_label.setToolTip("点击复制房间号")
+        self.room_label.setToolTip(I18n.t('sync_copy_room'))
         self.room_label.mousePressEvent = self._on_room_label_clicked
         left_layout.addWidget(self.room_label)
         
-        self.status_label = QLabel("状态：连接中...")
+        self.status_label = QLabel(f"{I18n.t('common_status')}：{I18n.t('common_connecting')}")
         self.status_label.setStyleSheet(f"color: {COLORS['text_secondary']}; font-size: 11px;")
         self.status_label.setWordWrap(True)
         left_layout.addWidget(self.status_label)
         
         # 在线连接端（仅主机端显示）
         if self.mode == 'host':
-            self.clients_count_label = QLabel("在线：0")
+            self.clients_count_label = QLabel(f"{I18n.t('common_online')}：0")
             self.clients_count_label.setStyleSheet("font-size: 11px;")
             left_layout.addWidget(self.clients_count_label)
         
@@ -116,20 +117,21 @@ class SyncWindow(QMainWindow):
         
         if self.mode == 'client':
             # 隐藏按钮 - 默认隐藏，验证成功后根据主机设置决定是否显示
-            self.hide_checkbox = QCheckBox("隐藏本机文件")
+            self.hide_checkbox = QCheckBox(I18n.t('sync_hide_files'))
             self.hide_checkbox.stateChanged.connect(self._on_hide_changed)
             self.hide_checkbox.hide()  # 默认隐藏
             options_layout.addWidget(self.hide_checkbox)
             
             # 全量同步按钮
-            self.sync_btn = AnimatedButton("全量同步")
+            self.sync_btn = AnimatedButton(I18n.t('sync_full_sync'))
             self.sync_btn.setObjectName("primaryBtn")
             self.sync_btn.setMinimumHeight(30)
             self.sync_btn.clicked.connect(self._request_full_sync)
             options_layout.addWidget(self.sync_btn)
         else:
+            peer_status = I18n.t('sync_peer_on') if self.allow_peer_sync else I18n.t('sync_peer_off')
             self.peer_sync_label = QLabel(
-                f"互相同步：{'开' if self.allow_peer_sync else '关'}"
+                f"{I18n.t('sync_peer_sync')}：{peer_status}"
             )
             self.peer_sync_label.setStyleSheet("font-size: 10px;")
             options_layout.addWidget(self.peer_sync_label)
@@ -138,7 +140,7 @@ class SyncWindow(QMainWindow):
         left_layout.addStretch()
         
         # 退出按钮
-        self.exit_btn = AnimatedButton("退出")
+        self.exit_btn = AnimatedButton(I18n.t('sync_exit'))
         self.exit_btn.setObjectName("dangerBtn")
         self.exit_btn.setMinimumHeight(30)
         self.exit_btn.clicked.connect(self.close)
@@ -155,13 +157,18 @@ class SyncWindow(QMainWindow):
         right_layout.setContentsMargins(0, 0, 0, 0)
         right_layout.setSpacing(5)
         
-        records_label = QLabel("同步记录")
+        records_label = QLabel(I18n.t('sync_records'))
         records_label.setStyleSheet(f"font-weight: bold; color: {COLORS['text_primary']}; font-size: 11px;")
         right_layout.addWidget(records_label)
         
         self.records_table = QTableWidget()
         self.records_table.setColumnCount(4)
-        self.records_table.setHorizontalHeaderLabels(["时间", "文件", "来源", "操作"])
+        self.records_table.setHorizontalHeaderLabels([
+            I18n.t('sync_time'),
+            I18n.t('sync_file_name'),
+            I18n.t('sync_source'),
+            I18n.t('sync_action')
+        ])
         
         # 设置表格样式
         header = self.records_table.horizontalHeader()
@@ -215,11 +222,11 @@ class SyncWindow(QMainWindow):
         )
         
         if success:
-            self.status_label.setText("状态：已启动")
+            self.status_label.setText(f"{I18n.t('common_status')}：{I18n.t('common_connected')}")
             self.status_label.setStyleSheet(f"color: {COLORS['success']}; font-size: 11px;")
             self._start_file_watcher()
         else:
-            self.status_label.setText("状态：启动失败")
+            self.status_label.setText(f"{I18n.t('common_status')}：{I18n.t('common_error')}")
             self.status_label.setStyleSheet(f"color: {COLORS['danger']}; font-size: 11px;")
     
     def _start_client(self):
@@ -243,7 +250,7 @@ class SyncWindow(QMainWindow):
         )
         
         if not success:
-            self.status_label.setText("状态：连接失败")
+            self.status_label.setText(f"{I18n.t('common_status')}：{I18n.t('common_error')}")
             self.status_label.setStyleSheet(f"color: {COLORS['danger']}; font-size: 11px;")
     
     def _start_file_watcher(self):
@@ -258,30 +265,30 @@ class SyncWindow(QMainWindow):
     
     def _on_client_connected(self, client_id):
         self._update_clients_count()
-        self._add_record(f"连接 {client_id}", client_id, "连接")
+        self._add_record(f"{I18n.t('common_connect')} {client_id}", client_id, I18n.t('common_connect'))
     
     def _on_client_disconnected(self, client_id):
         self._update_clients_count()
-        self._add_record(f"断开 {client_id}", client_id, "断开")
+        self._add_record(f"{I18n.t('common_disconnected')} {client_id}", client_id, I18n.t('common_disconnected'))
     
     def _update_clients_count(self):
         if self.server:
             clients = self.server.get_client_list()
-            self.clients_count_label.setText(f"在线：{len(clients)}")
+            self.clients_count_label.setText(f"{I18n.t('common_online')}：{len(clients)}")
     
     def _on_connected(self):
-        self.status_label.setText("状态：验证中...")
+        self.status_label.setText(f"{I18n.t('common_status')}：...")
     
     def _on_disconnected(self):
-        self.status_label.setText("状态：已断开")
+        self.status_label.setText(f"{I18n.t('common_status')}：{I18n.t('common_disconnected')}")
         self.status_label.setStyleSheet(f"color: {COLORS['danger']}; font-size: 11px;")
         if self.file_watcher:
             self.file_watcher.stop()
         # 不使用弹窗，改为日志记录
-        self._add_log("连接已断开")
+        self._add_log(I18n.t('sync_client_disconnected'))
     
     def _on_auth_success(self):
-        self.status_label.setText("状态：已连接")
+        self.status_label.setText(f"{I18n.t('common_status')}：{I18n.t('common_connected')}")
         self.status_label.setStyleSheet(f"color: {COLORS['success']}; font-size: 11px;")
         
         # 根据主机端设置决定是否显示隐藏按钮
@@ -295,12 +302,12 @@ class SyncWindow(QMainWindow):
         self._request_full_sync()
     
     def _on_auth_failed(self, message):
-        self.status_label.setText(f"验证失败")
+        self.status_label.setText(f"{I18n.t('common_status')}：{I18n.t('common_error')}")
         self.status_label.setStyleSheet(f"color: {COLORS['danger']}; font-size: 11px;")
-        self._add_log(f"验证失败: {message}")
+        self._add_log(f"{I18n.t('common_error')}: {message}")
         
         # 如果是密码错误，弹出密码输入对话框
-        if "密码错误" in message:
+        if "密码错误" in message or "Password" in message:
             self._show_password_dialog()
         else:
             self.close()
@@ -310,7 +317,7 @@ class SyncWindow(QMainWindow):
         from PyQt5.QtWidgets import QDialog, QVBoxLayout, QLabel, QLineEdit, QPushButton
         
         dialog = QDialog(self)
-        dialog.setWindowTitle("输入密码")
+        dialog.setWindowTitle(I18n.t('join_password_label').rstrip('：'))
         dialog.setMinimumWidth(250)
         dialog.setStyleSheet(STYLESHEET)
         
@@ -318,22 +325,22 @@ class SyncWindow(QMainWindow):
         layout.setSpacing(10)
         layout.setContentsMargins(15, 15, 15, 15)
         
-        label = QLabel("主机需要密码验证，请输入密码：")
+        label = QLabel(I18n.t('join_password_placeholder'))
         layout.addWidget(label)
         
         password_input = QLineEdit()
         password_input.setEchoMode(QLineEdit.Password)
-        password_input.setPlaceholderText("输入密码")
+        password_input.setPlaceholderText(I18n.t('join_password_label'))
         layout.addWidget(password_input)
         
         btn_layout = QHBoxLayout()
         
-        cancel_btn = QPushButton("取消")
+        cancel_btn = QPushButton(I18n.t('create_cancel'))
         cancel_btn.setObjectName("dangerBtn")
         cancel_btn.clicked.connect(dialog.reject)
         btn_layout.addWidget(cancel_btn)
         
-        confirm_btn = QPushButton("确认")
+        confirm_btn = QPushButton(I18n.t('common_sync'))
         confirm_btn.setObjectName("successBtn")
         confirm_btn.clicked.connect(dialog.accept)
         btn_layout.addWidget(confirm_btn)
@@ -387,14 +394,14 @@ class SyncWindow(QMainWindow):
         else:
             # 连接端发送目录创建到主机
             self.client.send_dir_create(dirpath)
-        self._add_record(dirpath, "本机", "创建目录")
+        self._add_record(dirpath, "本机", I18n.t('common_folder'))
     
     def _on_file_deleted(self, filepath):
         if self.mode == 'host':
             self.server.broadcast_delete(filepath)
         else:
             self.client.send_delete(filepath)
-        self._add_record(filepath, "本机", "删除")
+        self._add_record(filepath, "本机", I18n.t('common_delete'))
     
     def _sync_file(self, filepath):
         """同步文件"""
@@ -418,29 +425,28 @@ class SyncWindow(QMainWindow):
             # 连接端发送文件到主机
             print(f"[DEBUG] Sending file from client: {filepath}")
             self.client.send_file(filepath, hide_from_others=self.hide_from_others)
-        self._add_record(filepath, "本机", "上传")
+        self._add_record(filepath, "本机", I18n.t('common_send'))
     
     def _on_file_received(self, client_id, filename, hide_from_others):
         filepath = os.path.join(self.sync_folder, filename)
         # 添加到忽略列表，避免接收后的 modified 事件触发同步
         if self.file_watcher:
             self.file_watcher.add_ignore(filepath, duration=2.0)
-        self._add_record(filename, client_id, "接收")
-        if not hide_from_others and self.allow_peer_sync:
-            self.server.broadcast_file(filepath, exclude_client=client_id)
+        self._add_record(filename, client_id, I18n.t('common_receive'))
+        # 注意：文件转发逻辑已在 server._handle_file_receive 中处理，此处不再重复转发
     
     def _on_delete_received(self, client_id, filename):
-        self._add_record(filename, client_id, "删除")
+        self._add_record(filename, client_id, I18n.t('common_delete'))
     
     def _on_file_received_client(self, filename, size):
         filepath = os.path.join(self.sync_folder, filename)
         # 添加到忽略列表，避免接收后的 modified 事件触发同步
         if self.file_watcher:
             self.file_watcher.add_ignore(filepath, duration=2.0)
-        self._add_record(filename, "主机", "接收")
+        self._add_record(filename, I18n.t('sync_role_host'), I18n.t('common_receive'))
     
     def _on_delete_received_client(self, filename):
-        self._add_record(filename, "主机", "删除")
+        self._add_record(filename, I18n.t('sync_role_host'), I18n.t('common_delete'))
     
     def _on_hide_changed(self, state):
         self.hide_from_others = state == Qt.Checked
@@ -450,7 +456,7 @@ class SyncWindow(QMainWindow):
     def _request_full_sync(self):
         if self.client and self.client.authenticated:
             self.client.request_full_sync()
-            self._add_record("全量同步", "本机", "请求")
+            self._add_record(I18n.t('sync_full_sync'), "本机", I18n.t('common_sync'))
     
     def _add_record(self, filename, source, operation):
         from datetime import datetime
@@ -464,10 +470,10 @@ class SyncWindow(QMainWindow):
         self.records_table.setItem(row_count, 2, QTableWidgetItem(source))
         self.records_table.setItem(row_count, 3, QTableWidgetItem(operation))
         
-        if operation == "删除":
+        if operation == I18n.t('common_delete'):
             self.records_table.item(row_count, 3).setBackground(QColor(COLORS['danger']))
             self.records_table.item(row_count, 3).setForeground(QColor('white'))
-        elif operation == "接收":
+        elif operation == I18n.t('common_receive'):
             self.records_table.item(row_count, 3).setBackground(QColor(COLORS['success']))
             self.records_table.item(row_count, 3).setForeground(QColor('white'))
     
