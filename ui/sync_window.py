@@ -1,741 +1,558 @@
-# -*- coding: utf-8 -*-
 """
-LANSyncBox 同步状态界面 - 横向布局（紧凑版）
+同步窗口
 """
-
-import os
-import time
-from PyQt5.QtWidgets import (
-    QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, QLabel, QPushButton,
-    QTableWidget, QTableWidgetItem, QGroupBox, QCheckBox,
-    QHeaderView, QProgressBar, QDialog, QSplitter, QFrame, QApplication
+from PySide6.QtWidgets import (
+    QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, 
+    QLabel, QPushButton, QTextEdit, QFrame, QSplitter, QMessageBox,
+    QTableWidget, QTableWidgetItem, QProgressBar, QHeaderView
 )
-from PyQt5.QtCore import Qt, QTimer
-from PyQt5.QtGui import QColor, QCursor
+from PySide6.QtCore import Qt, Signal, QMetaObject, Q_ARG
+from PySide6.QtGui import QColor
+from pathlib import Path
 
-from config import STYLESHEET, COLORS, DEFAULT_PORT
-from ui.widgets import AnimatedButton
+from i18n import I18n
+from config import Config
+from ui.file_list_widget import FileListWidget
+from ui.widgets import AnimatedButton, BUTTON_STYLES
 from network.server import SyncServer
 from network.client import SyncClient
-from sync import SyncEngine, OpType
-from room.room_manager import RoomManager
-from i18n import I18n
+from network.discovery import RoomResponder
 
 
 class SyncWindow(QMainWindow):
-    """同步状态界面 - 横向布局（紧凑）"""
+    """同步窗口"""
     
-    def __init__(self, mode='host', room_code='', password='', sync_folder='',
-                 host_address='', parent=None):
-        super().__init__(parent)
-        self.setWindowTitle(f"LANSyncBox - {room_code}")
-        # 横向窗口：宽而矮（紧凑尺寸）
-        self.setMinimumSize(500, 280)
-        self.resize(600, 320)
-        self.setStyleSheet(STYLESHEET)
-        
-        self.mode = mode
+    # 信号
+    closed = Signal()
+    
+    def __init__(self, is_host: bool, room_code: str, password: str = "", host_address: str = ""):
+        super().__init__()
+        self.is_host = is_host
         self.room_code = room_code
         self.password = password
-        self.sync_folder = sync_folder
         self.host_address = host_address
         
+        # 获取房间文件夹
+        self.room_folder = Config.get_room_folder(room_code)
+        
         # 网络组件
-        self.server: SyncServer = None
-        self.client: SyncClient = None
-        
-        # 同步引擎（新架构）
-        self.sync_engine: SyncEngine = None
-        
-        # 文件监控（使用 watchdog，但事件传递给 SyncEngine）
-        self._file_observer = None
-        
-        # 隐藏状态
-        self.hide_from_others = False
-        
-        # 同步文件记录
-        self.sync_records = []
-        
-        # 后台线程控制
-        self._sync_threads = []  # 存储活跃的后台同步线程
-        self._stop_sync = False  # 停止同步标志
+        self.server = None
+        self.client = None
+        self.responder = None
         
         # 传输进度跟踪
         self._transfer_rows = {}  # 文件名 -> 行号映射
         
-        self._init_ui()
-        self._start_sync()
+        self.init_ui()
+        self.init_network()
     
-    def changeEvent(self, event):
-        """窗口状态改变事件"""
-        if event.type() == event.WindowStateChange:
-            if self.windowState() & Qt.WindowMinimized:
-                # 最小化时隐藏窗口（不显示左下角浮窗）
-                event.ignore()
-                self.hide()
-                return
-        super().changeEvent(event)
-    
-    def _init_ui(self):
-        """初始化UI - 横向布局"""
-        # 中央widget
+    def init_ui(self):
+        """初始化界面"""
+        # 窗口设置
+        self.setWindowTitle(f"{I18n.tr('app_name')} - {I18n.tr('room_info', code=self.room_code)}")
+        self.setMinimumSize(600, 400)
+        
+        # 创建中心部件
         central_widget = QWidget()
         self.setCentralWidget(central_widget)
         
-        # 主布局 - 横向
-        main_layout = QHBoxLayout(central_widget)
+        # 主布局
+        main_layout = QVBoxLayout(central_widget)
         main_layout.setSpacing(10)
         main_layout.setContentsMargins(10, 10, 10, 10)
         
-        # 左侧面板 - 状态和选项
-        left_panel = QWidget()
-        left_layout = QVBoxLayout(left_panel)
-        left_layout.setSpacing(6)
+        # 分隔器（左侧：信息+日志，右侧：文件列表）
+        splitter = QSplitter(Qt.Horizontal)
+        
+        # 左侧面板
+        left_widget = QWidget()
+        left_layout = QVBoxLayout(left_widget)
+        left_layout.setSpacing(10)
         left_layout.setContentsMargins(0, 0, 0, 0)
         
-        # 状态信息
-        mode_text = I18n.t('sync_role_host') if self.mode == 'host' else I18n.t('sync_role_client')
-        self.mode_label = QLabel(f"{I18n.t('common_mode')}：{mode_text}")
-        self.mode_label.setStyleSheet(f"font-weight: bold; color: {COLORS['primary']}; font-size: 12px;")
-        left_layout.addWidget(self.mode_label)
+        # 左侧上方：信息显示
+        info_frame = QFrame()
+        info_frame.setFrameShape(QFrame.StyledPanel)
+        info_layout = QVBoxLayout(info_frame)
+        info_layout.setContentsMargins(10, 10, 10, 10)
+        info_layout.setSpacing(8)
         
-        self.room_label = QLabel(f"{I18n.t('sync_room')}{self.room_code}")
-        self.room_label.setStyleSheet("font-size: 11px;")
-        self.room_label.setCursor(QCursor(Qt.PointingHandCursor))
-        self.room_label.setToolTip(I18n.t('sync_copy_room'))
-        self.room_label.mousePressEvent = self._on_room_label_clicked
-        left_layout.addWidget(self.room_label)
+        # 模式标签
+        mode_text = I18n.tr('host_mode') if self.is_host else I18n.tr('client_mode')
+        mode_label = QLabel(f"<b>{mode_text}</b>")
+        mode_label.setAlignment(Qt.AlignCenter)
+        info_layout.addWidget(mode_label)
         
-        self.status_label = QLabel(f"{I18n.t('common_status')}：{I18n.t('common_connecting')}")
-        self.status_label.setStyleSheet(f"color: {COLORS['text_secondary']}; font-size: 11px;")
-        self.status_label.setWordWrap(True)
-        left_layout.addWidget(self.status_label)
+        # 房间号
+        room_label = QLabel(I18n.tr('room_info', code=self.room_code))
+        room_label.setAlignment(Qt.AlignCenter)
+        info_layout.addWidget(room_label)
         
-        # 传输状态标签（显示当前传输的文件名）
-        self.transfer_status_label = QLabel("")
-        self.transfer_status_label.setStyleSheet(f"color: {COLORS['primary']}; font-size: 11px; font-weight: bold;")
-        self.transfer_status_label.setWordWrap(True)
-        self.transfer_status_label.hide()  # 默认隐藏
-        left_layout.addWidget(self.transfer_status_label)
+        # 连接状态（主机端显示连接数）
+        if self.is_host:
+            self.clients_label = QLabel(f"{I18n.tr('online_count')}: 0")
+            self.clients_label.setAlignment(Qt.AlignCenter)
+            info_layout.addWidget(self.clients_label)
         
-        # 进度条（用于大文件传输）
-        self.progress_bar = QProgressBar()
-        self.progress_bar.setMinimumHeight(20)
-        self.progress_bar.setStyleSheet("""
-            QProgressBar {
-                border: 1px solid #ced4da;
-                border-radius: 4px;
-                text-align: center;
-                background-color: #e9ecef;
-                font-size: 10px;
-            }
-            QProgressBar::chunk {
-                background-color: #51cf66;
-                border-radius: 3px;
-            }
-        """)
-        self.progress_bar.hide()  # 默认隐藏
-        left_layout.addWidget(self.progress_bar)
+        # 状态标签
+        self.status_label = QLabel(I18n.tr('status_synced'))
+        self.status_label.setStyleSheet("color: green;")
+        self.status_label.setAlignment(Qt.AlignCenter)
+        info_layout.addWidget(self.status_label)
         
-        # 在线连接端（仅主机端显示）
-        if self.mode == 'host':
-            self.clients_count_label = QLabel(f"{I18n.t('common_online')}：0")
-            self.clients_count_label.setStyleSheet("font-size: 11px;")
-            left_layout.addWidget(self.clients_count_label)
+        # 断开连接按钮
+        disconnect_btn = AnimatedButton(I18n.tr('disconnect'))
+        disconnect_btn.clicked.connect(self.on_disconnect)
+        disconnect_btn.setStyleSheet(BUTTON_STYLES['danger'])
+        info_layout.addWidget(disconnect_btn)
         
-        left_layout.addSpacing(8)
+        left_layout.addWidget(info_frame)
         
-        # 选项区域
-        options_frame = QFrame()
-        options_frame.setStyleSheet(f"QFrame {{ border: 1px solid {COLORS['border']}; border-radius: 4px; padding: 5px; }}")
-        options_layout = QVBoxLayout(options_frame)
-        options_layout.setSpacing(5)
+        # 左侧下方：同步记录表格
+        log_frame = QFrame()
+        log_frame.setFrameShape(QFrame.StyledPanel)
+        log_layout = QVBoxLayout(log_frame)
+        log_layout.setContentsMargins(10, 10, 10, 10)
+        log_layout.setSpacing(5)
         
-        if self.mode == 'client':
-            # 隐藏按钮 - 默认隐藏，验证成功后根据主机设置决定是否显示
-            self.hide_checkbox = QCheckBox(I18n.t('sync_hide_files'))
-            self.hide_checkbox.stateChanged.connect(self._on_hide_changed)
-            self.hide_checkbox.hide()  # 默认隐藏
-            options_layout.addWidget(self.hide_checkbox)
-            
-            # 全量同步按钮
-            self.sync_btn = AnimatedButton(I18n.t('sync_full_sync'))
-            self.sync_btn.setObjectName("primaryBtn")
-            self.sync_btn.setMinimumHeight(30)
-            self.sync_btn.clicked.connect(self._request_full_sync)
-            options_layout.addWidget(self.sync_btn)
+        # 日志标题
+        log_title = QLabel(I18n.tr('transfer_log'))
+        log_title.setStyleSheet("font-weight: bold;")
+        log_layout.addWidget(log_title)
         
-        left_layout.addWidget(options_frame)
-        left_layout.addStretch()
-        
-        # 退出按钮
-        self.exit_btn = AnimatedButton(I18n.t('sync_exit'))
-        self.exit_btn.setObjectName("dangerBtn")
-        self.exit_btn.setMinimumHeight(30)
-        self.exit_btn.clicked.connect(self.close)
-        left_layout.addWidget(self.exit_btn)
-        
-        # 设置左侧面板最小宽度
-        left_panel.setMinimumWidth(120)
-        left_panel.setMaximumWidth(150)
-        main_layout.addWidget(left_panel)
-        
-        # 右侧面板 - 同步记录表格
-        right_panel = QWidget()
-        right_layout = QVBoxLayout(right_panel)
-        right_layout.setContentsMargins(0, 0, 0, 0)
-        right_layout.setSpacing(5)
-        
-        records_label = QLabel(I18n.t('sync_records'))
-        records_label.setStyleSheet(f"font-weight: bold; color: {COLORS['text_primary']}; font-size: 11px;")
-        right_layout.addWidget(records_label)
-        
+        # 同步记录表格
         self.records_table = QTableWidget()
-        self.records_table.setColumnCount(5)
+        self.records_table.setColumnCount(2)
         self.records_table.setHorizontalHeaderLabels([
-            I18n.t('sync_time'),
-            I18n.t('sync_file_name'),
-            I18n.t('sync_source'),
-            I18n.t('sync_action'),
-            I18n.t('sync_progress')  # 新增进度列
+            I18n.tr('log_action'),
+            I18n.tr('log_info')
         ])
         
         # 设置表格样式
         header = self.records_table.horizontalHeader()
         header.setSectionResizeMode(0, QHeaderView.Fixed)
         header.setSectionResizeMode(1, QHeaderView.Stretch)
-        header.setSectionResizeMode(2, QHeaderView.Fixed)
-        header.setSectionResizeMode(3, QHeaderView.Fixed)
-        header.setSectionResizeMode(4, QHeaderView.Fixed)  # 进度列固定
         
         self.records_table.setColumnWidth(0, 60)
-        self.records_table.setColumnWidth(2, 70)
-        self.records_table.setColumnWidth(3, 60)  # 操作列宽度调整为60
-        self.records_table.setColumnWidth(4, 150)  # 进度列宽度150
         
         self.records_table.setAlternatingRowColors(True)
         self.records_table.setEditTriggers(QTableWidget.NoEditTriggers)
         self.records_table.setSelectionBehavior(QTableWidget.SelectRows)
+        self.records_table.verticalHeader().setVisible(False)
+        self.records_table.setShowGrid(False)
+        self.records_table.verticalHeader().setDefaultSectionSize(25)
+        self.records_table.setStyleSheet("""
+            QTableWidget {
+                border: none;
+                gridline-color: transparent;
+            }
+            QTableWidget::item {
+                padding: 2px;
+                border-bottom: 1px solid #e9ecef;
+            }
+            QHeaderView::section {
+                font-weight: bold;
+                padding: 4px;
+                border: none;
+                border-bottom: 1px solid #dee2e6;
+            }
+        """)
         
-        right_layout.addWidget(self.records_table)
+        log_layout.addWidget(self.records_table)
         
-        main_layout.addWidget(right_panel, stretch=1)
+        left_layout.addWidget(log_frame)
+        
+        splitter.addWidget(left_widget)
+        
+        # 右侧：文件列表
+        self.file_list = FileListWidget(self.room_folder)
+        # 连接文件操作信号
+        self.file_list.file_added.connect(self.on_file_added)
+        self.file_list.file_deleted.connect(self.on_file_deleted)
+        self.file_list.file_renamed.connect(self.on_file_renamed)
+        splitter.addWidget(self.file_list)
+        
+        # 设置分隔器比例
+        splitter.setSizes([280, 720])
+        
+        main_layout.addWidget(splitter)
+        
+        # 底部状态栏（行高减小）
+        bottom_frame = QFrame()
+        bottom_frame.setFixedHeight(28)
+        bottom_layout = QHBoxLayout(bottom_frame)
+        bottom_layout.setContentsMargins(10, 2, 10, 2)
+        
+        # 同步文件夹路径
+        folder_label = QLabel(I18n.tr('sync_folder_path', path=str(self.room_folder)))
+        bottom_layout.addWidget(folder_label)
+        
+        bottom_layout.addStretch()
+        
+        main_layout.addWidget(bottom_frame)
     
-    def _on_room_label_clicked(self, event):
-        """点击房间号标签复制房间号"""
-        clipboard = QApplication.clipboard()
-        clipboard.setText(self.room_code)
-        # 不显示弹窗，只打印日志
-        self._add_log(f"房间号 {self.room_code} 已复制到剪贴板")
-    
-    def _start_sync(self):
-        """开始同步"""
-        if self.mode == 'host':
-            self._start_host()
-        else:
-            self._start_client()
-    
-    def _start_host(self):
-        """启动主机端"""
-        self.server = SyncServer(self)
-        self.server.client_connected.connect(self._on_client_connected)
-        self.server.client_disconnected.connect(self._on_client_disconnected)
-        self.server.file_received.connect(self._on_file_received)
-        self.server.delete_received.connect(self._on_delete_received)
-        self.server.transfer_started.connect(self._on_transfer_started)
-        self.server.transfer_progress.connect(self._on_transfer_progress)
-        self.server.transfer_finished.connect(self._on_transfer_finished)
-        self.server.log_message.connect(self._add_log)
-        self.server.error_occurred.connect(self._show_error)
-        
-        success = self.server.start(
-            self.room_code,
-            self.password,
-            self.sync_folder,
-            DEFAULT_PORT
-        )
-        
-        if success:
-            self.status_label.setText(f"{I18n.t('common_status')}：{I18n.t('common_connected')}")
-            self.status_label.setStyleSheet(f"color: {COLORS['success']}; font-size: 11px;")
-            self._start_file_watcher()
-        else:
-            self.status_label.setText(f"{I18n.t('common_status')}：{I18n.t('common_error')}")
-            self.status_label.setStyleSheet(f"color: {COLORS['danger']}; font-size: 11px;")
-    
-    def _start_client(self):
-        """启动连接端"""
-        self.client = SyncClient(self)
-        self.client.connected.connect(self._on_connected)
-        self.client.disconnected.connect(self._on_disconnected)
-        self.client.auth_success.connect(self._on_auth_success)
-        self.client.auth_failed.connect(self._on_auth_failed)
-        self.client.file_received.connect(self._on_file_received_client)
-        self.client.file_receiving.connect(self._on_file_receiving)  # 新增：提前添加到忽略列表
-        self.client.delete_received.connect(self._on_delete_received_client)
-        self.client.transfer_started.connect(self._on_transfer_started)
-        self.client.transfer_progress.connect(self._on_transfer_progress)
-        self.client.transfer_finished.connect(self._on_transfer_finished)
-        self.client.log_message.connect(self._add_log)
-        self.client.error_occurred.connect(self._show_error)
-        
-        success = self.client.connect_to_server(
-            self.host_address,
-            DEFAULT_PORT,
-            self.room_code,
-            self.password,
-            self.sync_folder
-        )
-        
-        if not success:
-            self.status_label.setText(f"{I18n.t('common_status')}：{I18n.t('common_error')}")
-            self.status_label.setStyleSheet(f"color: {COLORS['danger']}; font-size: 11px;")
-    
-    def _start_file_watcher(self):
-        """启动文件监控（使用新架构）"""
-        # 1. 初始化同步引擎
-        self.sync_engine = SyncEngine(self)
-        self.sync_engine.initialize(self.sync_folder, f"{self.mode}_{self.room_code}")
-        
-        # 连接同步引擎信号
-        self.sync_engine.operation_ready.connect(self._on_operation_ready)
-        self.sync_engine.conflict_detected.connect(self._on_conflict_detected)
-        self.sync_engine.error_occurred.connect(self._show_error)
-        
-        # 设置网络发送回调
-        self.sync_engine.set_send_operation_callback(self._send_operation_to_network)
-        
-        # 2. 启动文件监控（使用 watchdog）
-        self._start_file_observer()
-    
-    def _start_file_observer(self):
-        """启动 watchdog 文件监控"""
-        from watchdog.observers import Observer
-        from watchdog.events import FileSystemEventHandler, FileSystemEvent
-        
-        class EventHandler(FileSystemEventHandler):
-            def __init__(self, window):
-                self.window = window
+    def init_network(self):
+        """初始化网络"""
+        if self.is_host:
+            # 主机端：启动服务器和响应服务
+            self.server = SyncServer(self.room_code, self.password)
+            self.server.client_connected.connect(self.on_client_connected)
+            self.server.client_disconnected.connect(self.on_client_disconnected)
+            self.server.error_occurred.connect(self.on_network_error)
+            self.server.file_receive_start.connect(self.on_file_receive_start)
+            self.server.file_receive_progress.connect(self.on_file_receive_progress)
+            self.server.file_received.connect(self.on_remote_file_received)
+            self.server.file_deleted.connect(self.on_remote_file_deleted)
+            self.server.log_message.connect(self.add_log_from_network)
             
-            def on_created(self, event):
-                if not event.is_directory:
-                    rel_path = os.path.relpath(event.src_path, self.window.sync_folder)
-                    self.window.sync_engine.on_file_event('created', rel_path)
-                else:
-                    rel_path = os.path.relpath(event.src_path, self.window.sync_folder)
-                    self.window.sync_engine.on_file_event('created', rel_path, is_dir=True)
-            
-            def on_modified(self, event):
-                if not event.is_directory:
-                    rel_path = os.path.relpath(event.src_path, self.window.sync_folder)
-                    self.window.sync_engine.on_file_event('modified', rel_path)
-            
-            def on_deleted(self, event):
-                rel_path = os.path.relpath(event.src_path, self.window.sync_folder)
-                is_dir = event.is_directory
-                self.window.sync_engine.on_file_event('deleted', rel_path, is_dir=is_dir)
-            
-            def on_moved(self, event):
-                # 重命名：触发删除旧路径 + 创建新路径
-                old_rel_path = os.path.relpath(event.src_path, self.window.sync_folder)
-                new_rel_path = os.path.relpath(event.dest_path, self.window.sync_folder)
-                self.window.sync_engine.on_file_event('deleted', old_rel_path)
-                self.window.sync_engine.on_file_event('created', new_rel_path)
-        
-        self._file_observer = Observer()
-        handler = EventHandler(self)
-        self._file_observer.schedule(handler, self.sync_folder, recursive=True)
-        self._file_observer.start()
-    
-    def _stop_file_observer(self):
-        """停止文件监控"""
-        if self._file_observer:
-            self._file_observer.stop()
-            self._file_observer.join()
-            self._file_observer = None
-    
-    def _on_operation_ready(self, op):
-        """操作准备发送"""
-        # 这个信号已经被 _send_operation_to_network 回调处理
-        pass
-    
-    def _send_operation_to_network(self, op):
-        """发送操作到网络"""
-        if op.op_type in (OpType.CREATE, OpType.MODIFY):
-            # 发送文件
-            filepath = os.path.join(self.sync_folder, op.path)
-            if os.path.exists(filepath):
-                if self.mode == 'host':
-                    self.server.broadcast_file(filepath, exclude_client=None, hide_from_others=False)
-                else:
-                    hide = self.hide_checkbox.isChecked() if self.hide_checkbox.isVisible() else False
-                    self.client.send_file(filepath, hide_from_others=hide)
-                self._add_record(op.path, "本机", I18n.t('common_sync'))
-        
-        elif op.op_type == OpType.DELETE:
-            # 发送删除指令（传递绝对路径）
-            filepath = os.path.join(self.sync_folder, op.path)
-            if self.mode == 'host':
-                self.server.broadcast_delete(filepath)
+            if self.server.start():
+                self._add_record(f"端口: {Config.DEFAULT_PORT}", "启动", "")
+                
+                # 启动房间响应服务
+                self.responder = RoomResponder(self)
+                if self.responder.start(self.room_code):
+                    pass
             else:
-                self.client.send_delete(filepath)
-            self._add_record(op.path, "本机", I18n.t('common_delete'))
+                self._add_record("启动失败", "错误", "")
+        else:
+            # 客户端：连接到服务器
+            self.client = SyncClient(self.room_code, self.password)
+            self.client.connected.connect(self.on_connected)
+            self.client.disconnected.connect(self.on_disconnected)
+            self.client.error_occurred.connect(self.on_network_error)
+            self.client.file_receive_start.connect(self.on_file_receive_start)
+            self.client.file_receive_progress.connect(self.on_file_receive_progress)
+            self.client.file_received.connect(self.on_remote_file_received)
+            self.client.file_deleted.connect(self.on_remote_file_deleted)
+            self.client.log_message.connect(self.add_log_from_network)
+            
+            # 连接到服务器
+            host = self.host_address or "127.0.0.1"
+            if self.client.connect_to_server(host):
+                self._add_record(f"{host}:{Config.DEFAULT_PORT}", "连接", "")
+            else:
+                self._add_record("连接失败", "错误", "")
     
-    def _on_conflict_detected(self, op):
-        """冲突检测"""
-        self._add_log(f"冲突检测: {op.path}")
-        # 简化处理：接受远程操作（覆盖本地）
-        # 实际应用中可以提示用户选择
+    def add_log_from_network(self, message: str):
+        """从网络层添加日志（线程安全）"""
+        # 使用 QMetaObject.invokeMethod 确保在主线程执行
+        QMetaObject.invokeMethod(self, "add_log", Qt.QueuedConnection,
+                                 Q_ARG(str, "网络"), Q_ARG(str, message))
     
-    def _on_client_connected(self, client_id):
+    def on_client_connected(self, client_id: str):
+        """客户端连接"""
+        self._add_record(client_id, "连接", "")
         self._update_clients_count()
-        self._add_record(f"{I18n.t('common_connect')} {client_id}", client_id, I18n.t('common_connect'))
     
-    def _on_client_disconnected(self, client_id):
+    def on_client_disconnected(self, client_id: str):
+        """客户端断开"""
+        self._add_record(client_id, "断开", "")
         self._update_clients_count()
-        self._add_record(f"{I18n.t('common_disconnected')} {client_id}", client_id, I18n.t('common_disconnected'))
     
     def _update_clients_count(self):
-        if self.server:
-            clients = self.server.get_client_list()
-            self.clients_count_label.setText(f"{I18n.t('common_online')}：{len(clients)}")
+        """更新连接数"""
+        if self.is_host and self.server:
+            with self.server._lock:
+                count = len([c for c in self.server.clients.values() if c['authenticated']])
+            self.clients_label.setText(f"{I18n.tr('online_count')}: {count}")
     
-    def _on_connected(self):
-        self.status_label.setText(f"{I18n.t('common_status')}：...")
+    def on_connected(self):
+        """连接成功"""
+        self.status_label.setText(I18n.tr('status_synced'))
+        self.status_label.setStyleSheet("color: green;")
     
-    def _on_disconnected(self):
-        self.status_label.setText(f"{I18n.t('common_status')}：{I18n.t('common_disconnected')}")
-        self.status_label.setStyleSheet(f"color: {COLORS['danger']}; font-size: 11px;")
-        self._stop_file_observer()
-        # 不使用弹窗，改为日志记录
-        self._add_log(I18n.t('sync_client_disconnected'))
+    def on_disconnected(self):
+        """断开连接"""
+        self._add_record("", "断开", "")
+        self.status_label.setText(I18n.tr('status_disconnected'))
+        self.status_label.setStyleSheet("color: red;")
     
-    def _on_auth_success(self):
-        self.status_label.setText(f"{I18n.t('common_status')}：{I18n.t('common_connected')}")
-        self.status_label.setStyleSheet(f"color: {COLORS['success']}; font-size: 11px;")
+    def on_network_error(self, error: str):
+        """网络错误"""
+        self.add_log("错误", error)
+    
+    def on_file_receive_start(self, filename: str):
+        """开始接收远程文件（线程安全）"""
+        # 使用 QMetaObject.invokeMethod 确保在主线程执行
+        QMetaObject.invokeMethod(self, "_do_file_receive_start", Qt.QueuedConnection,
+                                 Q_ARG(str, filename))
+    
+    def _do_file_receive_start(self, filename: str):
+        """实际执行：开始接收远程文件"""
+        # 标记文件正在同步，避免循环同步
+        file_path = str(self.room_folder / filename)
+        self.file_list.mark_syncing(file_path)
         
-        self._start_file_watcher()
-        self._request_full_sync()
+        # 在表格中添加进度条
+        self._add_transfer_progress(filename, 0, 0)
     
-    def _on_auth_failed(self, message):
-        self.status_label.setText(f"{I18n.t('common_status')}：{I18n.t('common_error')}")
-        self.status_label.setStyleSheet(f"color: {COLORS['danger']}; font-size: 11px;")
-        self._add_log(f"{I18n.t('common_error')}: {message}")
-        
-        # 如果是密码错误，弹出密码输入对话框
-        if "密码错误" in message or "Password" in message:
-            self._show_password_dialog()
-        else:
-            self.close()
+    def on_file_receive_progress(self, filename: str, current: int, total: int):
+        """文件接收进度（线程安全）"""
+        # 使用 QMetaObject.invokeMethod 确保在主线程执行
+        QMetaObject.invokeMethod(self, "_do_file_receive_progress", Qt.QueuedConnection,
+                                 Q_ARG(str, filename), Q_ARG(int, current), Q_ARG(int, total))
     
-    def _show_password_dialog(self):
-        """显示密码输入对话框"""
-        from PyQt5.QtWidgets import QDialog, QVBoxLayout, QLabel, QLineEdit, QPushButton
-        
-        dialog = QDialog(self)
-        dialog.setWindowTitle(I18n.t('join_password_label').rstrip('：'))
-        dialog.setMinimumWidth(250)
-        dialog.setStyleSheet(STYLESHEET)
-        
-        layout = QVBoxLayout()
-        layout.setSpacing(10)
-        layout.setContentsMargins(15, 15, 15, 15)
-        
-        label = QLabel(I18n.t('join_password_placeholder'))
-        layout.addWidget(label)
-        
-        password_input = QLineEdit()
-        password_input.setEchoMode(QLineEdit.Password)
-        password_input.setPlaceholderText(I18n.t('join_password_label'))
-        layout.addWidget(password_input)
-        
-        btn_layout = QHBoxLayout()
-        
-        cancel_btn = QPushButton(I18n.t('create_cancel'))
-        cancel_btn.setObjectName("dangerBtn")
-        cancel_btn.clicked.connect(dialog.reject)
-        btn_layout.addWidget(cancel_btn)
-        
-        confirm_btn = QPushButton(I18n.t('common_sync'))
-        confirm_btn.setObjectName("successBtn")
-        confirm_btn.clicked.connect(dialog.accept)
-        btn_layout.addWidget(confirm_btn)
-        
-        layout.addLayout(btn_layout)
-        dialog.setLayout(layout)
-        
-        if dialog.exec_() == QDialog.Accepted:
-            password = password_input.text()
-            if password:
-                # 重新连接
-                self._add_log(f"重新连接，使用新密码")
-                self.client.disconnect()
-                # 重新连接使用新密码
-                self.client.connect_to_server(
-                    self.host_address,
-                    DEFAULT_PORT,
-                    self.room_code,
-                    password,
-                    self.sync_folder
-                )
-            else:
-                self.close()
-        else:
-            self.close()
+    def _do_file_receive_progress(self, filename: str, current: int, total: int):
+        """实际执行：更新文件接收进度"""
+        self._update_transfer_progress(filename, current, total)
     
-    def _on_file_received(self, client_id, filename, hide_from_others):
-        filepath = os.path.join(self.sync_folder, filename)
-        rel_path = filename
-        # 取消标记文件正在同步（接收完成）
-        if self.sync_engine:
-            # 标准化路径：统一使用正斜杠
-            normalized_path = filename.replace('\\', '/')
-            self.sync_engine.unmark_syncing(normalized_path)
-        self._add_record(filename, client_id, I18n.t('common_receive'))
-        # 注意：文件转发逻辑已在 server._handle_file_receive 中处理，此处不再重复转发
+    def on_remote_file_received(self, filename: str):
+        """收到远程文件（线程安全）"""
+        # 使用 QMetaObject.invokeMethod 确保在主线程执行
+        QMetaObject.invokeMethod(self, "_do_remote_file_received", Qt.QueuedConnection,
+                                 Q_ARG(str, filename))
     
-    def _on_delete_received(self, client_id, filename):
-        # 标记文件正在同步（删除）
-        if self.sync_engine:
-            # 标准化路径：统一使用正斜杠
-            normalized_path = filename.replace('\\', '/')
-            self.sync_engine.mark_syncing(normalized_path)
-            # 删除完成后立即取消标记（DELETE 操作不需要等待传输）
-            self.sync_engine.unmark_syncing(normalized_path)
-        self._add_record(filename, client_id, I18n.t('common_delete'))
-    
-    def _on_file_received_client(self, filename, size):
-        filepath = os.path.join(self.sync_folder, filename)
-        rel_path = filename
-        # 取消标记文件正在同步（接收完成）
-        if self.sync_engine:
-            # 标准化路径：统一使用正斜杠
-            normalized_path = filename.replace('\\', '/')
-            self.sync_engine.unmark_syncing(normalized_path)
-        self._add_record(filename, I18n.t('sync_role_host'), I18n.t('common_receive'))
-    
-    def _on_file_receiving(self, filepath):
-        """文件开始接收时标记正在同步"""
-        if self.sync_engine:
-            rel_path = os.path.relpath(filepath, self.sync_folder)
-            # 标准化路径：统一使用正斜杠
-            normalized_path = rel_path.replace('\\', '/')
-            self.sync_engine.mark_syncing(normalized_path)
-    
-    def _on_delete_received_client(self, filename):
-        # 标记文件正在同步（删除）
-        if self.sync_engine:
-            # 标准化路径：统一使用正斜杠
-            normalized_path = filename.replace('\\', '/')
-            self.sync_engine.mark_syncing(normalized_path)
-            # 删除完成后立即取消标记（DELETE 操作不需要等待传输）
-            self.sync_engine.unmark_syncing(normalized_path)
-        self._add_record(filename, I18n.t('sync_role_host'), I18n.t('common_delete'))
-    
-    def _on_hide_changed(self, state):
-        self.hide_from_others = state == Qt.Checked
-        if self.client:
-            self.client.update_hide_status(self.hide_from_others)
-    
-    def _request_full_sync(self):
-        if self.client and self.client.authenticated:
-            self.client.request_full_sync()
-            self._add_record(I18n.t('sync_full_sync'), "本机", I18n.t('common_sync'))
-    
-    def _add_record(self, filename, source, operation):
-        from datetime import datetime
-        time_str = datetime.now().strftime("%H:%M:%S")
+    def _do_remote_file_received(self, filename: str):
+        """实际执行：收到远程文件"""
+        # 取消同步标记
+        file_path = str(self.room_folder / filename)
+        self.file_list.unmark_syncing(file_path)
         
+        # 更新进度为完成
+        self._finish_transfer_progress(filename)
+        
+        # 刷新文件列表（不会触发同步信号）
+        self.file_list.refresh()
+        
+        self.status_label.setText(I18n.tr('status_synced'))
+        self.status_label.setStyleSheet("color: green;")
+    
+    def on_remote_file_deleted(self, filename: str):
+        """远程文件已删除（线程安全）"""
+        # 使用 QMetaObject.invokeMethod 确保在主线程执行
+        QMetaObject.invokeMethod(self, "_do_remote_file_deleted", Qt.QueuedConnection,
+                                 Q_ARG(str, filename))
+    
+    def _do_remote_file_deleted(self, filename: str):
+        """实际执行：远程文件已删除"""
+        # 刷新文件列表
+        self.file_list.refresh()
+        
+        from pathlib import Path
+        self._add_record(Path(filename).name, "删除", "")
+        self.status_label.setText(I18n.tr('status_synced'))
+        self.status_label.setStyleSheet("color: green;")
+    
+    def _add_record(self, content: str, action: str, status: str = ""):
+        """添加同步记录
+        
+        Args:
+            content: 内容（文件名/IP等）
+            action: 操作（连接、添加、删除等）
+            status: 状态/进度（可选）
+        """
+        from pathlib import Path
+        
+        # 组合内容和状态
+        display_text = content
+        if status:
+            display_text = f"{content} - {status}"
+        
+        # 截断显示文本
+        if len(display_text) > 40:
+            display_text = display_text[:37] + "..."
+        
+        # 添加新行
         row_count = self.records_table.rowCount()
         self.records_table.insertRow(row_count)
-        
-        self.records_table.setItem(row_count, 0, QTableWidgetItem(time_str))
-        self.records_table.setItem(row_count, 1, QTableWidgetItem(filename))
-        self.records_table.setItem(row_count, 2, QTableWidgetItem(source))
-        self.records_table.setItem(row_count, 3, QTableWidgetItem(operation))
-        self.records_table.setItem(row_count, 4, QTableWidgetItem(""))  # 进度列
-        
-        if operation == I18n.t('common_delete'):
-            self.records_table.item(row_count, 3).setBackground(QColor(COLORS['danger']))
-            self.records_table.item(row_count, 3).setForeground(QColor('white'))
-        elif operation == I18n.t('common_receive'):
-            self.records_table.item(row_count, 3).setBackground(QColor(COLORS['success']))
-            self.records_table.item(row_count, 3).setForeground(QColor('white'))
-    
-    def _add_log(self, message):
-        print(f"[LOG] {message}")
-    
-    def _show_error(self, message):
-        print(f"[ERROR] {message}")
-    
-    def _on_exit(self):
-        """清理资源（不关闭窗口）"""
-        # 设置停止标志，停止所有后台同步线程
-        self._stop_sync = True
-        
-        # 等待后台线程结束（最多等待2秒）
-        import time
-        for thread in self._sync_threads:
-            if thread.is_alive():
-                thread.join(timeout=0.5)
-        
-        self._stop_file_observer()
-        
-        if self.mode == 'host':
-            if self.server:
-                self.server.stop()
-            room_manager = RoomManager()
-            room_manager.close_room(self.room_code)
-        else:
-            if self.client:
-                self.client.disconnect()
-    
-    def _on_transfer_started(self, filename: str, file_size: int, direction: str):
-        """处理传输开始"""
-        
-        # 显示传输状态标签
-        direction_text = "发送中" if direction == 'send' else "接收中"
-        self.transfer_status_label.setText(f"{direction_text}: {filename}")
-        self.transfer_status_label.show()
-        
-        # 如果已存在该文件的传输记录，先清理旧的
-        if filename in self._transfer_rows:
-            old_row = self._transfer_rows[filename]
-            # 移除旧的进度条
-            self.records_table.setCellWidget(old_row, 4, None)
-            # 更新旧行的状态为"重新传输"
-            self.records_table.setItem(old_row, 3, QTableWidgetItem("重新传输"))
-            self.records_table.item(old_row, 3).setBackground(QColor(COLORS['warning'] if 'warning' in COLORS else COLORS['primary']))
-            self.records_table.item(old_row, 3).setForeground(QColor('white'))
-            del self._transfer_rows[filename]
-        
-        # 在表格中添加一行显示进度条
-        from PyQt5.QtWidgets import QProgressBar
-        from datetime import datetime
-        
-        row_count = self.records_table.rowCount()
-        self.records_table.insertRow(row_count)
-        
-        # 时间
-        time_str = datetime.now().strftime("%H:%M:%S")
-        self.records_table.setItem(row_count, 0, QTableWidgetItem(time_str))
-        
-        # 文件名
-        self.records_table.setItem(row_count, 1, QTableWidgetItem(filename))
-        
-        # 来源
-        source = "本机" if direction == 'send' else "远程"
-        self.records_table.setItem(row_count, 2, QTableWidgetItem(source))
         
         # 操作
-        self.records_table.setItem(row_count, 3, QTableWidgetItem(direction_text))
-        self.records_table.item(row_count, 3).setBackground(QColor(COLORS['primary']))
-        self.records_table.item(row_count, 3).setForeground(QColor('white'))
+        action_item = QTableWidgetItem(action)
+        action_item.setTextAlignment(Qt.AlignCenter)
+        self.records_table.setItem(row_count, 0, action_item)
         
-        # 进度条
+        # 内容
+        content_item = QTableWidgetItem(display_text)
+        content_item.setToolTip(content)
+        self.records_table.setItem(row_count, 1, content_item)
+        
+        # 滚动到底部
+        self.records_table.scrollToBottom()
+        
+        # 限制记录数量
+        while self.records_table.rowCount() > 100:
+            self.records_table.removeRow(0)
+    
+    def _add_transfer_progress(self, filename: str, current: int, total: int):
+        """添加传输进度条"""
+        from pathlib import Path
+        
+        # 截断文件名
+        display_name = Path(filename).name
+        if len(display_name) > 25:
+            display_name = display_name[:22] + "..."
+        
+        # 添加新行
+        row_count = self.records_table.rowCount()
+        self.records_table.insertRow(row_count)
+        
+        # 操作
+        action_item = QTableWidgetItem("接收")
+        action_item.setTextAlignment(Qt.AlignCenter)
+        self.records_table.setItem(row_count, 0, action_item)
+        
+        # 进度条（放在第二列）
         progress_bar = QProgressBar()
-        progress_bar.setMinimumHeight(20)
+        progress_bar.setMinimum(0)
+        progress_bar.setMaximum(100)
+        progress_bar.setValue(0)
+        progress_bar.setTextVisible(True)
+        progress_bar.setFormat(f"{display_name} - 0%")
+        progress_bar.setAlignment(Qt.AlignLeft | Qt.AlignVCenter)
         progress_bar.setStyleSheet("""
             QProgressBar {
-                border: 1px solid #ced4da;
-                border-radius: 4px;
-                text-align: center;
-                background-color: #e9ecef;
-                font-size: 10px;
+                border: none;
+                text-align: left;
+                background-color: transparent;
             }
             QProgressBar::chunk {
                 background-color: #51cf66;
-                border-radius: 3px;
             }
         """)
-        progress_bar.setValue(0)
-        if file_size > 0:
-            size_mb = file_size / 1024 / 1024
-            progress_bar.setFormat(f"0% (0/{size_mb:.1f} MB)")
-        else:
-            progress_bar.setFormat(f"0% (0/未知大小)")
-        self.records_table.setCellWidget(row_count, 4, progress_bar)
+        self.records_table.setCellWidget(row_count, 1, progress_bar)
         
         # 记录行号
         self._transfer_rows[filename] = row_count
         
-        # 隐藏左侧的进度条（现在显示在表格中）
-        self.progress_bar.hide()
+        # 滚动到底部
+        self.records_table.scrollToBottom()
     
-    def _on_transfer_progress(self, filename: str, current: int, total: int):
-        """处理传输进度"""
+    def _update_transfer_progress(self, filename: str, current: int, total: int):
+        """更新传输进度"""
         if filename in self._transfer_rows:
             row = self._transfer_rows[filename]
-            progress_bar = self.records_table.cellWidget(row, 4)
+            progress_bar = self.records_table.cellWidget(row, 1)
             if progress_bar and total > 0:
                 progress_percent = int(current / total * 100)
+                progress_bar.setValue(progress_percent)
+                
+                # 显示文件名和进度
+                from pathlib import Path
+                display_name = Path(filename).name
+                if len(display_name) > 25:
+                    display_name = display_name[:22] + "..."
+                
+                # 显示大小（简化格式）
                 current_mb = current / 1024 / 1024
                 total_mb = total / 1024 / 1024
-                progress_bar.setValue(progress_percent)
-                progress_bar.setFormat(f"{progress_percent}% ({current_mb:.1f}/{total_mb:.1f} MB)")
+                if total_mb >= 1:
+                    progress_bar.setFormat(f"{display_name} - {progress_percent}% ({current_mb:.1f}/{total_mb:.1f}M)")
+                else:
+                    current_kb = current / 1024
+                    total_kb = total / 1024
+                    progress_bar.setFormat(f"{display_name} - {progress_percent}% ({current_kb:.0f}/{total_kb:.0f}K)")
     
-    def _on_transfer_finished(self, filename: str, direction: str):
-        """处理传输结束"""
-        # 隐藏传输状态标签
-        QTimer.singleShot(2000, self.transfer_status_label.hide)
-        
-        rel_path = filename
-        
-        # 解锁路径（发送端）
-        if direction == 'send' and self.sync_engine:
-            self.sync_engine.unlock_path(rel_path)
-        
-        # 更新文件哈希值缓存（仅对发送方向，接收方向已通过 file_hash_update 信号更新）
-        if direction == 'send':
-            filepath = os.path.join(self.sync_folder, filename)
-            if self.sync_engine and os.path.exists(filepath):
-                hash_value = self.sync_engine._file_hash_cache.calculate_hash_for_path(rel_path)
-                size, mtime = self.sync_engine._file_hash_cache.get_file_size_mtime(rel_path)
-                self.sync_engine._file_hash_cache.update_file_info(
-                    rel_path,
-                    hash_value=hash_value,
-                    size=size,
-                    mtime=mtime,
-                    last_sync_time=time.time()
-                )
-        
-        # 更新表格中的操作状态
+    def _finish_transfer_progress(self, filename: str):
+        """完成传输进度"""
         if filename in self._transfer_rows:
             row = self._transfer_rows[filename]
             
-            # 更新操作列
-            operation_text = "已发送" if direction == 'send' else "已接收"
-            self.records_table.setItem(row, 3, QTableWidgetItem(operation_text))
-            self.records_table.item(row, 3).setBackground(QColor(COLORS['success']))
-            self.records_table.item(row, 3).setForeground(QColor('white'))
+            # 移除进度条，显示完成状态
+            from pathlib import Path
+            display_name = Path(filename).name
+            if len(display_name) > 25:
+                display_name = display_name[:22] + "..."
             
-            # 移除进度条（显示完成状态）
-            QTimer.singleShot(2000, lambda: self._remove_progress_bar(row))
+            self.records_table.setCellWidget(row, 1, None)
+            status_item = QTableWidgetItem(f"{display_name} - 完成")
+            status_item.setForeground(QColor("#51cf66"))
+            self.records_table.setItem(row, 1, status_item)
             
-            # 清除跟踪记录
+            # 清除记录
             del self._transfer_rows[filename]
     
-    def _remove_progress_bar(self, row: int):
-        """移除进度条"""
-        if row < self.records_table.rowCount():
-            self.records_table.setCellWidget(row, 4, None)
+    def add_log(self, log_type: str, message: str):
+        """添加日志（兼容旧代码）"""
+        self._add_record(message, log_type, "")
+    
+    def on_file_added(self, file_path: str):
+        """文件添加事件（本地操作）"""
+        from pathlib import Path
+        file_name = Path(file_path).name
+        self._add_record(file_name, "添加", "")
+        
+        # 根据设计文档的同步逻辑：
+        # 主机端：直接广播给所有连接端
+        # 连接端：发送给主机端，主机端转发给其他连接端
+        if self.is_host and self.server:
+            self.server.broadcast_file(file_path)
+        elif self.client:
+            self.client.send_file(file_path)
+        
+        self.status_label.setText(I18n.tr('status_syncing'))
+        self.status_label.setStyleSheet("color: #339af0;")
+        
+        # 模拟同步完成
+        from PySide6.QtCore import QTimer
+        QTimer.singleShot(500, lambda: (
+            self.status_label.setText(I18n.tr('status_synced')),
+            self.status_label.setStyleSheet("color: green;")
+        ))
+    
+    def on_file_deleted(self, file_path: str):
+        """文件删除事件（本地操作）"""
+        from pathlib import Path
+        file_name = Path(file_path).name
+        self._add_record(file_name, "删除", "")
+        
+        # 同步逻辑
+        if self.is_host and self.server:
+            self.server.broadcast_delete(file_path)
+        elif self.client:
+            self.client.send_delete(file_path)
+        
+        self.status_label.setText(I18n.tr('status_syncing'))
+        self.status_label.setStyleSheet("color: #339af0;")
+        
+        from PySide6.QtCore import QTimer
+        QTimer.singleShot(500, lambda: (
+            self.status_label.setText(I18n.tr('status_synced')),
+            self.status_label.setStyleSheet("color: green;")
+        ))
+    
+    def on_file_renamed(self, old_path: str, new_path: str):
+        """文件重命名事件（本地操作）"""
+        from pathlib import Path
+        old_name = Path(old_path).name
+        new_name = Path(new_path).name
+        self.add_log("重命名", f"{old_name} -> {new_name}")
+        
+        # 同步逻辑
+        if self.is_host and self.server:
+            self.server.broadcast_rename(old_path, new_path)
+        elif self.client:
+            self.client.send_rename(old_path, new_path)
+        
+        self.status_label.setText(I18n.tr('status_syncing'))
+        self.status_label.setStyleSheet("color: #339af0;")
+        
+        from PySide6.QtCore import QTimer
+        QTimer.singleShot(500, lambda: (
+            self.status_label.setText(I18n.tr('status_synced')),
+            self.status_label.setStyleSheet("color: green;")
+        ))
+    
+    def on_disconnect(self):
+        """断开连接"""
+        reply = QMessageBox.question(
+            self,
+            I18n.tr('confirm_leave'),
+            I18n.tr('confirm_leave_msg'),
+            QMessageBox.Yes | QMessageBox.No
+        )
+        
+        if reply == QMessageBox.Yes:
+            self.close()
     
     def closeEvent(self, event):
-        """关闭窗口事件"""
-        # 从主窗口的同步窗口列表中移除
-        if self.parent() and hasattr(self.parent(), 'sync_windows'):
-            if self in self.parent().sync_windows:
-                self.parent().sync_windows.remove(self)
-            if hasattr(self.parent(), '_update_tray_menu'):
-                self.parent()._update_tray_menu()
+        """窗口关闭事件"""
+        # 停止网络服务
+        if self.server:
+            self.server.stop()
+        if self.client:
+            self.client.disconnect()
+        if self.responder:
+            self.responder.stop()
         
-        # 清理资源
-        self._on_exit()
-        
-        # 显示主窗口
-        if self.parent():
-            self.parent().show()
-            self.parent().activateWindow()
-            self.parent().raise_()
-        
+        self.closed.emit()
         event.accept()

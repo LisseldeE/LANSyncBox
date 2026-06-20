@@ -2,6 +2,8 @@ __pycache__/
 .idea/
 output/
 标记文件/
+SyncFolder/
+old/
 
 *.exe
 

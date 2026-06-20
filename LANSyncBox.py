@@ -1,22 +1,17 @@
-# -*- coding: utf-8 -*-
 """
-LANSyncBox 主入口文件
-局域网文件同步工具
+LANSyncBox 主入口
 """
-
 import sys
 import os
 import ctypes
 
-# 确保可以导入其他模块
-sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from PySide6.QtWidgets import QApplication
+from PySide6.QtCore import Qt
+from PySide6.QtGui import QIcon, QFont
 
-from PyQt5.QtWidgets import QApplication
-from PyQt5.QtGui import QIcon, QFont
-from PyQt5.QtCore import Qt
-
-from config import APP_NAME, APP_VERSION, APP_ID
 from ui.main_window import MainWindow
+from i18n import I18n
+from config import Config
 
 
 def get_resource_path(relative_path):
@@ -28,61 +23,40 @@ def get_resource_path(relative_path):
     return os.path.join(base_path, relative_path)
 
 
-def setup_dpi_scaling():
-    """设置DPI缩放适配（解决高DPI显示问题）"""
-    # Windows高DPI适配 - 启用Per-Monitor DPI感知
-    if sys.platform == 'win32':
-        try:
-            # 设置为 Per Monitor Aware V1 (1)，让程序自己处理DPI缩放
-            ctypes.windll.shcore.SetProcessDpiAwareness(1)
-        except (AttributeError, OSError):
-            # 如果失败，尝试使用旧版本API
-            try:
-                ctypes.windll.user32.SetProcessDPIAware()
-            except (AttributeError, OSError):
-                pass
-    
-    # Qt高DPI设置 - 启用自动缩放
-    QApplication.setAttribute(Qt.AA_EnableHighDpiScaling, True)
-    QApplication.setAttribute(Qt.AA_UseHighDpiPixmaps, True)
-    
-    # 适配125%、150%等非整数倍缩放
-    QApplication.setHighDpiScaleFactorRoundingPolicy(
-        Qt.HighDpiScaleFactorRoundingPolicy.PassThrough
-    )
-
-
 def main():
     """主函数"""
-    # 1. DPI适配（必须在QApplication创建之前）
-    setup_dpi_scaling()
-    
-    # 2. 设置AppUserModelID（必须在QApplication创建之前）
+    # 设置AppUserModelID（必须在QApplication创建之前）
     if sys.platform == 'win32':
-        ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID(APP_ID)
+        try:
+            ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID(Config.APP_NAME)
+        except (AttributeError, OSError):
+            pass
     
+    # 创建应用
     app = QApplication(sys.argv)
+    app.setApplicationName(Config.APP_NAME)
+    app.setApplicationVersion(Config.APP_VERSION)
+    app.setOrganizationName(Config.APP_AUTHOR)
     
-    # 3. 设置应用程序信息
-    app.setApplicationName(APP_NAME)
-    app.setApplicationVersion(APP_VERSION)
-    app.setOrganizationName("LANSyncBox")
-    
-    # 4. 设置默认字体（确保中文显示正常）
+    # 设置默认字体
     font = QFont("Microsoft YaHei UI", 10)
     app.setFont(font)
     
-    # 5. 设置窗口图标
+    # 设置程序图标
     icon_path = get_resource_path('icon.ico')
     if os.path.exists(icon_path):
         app.setWindowIcon(QIcon(icon_path))
     
+    # 设置默认语言
+    I18n.set_language("zh_CN")
+    
+    # 创建主窗口
     window = MainWindow()
     if os.path.exists(icon_path):
         window.setWindowIcon(QIcon(icon_path))
     window.show()
     
-    # 6. Windows任务栏图标设置（必须在窗口显示后）
+    # Windows任务栏图标设置
     if sys.platform == 'win32' and os.path.exists(icon_path):
         try:
             hwnd = int(window.winId())
@@ -96,7 +70,8 @@ def main():
         except Exception:
             pass
     
-    sys.exit(app.exec_())
+    # 运行应用
+    sys.exit(app.exec())
 
 
 if __name__ == "__main__":

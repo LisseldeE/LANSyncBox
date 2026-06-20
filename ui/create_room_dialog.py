@@ -1,204 +1,194 @@
-# -*- coding: utf-8 -*-
 """
-LANSyncBox 创建房间对话框（紧凑版）
+创建房间对话框
 """
-
-import os
 import random
-from PyQt5.QtWidgets import (
-    QDialog, QVBoxLayout, QHBoxLayout, QLabel, QLineEdit,
-    QPushButton, QCheckBox, QFileDialog, QMessageBox, QGroupBox,
-    QWidget
+from PySide6.QtWidgets import (
+    QDialog, QVBoxLayout, QHBoxLayout, QLabel, 
+    QLineEdit, QPushButton, QFrame, QMessageBox, QWidget
 )
-from PyQt5.QtCore import Qt
+from PySide6.QtCore import Qt
+from PySide6.QtGui import QPalette, QFont
 
-from config import STYLESHEET, COLORS, DEFAULT_PORT, ROOM_CODE_LENGTH
-from ui.widgets import AnimatedButton
 from i18n import I18n
-
-# 延迟导入：RoomManager 在需要时才导入
-# from room.room_manager import RoomManager
-
-
-def _generate_room_code() -> str:
-    """生成随机房间号（本地函数，避免导入 RoomManager）"""
-    return ''.join([str(random.randint(0, 9)) for _ in range(ROOM_CODE_LENGTH)])
+from config import Config
+from ui.widgets import AnimatedButton, BUTTON_STYLES
 
 
-class CreateRoomDialog(QDialog):
-    """创建房间对话框（紧凑）"""
+class RoomCodeDisplay(QWidget):
+    """房间号显示组件 - 6个格子显示6个数字"""
     
     def __init__(self, parent=None):
         super().__init__(parent)
-        self.setWindowTitle(I18n.t('create_title'))
-        self.setWindowFlags(self.windowFlags() & ~Qt.WindowContextHelpButtonHint)
-        self.setMinimumSize(350, 320)
-        self.setStyleSheet(STYLESHEET)
-        
-        # 房间信息
-        self.room_code = ""
-        self.password = ""
-        self.sync_folder = ""
-        
+        self.digit_labels = []
         self._init_ui()
     
     def _init_ui(self):
-        """初始化UI"""
-        layout = QVBoxLayout()
-        layout.setSpacing(10)
-        layout.setContentsMargins(15, 15, 15, 15)
+        """初始化界面"""
+        layout = QHBoxLayout(self)
+        layout.setSpacing(8)
+        layout.setContentsMargins(0, 0, 0, 0)
         
-        # 房间号输入组
-        room_group = QGroupBox(I18n.t('create_room_label').rstrip('：'))
-        room_layout = QVBoxLayout(room_group)
-        room_layout.setSpacing(8)
+        # 创建6个数字格子
+        for i in range(6):
+            label = QLabel("-")
+            label.setAlignment(Qt.AlignCenter)
+            label.setMinimumSize(40, 50)
+            label.setMaximumSize(50, 60)
+            
+            # 使用系统颜色适配深色/浅色模式
+            label.setStyleSheet("""
+                QLabel {
+                    font-size: 28px;
+                    font-weight: bold;
+                    background-color: palette(window);
+                    border: 2px solid palette(mid);
+                    border-radius: 6px;
+                    color: palette(text);
+                }
+            """)
+            
+            self.digit_labels.append(label)
+            layout.addWidget(label)
         
-        # 房间号
-        room_code_layout = QHBoxLayout()
-        room_code_label = QLabel(I18n.t('create_room_label'))
-        room_code_label.setMinimumWidth(60)
+        # 设置字体
+        font = QFont()
+        font.setPointSize(20)
+        font.setBold(True)
+        for label in self.digit_labels:
+            label.setFont(font)
+    
+    def set_room_code(self, code: str):
+        """设置房间号"""
+        # 确保是6位数字
+        code = code.zfill(6)
+        for i, digit in enumerate(code[:6]):
+            self.digit_labels[i].setText(digit)
+    
+    def get_room_code(self) -> str:
+        """获取房间号"""
+        return "".join(label.text() for label in self.digit_labels)
+
+
+class CreateRoomDialog(QDialog):
+    """创建房间对话框"""
+    
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.room_code = ""
+        self.password = ""
+        self.init_ui()
+    
+    def init_ui(self):
+        """初始化界面"""
+        self.setWindowTitle(I18n.tr('create_room_title'))
+        self.setModal(True)
+        self.setFixedWidth(400)
+        
+        layout = QVBoxLayout(self)
+        layout.setSpacing(15)
+        layout.setContentsMargins(20, 20, 20, 20)
+        
+        # 房间号显示
+        room_code_layout = QVBoxLayout()
+        room_code_label = QLabel(I18n.tr('room_code'))
         room_code_layout.addWidget(room_code_label)
         
-        self.room_code_input = QLineEdit()
-        self.room_code_input.setPlaceholderText(I18n.t('create_room_placeholder'))
-        self.room_code_input.setMaxLength(6)
-        self.room_code_input.setText(_generate_room_code())
-        room_code_layout.addWidget(self.room_code_input)
+        # 房间号显示组件（6个格子）
+        self.room_code_display = RoomCodeDisplay()
+        room_code_layout.addWidget(self.room_code_display)
         
-        # 检测按钮
-        self.check_btn = QPushButton(I18n.t('common_check') if hasattr(I18n, 't') and 'common_check' in I18n.get_all_keys() else "检测")
-        self.check_btn.setMinimumWidth(50)
-        self.check_btn.clicked.connect(self._check_room_code)
-        room_code_layout.addWidget(self.check_btn)
+        # 自动生成随机房间号
+        self.generate_room_code()
         
-        room_layout.addLayout(room_code_layout)
+        # 重新生成按钮
+        regenerate_btn_layout = QHBoxLayout()
+        regenerate_btn_layout.addStretch()
+        self.regenerate_btn = AnimatedButton(I18n.tr('regenerate_room_code'))
+        self.regenerate_btn.setFixedWidth(120)
+        self.regenerate_btn.clicked.connect(self.generate_room_code)
+        self.regenerate_btn.setStyleSheet(BUTTON_STYLES['outline'])
+        regenerate_btn_layout.addWidget(self.regenerate_btn)
+        room_code_layout.addLayout(regenerate_btn_layout)
         
-        # 密码设置
-        password_layout = QHBoxLayout()
-        password_label = QLabel(I18n.t('create_password_label'))
-        password_label.setMinimumWidth(60)
+        layout.addLayout(room_code_layout)
+        
+        # 分隔线
+        line = QFrame()
+        line.setFrameShape(QFrame.HLine)
+        line.setFrameShadow(QFrame.Sunken)
+        layout.addWidget(line)
+        
+        # 密码输入
+        password_layout = QVBoxLayout()
+        password_label = QLabel(I18n.tr('password'))
         password_layout.addWidget(password_label)
         
-        self.password_input = QLineEdit()
-        self.password_input.setPlaceholderText(I18n.t('create_password_placeholder'))
-        self.password_input.setEchoMode(QLineEdit.Password)
-        password_layout.addWidget(self.password_input)
+        self.password_edit = QLineEdit()
+        self.password_edit.setPlaceholderText(I18n.tr('password_hint'))
+        self.password_edit.setEchoMode(QLineEdit.Password)
+        password_layout.addWidget(self.password_edit)
         
-        room_layout.addLayout(password_layout)
+        layout.addLayout(password_layout)
         
-        layout.addWidget(room_group)
+        # 分隔线
+        line2 = QFrame()
+        line2.setFrameShape(QFrame.HLine)
+        line2.setFrameShadow(QFrame.Sunken)
+        layout.addWidget(line2)
         
-        # 同步文件夹选择组
-        folder_group = QGroupBox(I18n.t('create_folder_label').rstrip('：'))
-        folder_layout = QVBoxLayout(folder_group)
-        folder_layout.setSpacing(8)
+        # 同步文件夹信息
+        folder_layout = QVBoxLayout()
+        folder_label = QLabel(I18n.tr('sync_folder'))
+        folder_layout.addWidget(folder_label)
         
-        folder_path_layout = QHBoxLayout()
-        self.folder_path_input = QLineEdit()
-        self.folder_path_input.setPlaceholderText(I18n.t('common_select_folder'))
-        self.folder_path_input.setReadOnly(True)
-        folder_path_layout.addWidget(self.folder_path_input)
+        self.folder_path_label = QLabel(str(Config.get_sync_folder()))
+        self.folder_path_label.setWordWrap(True)
+        folder_layout.addWidget(self.folder_path_label)
         
-        self.folder_btn = QPushButton(I18n.t('create_folder_select'))
-        self.folder_btn.setMinimumWidth(60)
-        self.folder_btn.clicked.connect(self._select_folder)
-        folder_path_layout.addWidget(self.folder_btn)
+        layout.addLayout(folder_layout)
         
-        folder_layout.addLayout(folder_path_layout)
-        
-        layout.addWidget(folder_group)
-        
+        # 弹性空间
         layout.addStretch()
         
-        # 按钮区域
-        btn_layout = QHBoxLayout()
-        btn_layout.addStretch()
+        # 按钮
+        button_layout = QHBoxLayout()
+        button_layout.setSpacing(10)
         
-        self.cancel_btn = QPushButton(I18n.t('create_cancel'))
-        self.cancel_btn.setObjectName("dangerBtn")
-        self.cancel_btn.setMinimumSize(80, 32)
+        self.create_btn = AnimatedButton(I18n.tr('create'))
+        self.create_btn.setFixedWidth(100)
+        self.create_btn.clicked.connect(self.on_create)
+        self.create_btn.setDefault(True)
+        self.create_btn.setStyleSheet(BUTTON_STYLES['primary'])
+        
+        self.cancel_btn = AnimatedButton(I18n.tr('cancel'))
+        self.cancel_btn.setFixedWidth(100)
         self.cancel_btn.clicked.connect(self.reject)
-        btn_layout.addWidget(self.cancel_btn)
+        self.cancel_btn.setStyleSheet(BUTTON_STYLES['secondary'])
         
-        btn_layout.addSpacing(10)
+        button_layout.addStretch()
+        button_layout.addWidget(self.create_btn)
+        button_layout.addWidget(self.cancel_btn)
         
-        self.create_btn = AnimatedButton(I18n.t('create_btn'))
-        self.create_btn.setObjectName("successBtn")
-        self.create_btn.setMinimumSize(80, 32)
-        self.create_btn.clicked.connect(self._on_create)
-        btn_layout.addWidget(self.create_btn)
-        
-        btn_layout.addStretch()
-        layout.addLayout(btn_layout)
-        
-        self.setLayout(layout)
+        layout.addLayout(button_layout)
     
-    def _check_room_code(self):
-        """检测房间号是否已被占用"""
-        # 延迟导入 RoomManager
-        from room.room_manager import RoomManager
-        
-        room_code = self.room_code_input.text()
-        
-        if len(room_code) != 6 or not room_code.isdigit():
-            QMessageBox.warning(self, I18n.t('common_info'), I18n.t('create_room_invalid'))
-            return
-        
-        room_manager = RoomManager()
-        if room_manager.is_room_exists(room_code):
-            QMessageBox.warning(self, I18n.t('common_info'), I18n.t('create_room_exists'))
-            self.room_code_input.setText(_generate_room_code())
-        else:
-            QMessageBox.information(self, I18n.t('common_info'), f"房间号 {room_code} 可用")
+    def generate_room_code(self):
+        """生成随机房间号"""
+        room_code = str(random.randint(Config.ROOM_CODE_MIN, Config.ROOM_CODE_MAX))
+        self.room_code_display.set_room_code(room_code)
     
-    def _select_folder(self):
-        """选择同步文件夹"""
-        folder = QFileDialog.getExistingDirectory(
-            self, I18n.t('common_select_folder'),
-            os.path.expanduser("~"),
-            QFileDialog.ShowDirsOnly
-        )
-        
-        if folder:
-            self.folder_path_input.setText(folder)
-    
-    def _on_create(self):
+    def on_create(self):
         """创建房间"""
-        # 延迟导入 RoomManager
-        from room.room_manager import RoomManager
+        # 保存信息
+        self.room_code = self.room_code_display.get_room_code()
+        self.password = self.password_edit.text()
         
-        room_code = self.room_code_input.text()
-        password = self.password_input.text()
-        sync_folder = self.folder_path_input.text()
-        
-        # 验证房间号
-        if len(room_code) != 6 or not room_code.isdigit():
-            QMessageBox.warning(self, I18n.t('common_info'), I18n.t('create_room_invalid'))
-            return
-        
-        # 验证同步文件夹
-        if not sync_folder:
-            QMessageBox.warning(self, I18n.t('common_info'), I18n.t('create_folder_required'))
-            return
-        
-        if not os.path.isdir(sync_folder):
-            QMessageBox.warning(self, I18n.t('common_info'), I18n.t('create_folder_required'))
-            return
-        
-        # 检测房间号是否可用
-        room_manager = RoomManager()
-        if room_manager.is_room_exists(room_code):
-            QMessageBox.warning(self, I18n.t('common_info'), I18n.t('create_room_exists'))
-            return
-        
-        # 创建房间（使用用户输入的房间号）
-        created_code = room_manager.create_room(
-            sync_folder, password, room_code=room_code
-        )
-        if created_code:
-            self.room_code = created_code
-            self.password = password
-            self.sync_folder = sync_folder
-            self.accept()
-        else:
-            QMessageBox.warning(self, I18n.t('common_info'), I18n.t('create_failed') if hasattr(I18n, 't') and 'create_failed' in I18n.get_all_keys() else "创建房间失败，请重试")
+        # 接受对话框
+        self.accept()
+    
+    def get_room_code(self) -> str:
+        """获取房间号"""
+        return self.room_code
+    
+    def get_password(self) -> str:
+        """获取密码"""
+        return self.password

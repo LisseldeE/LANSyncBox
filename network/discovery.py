@@ -1,57 +1,53 @@
-# -*- coding: utf-8 -*-
 """
-LANSyncBox 局域网主机发现模块
-使用UDP广播发现局域网内的主机
+房间发现模块
+使用UDP广播发现局域网内的房间
 """
-
 import socket
 import threading
 import json
 import time
-from typing import Dict, Optional, Callable
-from PyQt5.QtCore import QObject, pyqtSignal
+from typing import Dict, Optional, List
+from PySide6.QtCore import QObject, Signal
 
-from config import DEFAULT_PORT
+from config import Config
 
 
-class HostDiscovery(QObject):
-    """主机发现服务"""
+class RoomDiscovery(QObject):
+    """房间发现服务（客户端使用）"""
     
-    # 信号定义
-    host_found = pyqtSignal(str, str)  # 发现主机 (ip, room_code)
-    discovery_finished = pyqtSignal(list)  # 发现完成 (hosts列表)
-    error_occurred = pyqtSignal(str)  # 错误消息
+    # 信号
+    room_found = Signal(str, str, int)  # 发现房间 (ip, room_code, port)
+    discovery_finished = Signal(list)  # 发现完成 [(ip, room_code, port), ...]
+    error_occurred = Signal(str)  # 错误消息
     
     # UDP端口
-    DISCOVERY_PORT = 9528  # 发现端口（与同步端口区分）
-    BROADCAST_INTERVAL = 1  # 广播间隔（秒）
+    DISCOVERY_PORT = 9528  # 发现端口
     DISCOVERY_TIMEOUT = 3  # 发现超时（秒）
     
     def __init__(self, parent=None):
         super().__init__(parent)
         self.socket: Optional[socket.socket] = None
         self.running = False
-        self.discovered_hosts: Dict[str, dict] = {}  # {ip: {room_code, port, timestamp}}
+        self.discovered_rooms: Dict[str, dict] = {}  # {ip: {room_code, port, timestamp}}
         self._lock = threading.Lock()
     
-    def start_discovery(self, room_code: str = None, timeout: int = None) -> bool:
+    def discover_room(self, room_code: str, timeout: int = None) -> bool:
         """
-        启动主机发现
+        发现指定房间
         Args:
-            room_code: 指定房间号（可选，如果指定则只发现该房间）
-            timeout: 发现超时时间（秒）
+            room_code: 房间号
+            timeout: 超时时间（秒）
         Returns:
-            是否启动成功
+            是否启动发现成功
         """
         try:
             timeout = timeout or self.DISCOVERY_TIMEOUT
-            self.discovered_hosts.clear()
+            self.discovered_rooms.clear()
             
-            # 创建UDP socket（发送端使用随机端口，避免端口冲突）
+            # 创建UDP socket
             self.socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
             self.socket.setsockopt(socket.SOL_SOCKET, socket.SO_BROADCAST, 1)
             self.socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-            # 发送端绑定到随机端口，不绑定到DISCOVERY_PORT
             self.socket.bind(('0.0.0.0', 0))  # 使用随机端口
             self.socket.settimeout(0.5)
             
@@ -70,10 +66,10 @@ class HostDiscovery(QObject):
             # 发送到广播地址
             self.socket.sendto(discovery_msg, ('<broadcast>', self.DISCOVERY_PORT))
             
-            # 同时发送到本机地址（解决同一台机器双开无法发现的问题）
+            # 发送到本机地址（支持同一台机器双开）
             self.socket.sendto(discovery_msg, ('127.0.0.1', self.DISCOVERY_PORT))
             
-            # 获取本机IP并发送到本机IP
+            # 获取本机IP并发送
             try:
                 local_ip = self._get_local_ip()
                 if local_ip and local_ip != '127.0.0.1':
@@ -122,16 +118,16 @@ class HostDiscovery(QObject):
                 if response.get('type') == 'discovery_response':
                     host_ip = addr[0]
                     room_code = response.get('room_code')
-                    port = response.get('port', DEFAULT_PORT)
+                    port = response.get('port', Config.DEFAULT_PORT)
                     
                     with self._lock:
-                        self.discovered_hosts[host_ip] = {
+                        self.discovered_rooms[host_ip] = {
                             'room_code': room_code,
                             'port': port,
                             'timestamp': time.time()
                         }
                     
-                    self.host_found.emit(host_ip, room_code)
+                    self.room_found.emit(host_ip, room_code, port)
                     
             except socket.timeout:
                 continue
@@ -143,19 +139,19 @@ class HostDiscovery(QObject):
         self.stop_discovery()
         
         with self._lock:
-            hosts = [
+            rooms = [
                 {
                     'ip': ip,
                     'room_code': info['room_code'],
                     'port': info['port']
                 }
-                for ip, info in self.discovered_hosts.items()
+                for ip, info in self.discovered_rooms.items()
             ]
         
-        self.discovery_finished.emit(hosts)
+        self.discovery_finished.emit(rooms)
     
-    def get_discovered_hosts(self) -> list:
-        """获取已发现的主机列表"""
+    def get_discovered_rooms(self) -> List[dict]:
+        """获取已发现的房间列表"""
         with self._lock:
             return [
                 {
@@ -163,15 +159,15 @@ class HostDiscovery(QObject):
                     'room_code': info['room_code'],
                     'port': info['port']
                 }
-                for ip, info in self.discovered_hosts.items()
+                for ip, info in self.discovered_rooms.items()
             ]
 
 
-class HostResponder(QObject):
-    """主机响应服务（主机端运行，响应发现请求）"""
+class RoomResponder(QObject):
+    """房间响应服务（主机端运行，响应发现请求）"""
     
-    # 信号定义
-    error_occurred = pyqtSignal(str)
+    # 信号
+    error_occurred = Signal(str)
     
     DISCOVERY_PORT = 9528
     
@@ -180,9 +176,9 @@ class HostResponder(QObject):
         self.socket: Optional[socket.socket] = None
         self.running = False
         self.room_code = ""
-        self.port = DEFAULT_PORT
+        self.port = Config.DEFAULT_PORT
     
-    def start(self, room_code: str, port: int = DEFAULT_PORT) -> bool:
+    def start(self, room_code: str, port: int = None) -> bool:
         """
         启动响应服务
         Args:
@@ -193,7 +189,7 @@ class HostResponder(QObject):
         """
         try:
             self.room_code = room_code
-            self.port = port
+            self.port = port or Config.DEFAULT_PORT
             
             # 创建UDP socket
             self.socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
