@@ -2,6 +2,7 @@
 LANSyncBox 配置文件
 """
 import os
+import sys
 from pathlib import Path
 
 
@@ -10,7 +11,7 @@ class Config:
     
     # 应用信息
     APP_NAME = "LANSyncBox"
-    APP_VERSION = "R2"
+    APP_VERSION = "R3"
     APP_AUTHOR = "Lisselde_E"
     APP_EMAIL = "Lisselde.E@outlook.com"
     
@@ -52,10 +53,21 @@ class Config:
     FILE_LIST_ROW_HEIGHT = 30
     
     @staticmethod
+    def get_app_dir() -> Path:
+        """获取应用程序所在目录"""
+        # 判断是否在打包环境中运行
+        if getattr(sys, 'frozen', False):
+            # 打包后：使用exe所在目录
+            return Path(sys.executable).parent
+        else:
+            # 开发环境：使用脚本所在目录
+            return Path(__file__).parent
+    
+    @staticmethod
     def get_sync_folder() -> Path:
         """获取同步文件夹路径"""
         # 程序所在目录下的 SyncFolder
-        base_path = Path(__file__).parent
+        base_path = Config.get_app_dir()
         sync_folder = base_path / Config.SYNC_FOLDER_NAME
         sync_folder.mkdir(exist_ok=True)
         return sync_folder

@@ -20,10 +20,13 @@ class SyncClient(QObject):
     connected = Signal()              # 连接成功
     disconnected = Signal()           # 断开连接
     error_occurred = Signal(str)      # 错误
+    auth_failed = Signal(str)         # 验证失败
     file_received = Signal(str)       # 收到文件
     file_receive_start = Signal(str)  # 开始接收文件
     file_receive_progress = Signal(str, int, int)  # 文件接收进度 (filename, current, total)
     file_deleted = Signal(str)        # 文件已删除
+    file_renamed = Signal(str, str)   # 文件已重命名 (old_name, new_name)
+    dir_created = Signal(str)         # 目录已创建
     file_sent = Signal(str)           # 发送文件完成
     file_send_progress = Signal(str, int, int)     # 文件发送进度 (filename, current, total)
     log_message = Signal(str)         # 日志消息
@@ -137,6 +140,9 @@ class SyncClient(QObject):
                 }
                 self.receiving_file_handle = file_handle
                 self.log_message.emit(f"开始接收大文件: {filename} ({self._format_size(file_size)})")
+                
+                # 发射开始接收信号
+                self.file_receive_start.emit(filename)
             except Exception as e:
                 self.log_message.emit(f"创建文件失败: {e}")
         
@@ -148,11 +154,14 @@ class SyncClient(QObject):
                     self.receiving_file_handle.write(chunk_data)
                     self.receiving_file['received_size'] += len(chunk_data)
                     
-                    # 发送进度信号
+                    # 发送进度信号（转换为KB避免溢出）
+                    rf = self.receiving_file
+                    received_kb = rf['received_size'] // 1024
+                    total_kb = rf['file_size'] // 1024
                     self.file_receive_progress.emit(
-                        self.receiving_file['filename'], 
-                        self.receiving_file['received_size'], 
-                        self.receiving_file['file_size']
+                        rf['filename'], 
+                        received_kb, 
+                        total_kb
                     )
                 except Exception as e:
                     self.log_message.emit(f"写入数据块失败: {e}")
@@ -206,10 +215,13 @@ class SyncClient(QObject):
                 self.log_message.emit("验证成功")
             else:
                 self.log_message.emit(f"验证失败: {message}")
+                # 发射验证失败信号
+                self.auth_failed.emit(message)
                 self.disconnect()
                 
         except Exception as e:
             self.log_message.emit(f"验证响应解析错误: {e}")
+            self.auth_failed.emit(f"验证响应解析错误: {e}")
             self.disconnect()
     
     def _receive_file(self, filename: str, content: bytes, mtime: float):
@@ -251,6 +263,9 @@ class SyncClient(QObject):
         dir_path = os.path.join(self.sync_folder, dirname)
         os.makedirs(dir_path, exist_ok=True)
         self.log_message.emit(f"创建目录: {dirname}")
+        
+        # 发射目录创建信号
+        self.dir_created.emit(dirname)
     
     def _handle_rename(self, content: bytes):
         """处理重命名"""
@@ -265,6 +280,9 @@ class SyncClient(QObject):
             os.rename(old_path, new_path)
             
             self.log_message.emit(f"重命名: {old_name} -> {new_name}")
+            
+            # 发射重命名信号
+            self.file_renamed.emit(old_name, new_name)
             
         except Exception as e:
             self.log_message.emit(f"重命名失败: {e}")
@@ -283,6 +301,12 @@ class SyncClient(QObject):
             return
         
         try:
+            # 检查是否是文件夹
+            if os.path.isdir(filepath):
+                # 发送创建目录
+                self.send_dir_create(filepath)
+                return
+            
             file_size = os.path.getsize(filepath)
             mtime = os.path.getmtime(filepath)
             rel_path = os.path.relpath(filepath, self.sync_folder).replace('\\', '/')
@@ -313,8 +337,12 @@ class SyncClient(QObject):
         )
         self.socket.sendall(begin_msg)
         
+        # 发射开始发送信号
+        self.file_send_progress.emit(filename, 0, file_size // 1024)
+        
         # 流式读取并发送数据块
         chunk_index = 0
+        sent_size = 0
         with open(filepath, 'rb') as f:
             while True:
                 chunk = f.read(self.CHUNK_SIZE)
@@ -323,12 +351,21 @@ class SyncClient(QObject):
                 
                 chunk_msg = Protocol.create_file_data_message(filename, chunk_index, chunk)
                 self.socket.sendall(chunk_msg)
+                
+                sent_size += len(chunk)
                 chunk_index += 1
+                
+                # 发送进度信号（转换为KB避免溢出）
+                sent_kb = sent_size // 1024
+                total_kb = file_size // 1024
+                self.file_send_progress.emit(filename, sent_kb, total_kb)
         
         # 发送文件结束消息
         end_msg = Protocol.create_file_end_message(filename, file_size, mtime)
         self.socket.sendall(end_msg)
         
+        # 发射发送完成信号
+        self.file_sent.emit(filename)
         self.log_message.emit(f"大文件发送完成: {filename}")
     
     def _format_size(self, size: int) -> str:

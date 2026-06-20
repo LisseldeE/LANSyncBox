@@ -21,6 +21,7 @@ from PySide6.QtWidgets import QApplication
 
 from i18n import I18n
 from config import Config
+from ui.widgets import BUTTON_STYLES
 
 
 class DragableTableWidget(QTableWidget):
@@ -30,17 +31,54 @@ class DragableTableWidget(QTableWidget):
     
     def __init__(self, parent=None):
         super().__init__(parent)
-        self.setDragEnabled(True)
+        # 不启用默认的拖拽功能，我们手动控制
+        self.setDragEnabled(False)
         self.setAcceptDrops(True)
-        self.setDragDropMode(QAbstractItemView.DragDrop)
-        self.setDefaultDropAction(Qt.CopyAction)
         self.setSelectionMode(QAbstractItemView.ExtendedSelection)
         self.setSelectionBehavior(QAbstractItemView.SelectRows)
         
         # 记录拖拽的文件，用于判断是否是拖拽到外部
         self._drag_files = []
+        
+        # 记录鼠标按下时的状态，用于区分框选和拖拽
+        self._mouse_press_pos = None
+        self._mouse_press_item = None
+        self._is_dragging = False
     
-    def startDrag(self, supportedActions):
+    def mousePressEvent(self, event):
+        """鼠标按下事件"""
+        if event.button() == Qt.LeftButton:
+            self._mouse_press_pos = event.pos()
+            self._mouse_press_item = self.itemAt(event.pos())
+            self._is_dragging = False
+        super().mousePressEvent(event)
+    
+    def mouseMoveEvent(self, event):
+        """鼠标移动事件"""
+        if event.buttons() & Qt.LeftButton and self._mouse_press_pos:
+            # 计算移动距离
+            distance = (event.pos() - self._mouse_press_pos).manhattanLength()
+            
+            # 如果移动距离超过阈值，且鼠标在选中的项目上，则开始拖拽
+            if distance > 10 and not self._is_dragging:
+                # 检查鼠标按下时是否在选中的项目上
+                if self._mouse_press_item and self._mouse_press_item.isSelected():
+                    self._is_dragging = True
+                    # 开始拖拽
+                    self._start_drag()
+                    return
+        
+        # 否则调用父类的鼠标移动事件（支持框选）
+        super().mouseMoveEvent(event)
+    
+    def mouseReleaseEvent(self, event):
+        """鼠标释放事件"""
+        self._mouse_press_pos = None
+        self._mouse_press_item = None
+        self._is_dragging = False
+        super().mouseReleaseEvent(event)
+    
+    def _start_drag(self):
         """开始拖拽"""
         # 获取选中的文件
         files = []
@@ -66,8 +104,7 @@ class DragableTableWidget(QTableWidget):
         drag.setMimeData(mime_data)
         
         # 执行拖拽（只支持复制操作）
-        # 这样拖拽到程序外时，只会复制文件，不会移动
-        result = drag.exec(Qt.CopyAction)
+        drag.exec(Qt.CopyAction)
         
         # 清空记录
         self._drag_files = []
@@ -160,7 +197,9 @@ class FileCopyWorker(QThread):
                 
                 try:
                     if src.is_dir():
-                        # 复制文件夹
+                        # 复制文件夹（如果目标存在，先删除再复制）
+                        if dst.exists():
+                            shutil.rmtree(dst)
                         shutil.copytree(src, dst)
                     else:
                         # 复制文件（分块复制以显示进度）
@@ -220,6 +259,7 @@ class FileListWidget(QWidget):
     file_added = Signal(str)  # 文件添加信号（本地操作触发）
     file_deleted = Signal(str)  # 文件删除信号（本地操作触发）
     file_renamed = Signal(str, str)  # 文件重命名信号（旧名，新名）
+    dir_created = Signal(str)  # 目录创建信号（本地操作触发）
     
     def __init__(self, folder_path: Path, parent=None):
         super().__init__(parent)
@@ -328,6 +368,9 @@ class FileListWidget(QWidget):
             I18n.tr('file_modified'),
             I18n.tr('file_status')
         ])
+        
+        # 禁用编辑（避免双击时进入编辑模式）
+        self.table.setEditTriggers(QAbstractItemView.NoEditTriggers)
         
         # 设置表头
         header = self.table.horizontalHeader()
@@ -442,11 +485,17 @@ class FileListWidget(QWidget):
             self.update_path_display()
         else:
             # 双击文件：提示拖拽保存
-            QMessageBox.information(
-                self,
-                I18n.tr('file'),
-                I18n.tr('tip_open_file')
-            )
+            # 创建自定义消息框
+            msg_box = QMessageBox(self)
+            msg_box.setWindowTitle(I18n.tr('file'))
+            msg_box.setText(I18n.tr('tip_open_file'))
+            msg_box.setIcon(QMessageBox.Information)
+            
+            # 添加自定义按钮
+            ok_btn = msg_box.addButton(I18n.tr('ok'), QMessageBox.AcceptRole)
+            ok_btn.setStyleSheet(BUTTON_STYLES['primary'])
+            
+            msg_box.exec()
     
     def show_context_menu(self, pos: QPoint):
         """显示右键菜单"""
@@ -516,13 +565,24 @@ class FileListWidget(QWidget):
             
             # 检查文件是否存在
             if dst_file.exists():
-                reply = QMessageBox.question(
-                    self,
-                    I18n.tr('confirm_replace'),
-                    I18n.tr('confirm_replace_msg'),
-                    QMessageBox.Yes | QMessageBox.No
-                )
-                if reply == QMessageBox.No:
+                # 创建自定义消息框
+                msg_box = QMessageBox(self)
+                msg_box.setWindowTitle(I18n.tr('confirm_replace'))
+                msg_box.setText(I18n.tr('confirm_replace_msg'))
+                msg_box.setIcon(QMessageBox.Question)
+                
+                # 添加自定义按钮
+                yes_btn = msg_box.addButton(I18n.tr('yes'), QMessageBox.YesRole)
+                no_btn = msg_box.addButton(I18n.tr('no'), QMessageBox.NoRole)
+                
+                # 应用全局按钮样式
+                yes_btn.setStyleSheet(BUTTON_STYLES['primary'])
+                no_btn.setStyleSheet(BUTTON_STYLES['secondary'])
+                
+                msg_box.setDefaultButton(no_btn)
+                msg_box.exec()
+                
+                if msg_box.clickedButton() == no_btn:
                     continue
             
             try:
@@ -543,7 +603,17 @@ class FileListWidget(QWidget):
                     if not self.is_syncing(str(dst_file)):
                         self.file_added.emit(str(dst_file))
             except Exception as e:
-                QMessageBox.critical(self, "错误", f"粘贴失败: {str(e)}")
+                # 创建自定义错误框
+                msg_box = QMessageBox(self)
+                msg_box.setWindowTitle("错误")
+                msg_box.setText(f"粘贴失败: {str(e)}")
+                msg_box.setIcon(QMessageBox.Critical)
+                
+                # 添加自定义按钮
+                ok_btn = msg_box.addButton(I18n.tr('ok'), QMessageBox.AcceptRole)
+                ok_btn.setStyleSheet(BUTTON_STYLES['primary'])
+                
+                msg_box.exec()
         
         # 清空剪贴板（如果是剪切）
         if self.clipboard_is_cut:
@@ -558,14 +628,24 @@ class FileListWidget(QWidget):
         if not files:
             return
         
-        reply = QMessageBox.question(
-            self,
-            I18n.tr('confirm_delete'),
-            I18n.tr('confirm_delete_msg'),
-            QMessageBox.Yes | QMessageBox.No
-        )
+        # 创建自定义消息框
+        msg_box = QMessageBox(self)
+        msg_box.setWindowTitle(I18n.tr('confirm_delete'))
+        msg_box.setText(I18n.tr('confirm_delete_msg'))
+        msg_box.setIcon(QMessageBox.Question)
         
-        if reply == QMessageBox.Yes:
+        # 添加自定义按钮
+        yes_btn = msg_box.addButton(I18n.tr('yes'), QMessageBox.YesRole)
+        no_btn = msg_box.addButton(I18n.tr('no'), QMessageBox.NoRole)
+        
+        # 应用全局按钮样式
+        yes_btn.setStyleSheet(BUTTON_STYLES['danger'])
+        no_btn.setStyleSheet(BUTTON_STYLES['secondary'])
+        
+        msg_box.setDefaultButton(no_btn)
+        msg_box.exec()
+        
+        if msg_box.clickedButton() == yes_btn:
             import shutil
             for file in files:
                 try:
@@ -577,7 +657,17 @@ class FileListWidget(QWidget):
                     if not self.is_syncing(str(file)):
                         self.file_deleted.emit(str(file))
                 except Exception as e:
-                    QMessageBox.critical(self, "错误", f"删除失败: {str(e)}")
+                    # 创建自定义错误框
+                    msg_box = QMessageBox(self)
+                    msg_box.setWindowTitle("错误")
+                    msg_box.setText(f"删除失败: {str(e)}")
+                    msg_box.setIcon(QMessageBox.Critical)
+                    
+                    # 添加自定义按钮
+                    ok_btn = msg_box.addButton(I18n.tr('ok'), QMessageBox.AcceptRole)
+                    ok_btn.setStyleSheet(BUTTON_STYLES['primary'])
+                    
+                    msg_box.exec()
             
             self.load_files()
     
@@ -610,6 +700,15 @@ class FileListWidget(QWidget):
         button_box = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
         button_box.accepted.connect(dialog.accept)
         button_box.rejected.connect(dialog.reject)
+        
+        # 应用全局按钮样式
+        ok_btn = button_box.button(QDialogButtonBox.Ok)
+        if ok_btn:
+            ok_btn.setStyleSheet(BUTTON_STYLES['primary'])
+        cancel_btn = button_box.button(QDialogButtonBox.Cancel)
+        if cancel_btn:
+            cancel_btn.setStyleSheet(BUTTON_STYLES['secondary'])
+        
         layout.addWidget(button_box)
         
         # 选择文件名部分（不包括扩展名）
@@ -630,12 +729,32 @@ class FileListWidget(QWidget):
                 
                 # 检查文件名是否合法
                 if not self.is_valid_filename(new_name):
-                    QMessageBox.warning(self, "错误", I18n.tr('error_invalid_name'))
+                    # 创建自定义警告框
+                    msg_box = QMessageBox(self)
+                    msg_box.setWindowTitle("错误")
+                    msg_box.setText(I18n.tr('error_invalid_name'))
+                    msg_box.setIcon(QMessageBox.Warning)
+                    
+                    # 添加自定义按钮
+                    ok_btn = msg_box.addButton(I18n.tr('ok'), QMessageBox.AcceptRole)
+                    ok_btn.setStyleSheet(BUTTON_STYLES['primary'])
+                    
+                    msg_box.exec()
                     return
                 
                 # 检查文件是否已存在
                 if new_path.exists():
-                    QMessageBox.warning(self, "错误", I18n.tr('error_file_exists'))
+                    # 创建自定义警告框
+                    msg_box = QMessageBox(self)
+                    msg_box.setWindowTitle("错误")
+                    msg_box.setText(I18n.tr('error_file_exists'))
+                    msg_box.setIcon(QMessageBox.Warning)
+                    
+                    # 添加自定义按钮
+                    ok_btn = msg_box.addButton(I18n.tr('ok'), QMessageBox.AcceptRole)
+                    ok_btn.setStyleSheet(BUTTON_STYLES['primary'])
+                    
+                    msg_box.exec()
                     return
                 
                 try:
@@ -645,7 +764,17 @@ class FileListWidget(QWidget):
                         self.file_renamed.emit(str(old_path), str(new_path))
                     self.load_files()
                 except Exception as e:
-                    QMessageBox.critical(self, "错误", f"重命名失败: {str(e)}")
+                    # 创建自定义错误框
+                    msg_box = QMessageBox(self)
+                    msg_box.setWindowTitle("错误")
+                    msg_box.setText(f"重命名失败: {str(e)}")
+                    msg_box.setIcon(QMessageBox.Critical)
+                    
+                    # 添加自定义按钮
+                    ok_btn = msg_box.addButton(I18n.tr('ok'), QMessageBox.AcceptRole)
+                    ok_btn.setStyleSheet(BUTTON_STYLES['primary'])
+                    
+                    msg_box.exec()
     
     def is_valid_filename(self, name: str) -> bool:
         """检查文件名是否合法"""
@@ -702,20 +831,41 @@ class FileListWidget(QWidget):
             
             # 检查是否拖拽到自己的子文件夹
             if src.is_dir() and target_dir.is_relative_to(src):
-                QMessageBox.warning(self, "错误", "不能将文件夹移动到自己的子文件夹中")
+                # 创建自定义警告框
+                msg_box = QMessageBox(self)
+                msg_box.setWindowTitle("错误")
+                msg_box.setText("不能将文件夹移动到自己的子文件夹中")
+                msg_box.setIcon(QMessageBox.Warning)
+                
+                # 添加自定义按钮
+                ok_btn = msg_box.addButton(I18n.tr('ok'), QMessageBox.AcceptRole)
+                ok_btn.setStyleSheet(BUTTON_STYLES['primary'])
+                
+                msg_box.exec()
                 continue
             
             dst = target_dir / src.name
             
             # 检查目标文件是否存在
             if dst.exists():
-                reply = QMessageBox.question(
-                    self,
-                    I18n.tr('confirm_replace'),
-                    f"文件 {src.name} 已存在，是否替换？",
-                    QMessageBox.Yes | QMessageBox.No
-                )
-                if reply == QMessageBox.No:
+                # 创建自定义消息框
+                msg_box = QMessageBox(self)
+                msg_box.setWindowTitle(I18n.tr('confirm_replace'))
+                msg_box.setText(f"文件 {src.name} 已存在，是否替换？")
+                msg_box.setIcon(QMessageBox.Question)
+                
+                # 添加自定义按钮
+                yes_btn = msg_box.addButton(I18n.tr('yes'), QMessageBox.YesRole)
+                no_btn = msg_box.addButton(I18n.tr('no'), QMessageBox.NoRole)
+                
+                # 应用全局按钮样式
+                yes_btn.setStyleSheet(BUTTON_STYLES['primary'])
+                no_btn.setStyleSheet(BUTTON_STYLES['secondary'])
+                
+                msg_box.setDefaultButton(no_btn)
+                msg_box.exec()
+                
+                if msg_box.clickedButton() == no_btn:
                     continue
             
             try:
@@ -768,16 +918,30 @@ class FileListWidget(QWidget):
             if len(existing_files) > 5:
                 file_list += f"\n... 还有 {len(existing_files) - 5} 个文件"
             
-            reply = QMessageBox.question(
-                self,
-                I18n.tr('confirm_replace'),
-                f"以下文件已存在，是否替换？\n\n{file_list}",
-                QMessageBox.Yes | QMessageBox.No | QMessageBox.Cancel
-            )
+            # 创建自定义消息框
+            msg_box = QMessageBox(self)
+            msg_box.setWindowTitle(I18n.tr('confirm_replace'))
+            msg_box.setText(f"以下文件已存在，是否替换？\n\n{file_list}")
+            msg_box.setIcon(QMessageBox.Question)
             
-            if reply == QMessageBox.Cancel:
+            # 添加自定义按钮
+            yes_btn = msg_box.addButton(I18n.tr('yes'), QMessageBox.YesRole)
+            no_btn = msg_box.addButton(I18n.tr('no'), QMessageBox.NoRole)
+            cancel_btn = msg_box.addButton(I18n.tr('cancel'), QMessageBox.RejectRole)
+            
+            # 应用全局按钮样式
+            yes_btn.setStyleSheet(BUTTON_STYLES['primary'])
+            no_btn.setStyleSheet(BUTTON_STYLES['secondary'])
+            cancel_btn.setStyleSheet(BUTTON_STYLES['secondary'])
+            
+            msg_box.setDefaultButton(no_btn)
+            msg_box.exec()
+            
+            clicked_btn = msg_box.clickedButton()
+            
+            if clicked_btn == cancel_btn:
                 return
-            elif reply == QMessageBox.No:
+            elif clicked_btn == no_btn:
                 # 移除已存在的文件
                 file_paths = [
                     p for p in file_paths 
@@ -819,19 +983,51 @@ class FileListWidget(QWidget):
     
     def _on_file_copied(self, file_path: str):
         """文件复制完成回调"""
+        # 立即发射信号，不等待对话框关闭
         # 只有本地操作才触发同步信号
         if not self.is_syncing(file_path):
-            self.file_added.emit(file_path)
+            # 检查是否是文件夹
+            path = Path(file_path)
+            if path.is_dir():
+                # 如果是文件夹，先发射文件夹创建信号
+                self.file_added.emit(file_path)
+                # 然后递归发射所有文件的信号
+                self._emit_folder_files(path)
+            else:
+                # 如果是文件，直接发射信号
+                self.file_added.emit(file_path)
+    
+    def _emit_folder_files(self, folder_path: Path):
+        """递归发射文件夹内所有文件的信号"""
+        try:
+            for item in folder_path.rglob('*'):
+                if item.is_file():
+                    # 发射文件添加信号
+                    self.file_added.emit(str(item))
+        except Exception as e:
+            print(f"发射文件夹文件信号失败: {e}")
     
     def _on_copy_finished(self, dialog):
         """所有文件复制完成回调"""
+        # 立即关闭对话框，网络同步会在后台进行
         dialog.allow_close()
         dialog.close()
+        # 刷新文件列表
         self.load_files()
     
     def _show_error(self, message: str):
         """显示错误消息（在主线程中调用）"""
-        QMessageBox.critical(self, "错误", message)
+        # 创建自定义错误框
+        msg_box = QMessageBox(self)
+        msg_box.setWindowTitle("错误")
+        msg_box.setText(message)
+        msg_box.setIcon(QMessageBox.Critical)
+        
+        # 添加自定义按钮
+        ok_btn = msg_box.addButton(I18n.tr('ok'), QMessageBox.AcceptRole)
+        ok_btn.setStyleSheet(BUTTON_STYLES['primary'])
+        
+        msg_box.exec()
     
     def refresh(self):
         """

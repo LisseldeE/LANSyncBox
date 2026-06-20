@@ -82,6 +82,7 @@ class I18n:
             "status_syncing": "正在同步",
             "status_conflict": "冲突",
             "status_failed": "同步失败",
+            "status_disconnected": "已断开连接",
             
             # 右键菜单
             "copy": "复制",
@@ -108,6 +109,11 @@ class I18n:
             "yes": "是",
             "no": "否",
             "ok": "确定",
+            
+            # 验证相关
+            "auth_failed": "验证失败",
+            "auth_failed_msg": "验证失败: {msg}",
+            "disconnected": "断开连接",
             
             # 错误信息
             "error_file_exists": "文件已存在",
@@ -151,7 +157,7 @@ class I18n:
             "about_version": "版本: {version}",
             "about_version_label": "版本",
             "about_author": "作者",
-            "about_description": "局域网文件同步工具\n支持主机-客户端模式，实时同步文件变更",
+            "about_description": "局域网文件实时同步工具\n实现多人隔空文件共享",
             "about_check_update": "检查更新",
             "about_info": "提示",
             "about_email_copied": "邮箱已复制到剪贴板",
@@ -234,6 +240,7 @@ class I18n:
             "status_syncing": "Syncing",
             "status_conflict": "Conflict",
             "status_failed": "Failed",
+            "status_disconnected": "Disconnected",
             
             # Context menu
             "copy": "Copy",
@@ -260,6 +267,11 @@ class I18n:
             "yes": "Yes",
             "no": "No",
             "ok": "OK",
+            
+            # Authentication
+            "auth_failed": "Authentication Failed",
+            "auth_failed_msg": "Authentication failed: {msg}",
+            "disconnected": "Disconnected",
             
             # Error messages
             "error_file_exists": "File already exists",
@@ -303,7 +315,7 @@ class I18n:
             "about_version": "Version: {version}",
             "about_version_label": "Version",
             "about_author": "Author",
-            "about_description": "LAN File Sync Tool\nSupport host-client mode, real-time file sync",
+            "about_description": "LAN Real-time File Sync Tool\nMulti-user File Sharing",
             "about_check_update": "Check for Updates",
             "about_info": "Info",
             "about_email_copied": "Email copied to clipboard",

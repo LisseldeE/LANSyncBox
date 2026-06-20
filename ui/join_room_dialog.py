@@ -4,7 +4,7 @@
 from PySide6.QtWidgets import (
     QDialog, QVBoxLayout, QHBoxLayout, QLabel, 
     QLineEdit, QPushButton, QFrame, QMessageBox, QWidget,
-    QGraphicsOpacityEffect
+    QGraphicsOpacityEffect, QApplication
 )
 from PySide6.QtCore import Qt, Signal, QTimer, QPropertyAnimation, QByteArray
 from PySide6.QtGui import QFont, QValidator, QKeyEvent
@@ -28,9 +28,18 @@ class DigitLineEdit(QLineEdit):
     """数字输入框 - 支持退格键自动向前删除"""
     
     backspace_pressed = Signal()  # 退格键按下信号
+    paste_requested = Signal(str)  # 粘贴请求信号
     
     def keyPressEvent(self, event: QKeyEvent):
         """键盘事件处理"""
+        # 检测粘贴操作 (Ctrl+V)
+        if event.modifiers() == Qt.ControlModifier and event.key() == Qt.Key_V:
+            # 发射粘贴信号，让父组件处理
+            clipboard = QApplication.clipboard()
+            text = clipboard.text()
+            self.paste_requested.emit(text)
+            return
+        
         if event.key() == Qt.Key_Backspace:
             # 如果当前格子为空，发送信号让父组件处理
             if not self.text():
@@ -91,6 +100,10 @@ class RoomCodeInput(QWidget):
             # 处理退格键
             edit.backspace_pressed.connect(lambda idx=i: self._on_backspace_pressed(idx))
             
+            # 第一个输入框支持粘贴全部6位房间号
+            if i == 0:
+                edit.paste_requested.connect(self._on_paste_requested)
+            
             self.digit_edits.append(edit)
             layout.addWidget(edit)
         
@@ -108,6 +121,18 @@ class RoomCodeInput(QWidget):
             prev_edit = self.digit_edits[index - 1]
             prev_edit.clear()
             prev_edit.setFocus()
+    
+    def _on_paste_requested(self, text: str):
+        """处理粘贴请求"""
+        # 检查粘贴的内容是否是6位数字
+        text = text.strip()
+        if len(text) == 6 and text.isdigit():
+            # 填充到所有输入框
+            for i, digit in enumerate(text):
+                self.digit_edits[i].setText(digit)
+            
+            # 移动焦点到最后一个输入框
+            self.digit_edits[5].setFocus()
     
     def _on_text_changed(self, text: str, index: int):
         """文本改变时自动跳转"""
@@ -298,7 +323,7 @@ class JoinRoomDialog(QDialog):
         self.discovered_host = host_ip
         
         # 显示状态：已找到房间
-        self._show_status(I18n.tr('room_found', host_ip), color='#51cf66')
+        self._show_status(I18n.tr('room_found', ip=host_ip), color='#51cf66')
         self._room_checked = True
         
         # 显示密码输入框

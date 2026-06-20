@@ -266,12 +266,15 @@ def fade_widget(parent, widget, visible, duration=150):
     old_animation = parent._fade_animations.get(widget)
     if old_animation:
         try:
-            old_animation.finished.disconnect()
-        except:
-            pass
-        old_animation.stop()
-        parent._fade_animations.pop(widget, None)
-        old_animation.deleteLater()
+            # 先停止动画
+            old_animation.stop()
+            # 从字典中移除
+            parent._fade_animations.pop(widget, None)
+            # 延迟删除
+            old_animation.deleteLater()
+        except RuntimeError:
+            # 对象已被删除
+            parent._fade_animations.pop(widget, None)
 
     # 获取或创建透明度效果
     effect = widget.graphicsEffect()

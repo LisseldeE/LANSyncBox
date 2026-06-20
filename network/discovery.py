@@ -127,7 +127,12 @@ class RoomDiscovery(QObject):
                             'timestamp': time.time()
                         }
                     
-                    self.room_found.emit(host_ip, room_code, port)
+                    # 安全发射信号
+                    try:
+                        self.room_found.emit(host_ip, room_code, port)
+                    except RuntimeError:
+                        # 对象已被删除，停止循环
+                        break
                     
             except socket.timeout:
                 continue
@@ -148,7 +153,12 @@ class RoomDiscovery(QObject):
                 for ip, info in self.discovered_rooms.items()
             ]
         
-        self.discovery_finished.emit(rooms)
+        # 安全发射信号，避免对象已删除的错误
+        try:
+            self.discovery_finished.emit(rooms)
+        except RuntimeError:
+            # 对象已被删除，忽略
+            pass
     
     def get_discovered_rooms(self) -> List[dict]:
         """获取已发现的房间列表"""

@@ -24,6 +24,8 @@ class SyncServer(QObject):
     file_receive_start = Signal(str)     # 开始接收文件
     file_receive_progress = Signal(str, int, int)  # 文件接收进度 (filename, current, total)
     file_deleted = Signal(str)           # 文件已删除
+    file_renamed = Signal(str, str)      # 文件已重命名 (old_name, new_name)
+    dir_created = Signal(str)            # 目录已创建
     file_sent = Signal(str)              # 发送文件完成
     file_send_progress = Signal(str, int, int)     # 文件发送进度 (filename, current, total)
     log_message = Signal(str)            # 日志消息
@@ -188,6 +190,9 @@ class SyncServer(QObject):
                 }
                 client_info['receiving_file_handle'] = file_handle
                 self.log_message.emit(f"开始接收大文件: {filename} ({self._format_size(file_size)})")
+                
+                # 发射开始接收信号
+                self.file_receive_start.emit(filename)
             except Exception as e:
                 self.log_message.emit(f"创建文件失败: {e}")
         
@@ -199,12 +204,15 @@ class SyncServer(QObject):
                     client_info['receiving_file_handle'].write(chunk_data)
                     client_info['receiving_file']['received_size'] += len(chunk_data)
                     
-                    # 发送进度信号
+                    # 发送进度信号（转换为MB避免溢出）
                     rf = client_info['receiving_file']
+                    # 将字节转换为KB，避免大文件溢出
+                    received_kb = rf['received_size'] // 1024
+                    total_kb = rf['file_size'] // 1024
                     self.file_receive_progress.emit(
                         rf['filename'], 
-                        rf['received_size'], 
-                        rf['file_size']
+                        received_kb, 
+                        total_kb
                     )
                 except Exception as e:
                     self.log_message.emit(f"写入数据块失败: {e}")
@@ -320,6 +328,9 @@ class SyncServer(QObject):
         
         self.log_message.emit(f"创建目录: {dirname}")
         
+        # 发射目录创建信号
+        self.dir_created.emit(dirname)
+        
         # 转发给其他客户端
         self._broadcast_dir_create(dirname, exclude_client=client_id)
     
@@ -336,6 +347,9 @@ class SyncServer(QObject):
             os.rename(old_path, new_path)
             
             self.log_message.emit(f"重命名: {old_name} -> {new_name}")
+            
+            # 发射重命名信号
+            self.file_renamed.emit(old_name, new_name)
             
             # 转发给其他客户端
             self._broadcast_rename(old_name, new_name, exclude_client=client_id)
@@ -365,6 +379,12 @@ class SyncServer(QObject):
         使用流式传输，避免大文件占用过多内存
         """
         try:
+            # 检查是否是文件夹
+            if os.path.isdir(filepath):
+                # 广播创建目录
+                self.broadcast_dir_create(filepath)
+                return
+            
             file_size = os.path.getsize(filepath)
             mtime = os.path.getmtime(filepath)
             rel_path = os.path.relpath(filepath, self.sync_folder).replace('\\', '/')
@@ -409,6 +429,7 @@ class SyncServer(QObject):
         
         # 流式读取并发送数据块
         chunk_index = 0
+        sent_size = 0
         with open(filepath, 'rb') as f:
             while True:
                 chunk = f.read(self.CHUNK_SIZE)
@@ -418,11 +439,19 @@ class SyncServer(QObject):
                 chunk_msg = Protocol.create_file_data_message(filename, chunk_index, chunk)
                 self._broadcast_data(chunk_msg)
                 chunk_index += 1
+                sent_size += len(chunk)
+                
+                # 发射发送进度信号（转换为KB避免溢出）
+                sent_kb = sent_size // 1024
+                total_kb = file_size // 1024
+                self.file_send_progress.emit(filename, sent_kb, total_kb)
         
         # 发送文件结束消息
         end_msg = Protocol.create_file_end_message(filename, file_size, mtime)
         self._broadcast_data(end_msg)
         
+        # 发射发送完成信号
+        self.file_sent.emit(filename)
         self.log_message.emit(f"大文件发送完成: {filename}")
     
     def _broadcast_existing_file(self, filename: str, exclude_client: str = None):
@@ -496,20 +525,32 @@ class SyncServer(QObject):
             self._broadcast_data(message, exclude_client)
             
             # 发送数据块
+            sent_size = 0
             for i in range(0, file_size, self.CHUNK_SIZE):
                 chunk = content[i:i + self.CHUNK_SIZE]
                 chunk_msg = Protocol.create_file_data_message(filename, i // self.CHUNK_SIZE, chunk)
                 self._broadcast_data(chunk_msg, exclude_client)
+                sent_size += len(chunk)
+                
+                # 发射发送进度信号
+                self.file_send_progress.emit(filename, sent_size, file_size)
             
             # 发送结束标记
             end_msg = Protocol.create_file_end_message(filename, file_size, mtime)
             self._broadcast_data(end_msg, exclude_client)
+            
+            # 发射发送完成信号
+            self.file_sent.emit(filename)
         else:
             # 小文件一次性传输
             message = Protocol.pack_message(
                 MessageType.FILE, filename, file_size, False, content, mtime
             )
             self._broadcast_data(message, exclude_client)
+            
+            # 发射发送进度和完成信号
+            self.file_send_progress.emit(filename, file_size, file_size)
+            self.file_sent.emit(filename)
     
     def broadcast_delete(self, filepath: str):
         """
