@@ -39,7 +39,6 @@ class CreateRoomDialog(QDialog):
         self.room_code = ""
         self.password = ""
         self.sync_folder = ""
-        self.allow_peer_sync = False
         
         self._init_ui()
     
@@ -109,15 +108,6 @@ class CreateRoomDialog(QDialog):
         
         layout.addWidget(folder_group)
         
-        # 选项组
-        options_group = QGroupBox(I18n.t('common_options') if hasattr(I18n, 't') and 'common_options' in I18n.get_all_keys() else "选项")
-        options_layout = QVBoxLayout(options_group)
-        
-        self.peer_sync_checkbox = QCheckBox(I18n.t('create_peer_sync'))
-        options_layout.addWidget(self.peer_sync_checkbox)
-        
-        layout.addWidget(options_group)
-        
         layout.addStretch()
         
         # 按钮区域
@@ -180,7 +170,6 @@ class CreateRoomDialog(QDialog):
         room_code = self.room_code_input.text()
         password = self.password_input.text()
         sync_folder = self.folder_path_input.text()
-        allow_peer_sync = self.peer_sync_checkbox.isChecked()
         
         # 验证房间号
         if len(room_code) != 6 or not room_code.isdigit():
@@ -204,13 +193,12 @@ class CreateRoomDialog(QDialog):
         
         # 创建房间（使用用户输入的房间号）
         created_code = room_manager.create_room(
-            sync_folder, password, allow_peer_sync, room_code=room_code
+            sync_folder, password, room_code=room_code
         )
         if created_code:
             self.room_code = created_code
             self.password = password
             self.sync_folder = sync_folder
-            self.allow_peer_sync = allow_peer_sync
             self.accept()
         else:
             QMessageBox.warning(self, I18n.t('common_info'), I18n.t('create_failed') if hasattr(I18n, 't') and 'create_failed' in I18n.get_all_keys() else "创建房间失败，请重试")

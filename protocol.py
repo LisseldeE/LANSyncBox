@@ -2,6 +2,7 @@
 """
 LANSyncBox 自定义传输协议
 协议格式: [消息类型(4B)][文件名长度(4B)][文件大小(8B)][隐藏标记(1B)][文件名+内容]
+支持大文件分块传输：FILE_BEGIN -> FILE_DATA -> FILE_END
 """
 
 import struct
@@ -10,7 +11,9 @@ from config import (
     MSG_TYPE_FILE, MSG_TYPE_DELETE, MSG_TYPE_AUTH_REQ, MSG_TYPE_AUTH_RESP,
     MSG_TYPE_FILE_LIST_REQ, MSG_TYPE_FILE_LIST_RESP, MSG_TYPE_HEARTBEAT,
     MSG_TYPE_FULL_SYNC_REQ, MSG_TYPE_FULL_SYNC_RESP, MSG_TYPE_CLIENT_INFO,
-    MSG_TYPE_DIR_CREATE, BUFFER_SIZE
+    MSG_TYPE_DIR_CREATE, MSG_TYPE_FILE_BEGIN, MSG_TYPE_FILE_DATA, MSG_TYPE_FILE_END,
+    MSG_TYPE_FILE_ACK, MSG_TYPE_FILE_CANCEL, MSG_TYPE_SYNC_REQUEST,
+    BUFFER_SIZE, CHUNKED_TRANSFER_THRESHOLD, CHUNK_SIZE
 )
 
 
@@ -72,7 +75,7 @@ class Protocol:
     @staticmethod
     def create_file_message(filepath: str, base_dir: str, hide_from_others: bool = False) -> bytes:
         """
-        创建文件传输消息
+        创建文件传输消息（用于小文件一次性传输）
         Args:
             filepath: 文件绝对路径
             base_dir: 同步文件夹根目录
@@ -92,6 +95,115 @@ class Protocol:
         
         return Protocol.pack_message(
             MSG_TYPE_FILE, rel_path, file_size, hide_from_others, content, mtime
+        )
+    
+    @staticmethod
+    def create_file_begin_message(filepath: str, base_dir: str, 
+                                   hide_from_others: bool = False) -> tuple:
+        """
+        创建大文件传输开始消息
+        Args:
+            filepath: 文件绝对路径
+            base_dir: 同步文件夹根目录
+            hide_from_others: 是否对外隐藏
+        Returns:
+            (消息, 文件大小, 修改时间, 相对路径)
+        """
+        rel_path = os.path.relpath(filepath, base_dir)
+        file_size = os.path.getsize(filepath)
+        mtime = os.path.getmtime(filepath)
+        
+        message = Protocol.pack_message(
+            MSG_TYPE_FILE_BEGIN, rel_path, file_size, hide_from_others, b'', mtime
+        )
+        
+        return message, file_size, mtime, rel_path
+    
+    @staticmethod
+    def create_file_data_message(rel_path: str, chunk_index: int, 
+                                  chunk_data: bytes) -> bytes:
+        """
+        创建文件数据块消息
+        Args:
+            rel_path: 文件相对路径
+            chunk_index: 数据块索引（从0开始）
+            chunk_data: 数据块内容
+        Returns:
+            打包后的消息
+        """
+        # 数据块消息格式：文件名 + 块索引(4B) + 数据
+        filename_bytes = rel_path.encode('utf-8')
+        chunk_index_bytes = struct.pack('!I', chunk_index)
+        
+        header = struct.pack(
+            Protocol.HEADER_FORMAT,
+            MSG_TYPE_FILE_DATA,
+            len(filename_bytes),
+            len(chunk_data) + 4,  # 数据大小 = 块数据 + 块索引
+            0.0,  # mtime不适用
+            0     # hide不适用
+        )
+        
+        return header + filename_bytes + chunk_index_bytes + chunk_data
+    
+    @staticmethod
+    def create_file_end_message(rel_path: str, file_size: int, 
+                                 mtime: float, hide_from_others: bool) -> bytes:
+        """
+        创建文件传输结束消息
+        Args:
+            rel_path: 文件相对路径
+            file_size: 文件总大小
+            mtime: 文件修改时间
+            hide_from_others: 是否对外隐藏
+        Returns:
+            打包后的消息
+        """
+        return Protocol.pack_message(
+            MSG_TYPE_FILE_END, rel_path, file_size, hide_from_others, b'', mtime
+        )
+    
+    @staticmethod
+    def create_file_ack_message(rel_path: str, chunk_index: int, 
+                                 received_bytes: int) -> bytes:
+        """
+        创建数据块确认消息（用于流控）
+        Args:
+            rel_path: 文件相对路径
+            chunk_index: 已处理的数据块索引
+            received_bytes: 已接收的总字节数
+        Returns:
+            打包后的消息
+        """
+        # 确认消息格式：文件名 + 块索引(4B) + 已接收字节数(8B)
+        filename_bytes = rel_path.encode('utf-8')
+        chunk_index_bytes = struct.pack('!I', chunk_index)
+        received_bytes_bytes = struct.pack('!Q', received_bytes)
+        
+        header = struct.pack(
+            Protocol.HEADER_FORMAT,
+            MSG_TYPE_FILE_ACK,
+            len(filename_bytes),
+            12,  # 数据大小 = 块索引(4B) + 已接收字节数(8B)
+            0.0,  # mtime不适用
+            0     # hide不适用
+        )
+        
+        return header + filename_bytes + chunk_index_bytes + received_bytes_bytes
+    
+    @staticmethod
+    def create_file_cancel_message(rel_path: str, reason: str = '') -> bytes:
+        """
+        创建文件传输取消消息
+        Args:
+            rel_path: 文件相对路径
+            reason: 取消原因
+        Returns:
+            打包后的消息
+        """
+        reason_bytes = reason.encode('utf-8')
+        return Protocol.pack_message(
+            MSG_TYPE_FILE_CANCEL, rel_path, len(reason_bytes), False, reason_bytes
         )
     
     @staticmethod
@@ -123,18 +235,18 @@ class Protocol:
         return Protocol.pack_message(MSG_TYPE_AUTH_REQ, '', len(content), False, content)
     
     @staticmethod
-    def create_auth_response(success: bool, message: str = '', allow_peer_sync: bool = False) -> bytes:
+    def create_auth_response(success: bool, message: str = '') -> bytes:
         """
-        创建房间验证响应
+        创建验证响应消息
         Args:
-            success: 是否验证成功
-            message: 附加消息
-            allow_peer_sync: 是否允许连接端互相同步
+            success: 是否成功
+            message: 消息内容
         Returns:
             打包后的消息
         """
-        # 格式: success:message:allow_peer_sync
-        content = f"{'1' if success else '0'}:{message}:{'1' if allow_peer_sync else '0'}".encode('utf-8')
+        # 格式: success:message
+        content = f"{'1' if success else '0'}:{message}".encode('utf-8')
+        
         return Protocol.pack_message(MSG_TYPE_AUTH_RESP, '', len(content), False, content)
     
     @staticmethod
@@ -164,6 +276,23 @@ class Protocol:
     def create_full_sync_request() -> bytes:
         """创建全量同步请求"""
         return Protocol.pack_message(MSG_TYPE_FULL_SYNC_REQ)
+    
+    @staticmethod
+    def create_sync_request(need_receive: list, need_send: list) -> bytes:
+        """
+        创建双向同步请求消息
+        Args:
+            need_receive: 需要从主机端接收的文件列表 [[path, size, mtime], ...]
+            need_send: 需要发送到主机端的文件列表 [[path, size, mtime], ...]
+        Returns:
+            打包后的消息
+        """
+        import json
+        content = json.dumps({
+            'need_receive': need_receive,
+            'need_send': need_send
+        }).encode('utf-8')
+        return Protocol.pack_message(MSG_TYPE_SYNC_REQUEST, '', len(content), False, content)
     
     @staticmethod
     def create_client_info_update(hide_from_others: bool) -> bytes:
@@ -206,14 +335,30 @@ class MessageReceiver:
         if len(self.buffer) < Protocol.HEADER_SIZE:
             return False
         
-        _, filename_len, file_size, _, _ = Protocol.unpack_header(self.buffer)
-        return len(self.buffer) >= Protocol.HEADER_SIZE + filename_len + file_size
+        try:
+            msg_type, filename_len, file_size, _, _ = Protocol.unpack_header(self.buffer)
+            
+            # 根据消息类型判断消息长度
+            # FILE_BEGIN (0x0C) 和 FILE_END (0x0E) 消息的 file_size 字段存储的是文件总大小，
+            # 但消息本身不包含文件内容，所以消息长度应该是 HEADER_SIZE + filename_len + 0
+            if msg_type == MSG_TYPE_FILE_BEGIN or msg_type == MSG_TYPE_FILE_END:
+                content_size = 0  # 这些消息没有 content
+            else:
+                content_size = file_size  # 其他消息的 file_size 是 content 的大小
+            
+            required_size = Protocol.HEADER_SIZE + filename_len + content_size
+            has_complete = len(self.buffer) >= required_size
+            
+            return has_complete
+        except Exception as e:
+            return False
     
     def get_message(self) -> tuple:
         """
         获取一条完整消息
         Returns:
             (msg_type, filename, file_size, mtime, hide_from_others, content)
+            对于FILE_DATA消息，content包含(chunk_index, chunk_data)
         """
         if not self.has_complete_message():
             return None
@@ -221,14 +366,32 @@ class MessageReceiver:
         # 解析头部
         msg_type, filename_len, file_size, mtime, hide_flag = Protocol.unpack_header(self.buffer)
         
+        # 根据消息类型判断 content 大小
+        if msg_type == MSG_TYPE_FILE_BEGIN or msg_type == MSG_TYPE_FILE_END:
+            content_size = 0  # 这些消息没有 content
+        else:
+            content_size = file_size
+        
         # 提取文件名和内容
         filename = self.buffer[Protocol.HEADER_SIZE:Protocol.HEADER_SIZE + filename_len].decode('utf-8')
         content_start = Protocol.HEADER_SIZE + filename_len
-        content_end = content_start + file_size
+        content_end = content_start + content_size
         content = self.buffer[content_start:content_end]
         
         # 移除已处理的数据
         self.buffer = self.buffer[content_end:]
+        
+        # 对于FILE_DATA消息，解析块索引
+        if msg_type == MSG_TYPE_FILE_DATA:
+            chunk_index = struct.unpack('!I', content[:4])[0]
+            chunk_data = content[4:]
+            return msg_type, filename, file_size, mtime, hide_flag, (chunk_index, chunk_data)
+        
+        # 对于FILE_ACK消息，解析确认信息
+        if msg_type == MSG_TYPE_FILE_ACK:
+            chunk_index = struct.unpack('!I', content[:4])[0]
+            received_bytes = struct.unpack('!Q', content[4:12])[0]
+            return msg_type, filename, file_size, mtime, hide_flag, (chunk_index, received_bytes)
         
         return msg_type, filename, file_size, mtime, hide_flag, content
     

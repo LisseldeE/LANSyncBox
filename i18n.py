@@ -145,6 +145,7 @@ class I18n:
             'sync_source': '来源',
             'sync_client_ip': 'IP地址',
             'sync_client_hide': '隐藏',
+            'sync_progress': '进度',
         },
         'en': {
             # Main window
@@ -279,6 +280,7 @@ class I18n:
             'sync_source': 'Source',
             'sync_client_ip': 'IP Address',
             'sync_client_hide': 'Hidden',
+            'sync_progress': 'Progress',
         }
     }
     

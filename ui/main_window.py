@@ -288,7 +288,6 @@ class MainWindow(QMainWindow):
             room_code = dialog.room_code
             password = dialog.password
             sync_folder = dialog.sync_folder
-            allow_peer_sync = dialog.allow_peer_sync
             
             # 打开同步状态界面（主机模式）
             sync_window = SyncWindow(
@@ -296,7 +295,6 @@ class MainWindow(QMainWindow):
                 room_code=room_code,
                 password=password,
                 sync_folder=sync_folder,
-                allow_peer_sync=allow_peer_sync,
                 parent=self
             )
             self.sync_windows.append(sync_window)

@@ -17,11 +17,10 @@ class Room:
     """房间信息"""
     
     def __init__(self, room_code: str, password_hash: str = "", sync_folder: str = "",
-                 allow_peer_sync: bool = False, host_ip: str = ""):
+                 host_ip: str = ""):
         self.room_code = room_code
         self.password_hash = password_hash
         self.sync_folder = sync_folder
-        self.allow_peer_sync = allow_peer_sync
         self.host_ip = host_ip  # 主机IP地址
         self.clients: Dict[str, dict] = {}  # {client_id: {hide_from_others, address}}
         self.created_at = 0
@@ -87,13 +86,12 @@ class RoomManager(QObject):
         return hashlib.sha256(password.encode()).hexdigest()
     
     def create_room(self, sync_folder: str, password: str = "",
-                    allow_peer_sync: bool = False, room_code: str = None) -> Optional[str]:
+                    room_code: str = None) -> Optional[str]:
         """
         创建房间
         Args:
             sync_folder: 同步文件夹
             password: 密码（可选）
-            allow_peer_sync: 是否允许连接端互相同步
             room_code: 指定房间号（可选，如果不指定则自动生成）
         Returns:
             房间号，失败返回None
@@ -130,7 +128,6 @@ class RoomManager(QObject):
                 room_code=room_code,
                 password_hash=RoomManager.hash_password(password),
                 sync_folder=sync_folder,
-                allow_peer_sync=allow_peer_sync,
                 host_ip=local_ip
             )
             room.created_at = time.time()

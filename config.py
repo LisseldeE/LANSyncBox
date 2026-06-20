@@ -21,14 +21,14 @@ GITEE_RELEASES = f"https://gitee.com/{APP_REPO_GITEE}/releases"
 
 # 网络配置
 DEFAULT_PORT = 9527
-BUFFER_SIZE = 65536  # 64KB缓冲区
+BUFFER_SIZE = 512 * 1024  # 512KB缓冲区（匹配分块大小）
 MAX_CONCURRENT_TRANSFERS = 3  # 最大同时传输数
 
 # 房间配置
 ROOM_CODE_LENGTH = 6  # 房间号长度
 
 # 协议消息类型
-MSG_TYPE_FILE = 0x01          # 文件传输
+MSG_TYPE_FILE = 0x01          # 文件传输（小文件一次性传输）
 MSG_TYPE_DELETE = 0x02         # 删除指令
 MSG_TYPE_AUTH_REQ = 0x03       # 房间验证请求
 MSG_TYPE_AUTH_RESP = 0x04      # 房间验证响应
@@ -39,6 +39,21 @@ MSG_TYPE_FULL_SYNC_REQ = 0x08  # 全量同步请求
 MSG_TYPE_FULL_SYNC_RESP = 0x09 # 全量同步响应
 MSG_TYPE_CLIENT_INFO = 0x0A    # 客户端信息更新
 MSG_TYPE_DIR_CREATE = 0x0B     # 目录创建
+MSG_TYPE_FILE_BEGIN = 0x0C     # 大文件传输开始
+MSG_TYPE_FILE_DATA = 0x0D      # 大文件数据块
+MSG_TYPE_FILE_END = 0x0E       # 大文件传输结束
+MSG_TYPE_FILE_ACK = 0x0F       # 数据块确认（流控）
+MSG_TYPE_FILE_CANCEL = 0x10    # 文件传输取消
+MSG_TYPE_SYNC_REQUEST = 0x11   # 双向同步请求（连接端发送）
+
+# 大文件分块传输配置
+CHUNKED_TRANSFER_THRESHOLD = 0  # 所有文件都使用分块传输
+CHUNK_SIZE = 64 * 1024  # 每块64KB（确保接收端可以快速接收完整消息）
+
+# 流控配置
+WINDOW_SIZE = 8  # 滑动窗口大小（同时发送的数据块数量）
+ACK_TIMEOUT = 30  # 确认超时时间（秒）
+MAX_RETRY_COUNT = 3  # 最大重试次数
 
 # 超时设置
 CONNECTION_TIMEOUT = 30  # 连接超时（秒）- 增加到30秒
