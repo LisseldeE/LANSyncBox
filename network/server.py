@@ -24,6 +24,7 @@ class SyncServer(QObject):
     file_received = Signal(str)          # 收到文件
     file_receive_start = Signal(str)     # 开始接收文件
     file_receive_progress = Signal(str, int, int)  # 文件接收进度 (filename, current, total)
+    file_receive_cancelled = Signal(str)  # 文件接收被取消
     file_deleted = Signal(str)           # 文件已删除
     file_renamed = Signal(str, str)      # 文件已重命名 (old_name, new_name)
     dir_created = Signal(str)            # 目录已创建
@@ -745,7 +746,9 @@ class SyncServer(QObject):
                     # 清理状态
                     client_info['receiving_file'] = None
                     client_info['receiving_file_handle'] = None
-                    
+
+                    # 通知 UI 清理接收进度条
+                    self.file_receive_cancelled.emit(filename)
                     self.log_message.emit(f"取消接收文件: {filename}")
             
         except Exception as e:

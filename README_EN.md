@@ -120,6 +120,7 @@ File conflicts are handled by the system file manager. Sync ensures consistency 
 ## Change Log
 
 ### 2026.6.21 R4
+**#01**
 - Added initial full sync mechanism on first connection to align differences between both ends
 - Added transfer cancellation mechanism to handle file corruption caused by file changes during transfer
 - Improved transfer queue, fixed file skip error caused by queue conflicts
@@ -127,6 +128,10 @@ File conflicts are handled by the system file manager. Sync ensures consistency 
 - Fixed numerous handle overflow and residual issues
 - Optimized asynchronous processing logic during sync
 - Fixed TCP buffer overflow issue
+
+**#02**
+- Fixed progress bar residual issue during sync cancellation
+- Fixed UI handle overflow error caused by sync cancellation
 
 ### 2026.6.20 R3
 **#01**

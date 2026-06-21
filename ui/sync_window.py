@@ -45,6 +45,7 @@ class SyncWindow(QMainWindow):
         
         # 传输进度跟踪
         self._transfer_rows = {}  # 文件名 -> 行号映射
+        self._cancelled_transfers = set()  # 已取消的文件名（忽略残留进度信号）
         
         # 传输队列管理器（限制同时传输3个文件）
         self.transfer_queue = TransferQueue(max_concurrent=3)
@@ -213,6 +214,7 @@ class SyncWindow(QMainWindow):
             self.server.file_receive_start.connect(self.on_file_receive_start)
             self.server.file_receive_progress.connect(self.on_file_receive_progress)
             self.server.file_received.connect(self.on_remote_file_received)
+            self.server.file_receive_cancelled.connect(self.on_remote_file_cancelled)
             self.server.file_deleted.connect(self.on_remote_file_deleted)
             self.server.file_renamed.connect(self.on_remote_file_renamed)
             self.server.dir_created.connect(self.on_remote_dir_created)
@@ -240,6 +242,7 @@ class SyncWindow(QMainWindow):
             self.client.file_receive_start.connect(self.on_file_receive_start)
             self.client.file_receive_progress.connect(self.on_file_receive_progress)
             self.client.file_received.connect(self.on_remote_file_received)
+            self.client.file_receive_cancelled.connect(self.on_remote_file_cancelled)
             self.client.file_deleted.connect(self.on_remote_file_deleted)
             self.client.file_renamed.connect(self.on_remote_file_renamed)
             self.client.dir_created.connect(self.on_remote_dir_created)
@@ -446,7 +449,11 @@ class SyncWindow(QMainWindow):
         # 标记文件正在同步，避免循环同步
         file_path = str(self.room_folder / filename)
         self.file_list.mark_syncing(file_path)
-        
+
+        # 清除取消标记，让新接收能添加新进度条
+        self._cancelled_transfers.discard(filename)
+        self._transfer_rows.pop(filename, None)
+
         # 在表格中添加进度条
         self._add_transfer_progress(filename, 0, 0)
     
@@ -473,13 +480,36 @@ class SyncWindow(QMainWindow):
         # 取消同步标记
         file_path = str(self.room_folder / filename)
         self.file_list.unmark_syncing(file_path)
-        
+
         # 更新进度为完成
         self._finish_transfer_progress(filename)
-        
+
         # 刷新文件列表（不会触发同步信号）
         self.file_list.refresh()
-        
+
+        # 只有当没有其他文件正在同步时，才更新状态为"已同步"
+        if not self._transfer_rows:
+            self.status_label.setText(I18n.tr('status_synced'))
+            self.status_label.setStyleSheet("color: green;")
+
+    def on_remote_file_cancelled(self, filename: str):
+        """远程文件接收被取消（线程安全）"""
+        QMetaObject.invokeMethod(self, "_do_remote_file_cancelled", Qt.QueuedConnection,
+                                 Q_ARG(str, filename))
+
+    @Slot(str)
+    def _do_remote_file_cancelled(self, filename: str):
+        """实际执行：远程文件接收被取消"""
+        # 取消同步标记
+        file_path = str(self.room_folder / filename)
+        self.file_list.unmark_syncing(file_path)
+
+        # 标记进度条为"已取消"并清理占位
+        self._cancel_transfer_progress(filename)
+
+        # 刷新文件列表
+        self.file_list.refresh()
+
         # 只有当没有其他文件正在同步时，才更新状态为"已同步"
         if not self._transfer_rows:
             self.status_label.setText(I18n.tr('status_synced'))
@@ -514,6 +544,9 @@ class SyncWindow(QMainWindow):
     @Slot(str, int, int)
     def _do_file_send_progress(self, filename: str, current: int, total: int):
         """实际执行：更新主机端发送进度"""
+        # 忽略已取消传输的残留进度信号
+        if filename in self._cancelled_transfers:
+            return
         # 如果是第一次，添加进度条
         if filename not in self._transfer_rows:
             self._add_transfer_progress(filename, current, total)
@@ -663,12 +696,15 @@ class SyncWindow(QMainWindow):
     
     def _update_transfer_progress(self, filename: str, current: int, total: int):
         """更新传输进度
-        
+
         Args:
             filename: 文件名
             current: 当前已传输的KB数
             total: 总KB数
         """
+        # 忽略已取消传输的残留进度信号
+        if filename in self._cancelled_transfers:
+            return
         if filename in self._transfer_rows:
             row = self._transfer_rows[filename]
             progress_bar = self.records_table.cellWidget(row, 1)
@@ -718,17 +754,37 @@ class SyncWindow(QMainWindow):
     def on_cancel_transfer(self, rel_path: str):
         """取消文件传输（删除/重命名前调用，避免 Windows 文件锁）"""
         self.transfer_queue.cancel_tasks_by_filename(rel_path)
+        # 清理发送进度条占位，避免再次发送同名文件时复用旧的进度条
+        self._cancel_transfer_progress(rel_path)
+
+    def _cancel_transfer_progress(self, filename: str):
+        """取消传输进度条，标记为已取消（保留 _transfer_rows 记录，忽略残留进度信号）"""
+        if filename in self._transfer_rows:
+            row = self._transfer_rows[filename]
+            from pathlib import Path
+            display_name = Path(filename).name
+            if len(display_name) > 25:
+                display_name = display_name[:22] + "..."
+            self.records_table.setCellWidget(row, 1, None)
+            status_item = QTableWidgetItem(f"{display_name} - 已取消")
+            status_item.setForeground(QColor("#ff922b"))
+            self.records_table.setItem(row, 1, status_item)
+            # 不删除 _transfer_rows[filename]，残留进度信号通过 _cancelled_transfers 过滤
+            self._cancelled_transfers.add(filename)
     
     def on_file_added(self, file_path: str):
         """文件添加事件（本地操作）"""
         from pathlib import Path
-        
+
         file_name = Path(file_path).name
         self._add_record(file_name, "添加", "")
-        
+
         # 取消该文件的所有传输任务（支持复合键 client_id:filename）
         rel_path = os.path.relpath(file_path, self.room_folder).replace('\\', '/')
         self.transfer_queue.cancel_tasks_by_filename(rel_path)
+        # 清除取消标记，让新传输能添加新进度条
+        self._cancelled_transfers.discard(rel_path)
+        self._transfer_rows.pop(rel_path, None)
         
         # 更新状态为同步中
         self.status_label.setText(I18n.tr('status_syncing'))
