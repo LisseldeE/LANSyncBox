@@ -7,7 +7,7 @@ LANSyncBox is a lightweight LAN real-time file synchronization tool that enables
 ## Project Information
 
 - **Project Name**: LANSyncBox
-- **Project Version**: R3
+- **Project Version**: R4
 - **Project Author**: Lisselde_E
 - **Contact Email**: Lisselde.E@outlook.com
 - **Project Repository**: https://github.com/LisseldeE/LANSyncBox
@@ -21,6 +21,15 @@ LANSyncBox is a lightweight LAN real-time file synchronization tool that enables
 - Optional password verification for secure syncing
 - Large file streaming transfers to avoid high memory usage
 - Concurrent transfer limit (max 3 files simultaneously) to optimize system resource usage
+- Initial full sync on first connection, automatically aligns differences between both ends
+
+### Transfer Reliability
+- Transfer cancellation: Auto-cancels when file changes during transfer, preventing file corruption
+- Resumable transfer: Large file chunks are written by index positioning, failed retransmissions don't corrupt files
+- Integrity check: Validates file size on completion, automatically discards incomplete files
+- TCP buffer optimization: Increased send/receive buffers to avoid backpressure timeouts on large files
+- Backpressure adaptation: Auto-retries on send timeout, distinguishes between cancellation and backpressure, ensuring stable large file transfers
+- Auto-retransmit for failed clients: Skips and retransmits entire file when a client fails during broadcast, ensuring final sync
 
 ### Multi-client Sync
 - Host monitors all changes in sync folder
@@ -104,8 +113,20 @@ File conflicts are handled by the system file manager. Sync ensures consistency 
 - **Transfer Protocol**: TCP + custom protocol
 - **Large File Handling**: Streaming chunked transfer to avoid high memory usage
 - **Concurrency Control**: Max 3 files transferred simultaneously to optimize system resource usage
+- **Transfer Cancellation**: Auto-cancels transfer on file change, sends FILE_CANCEL to notify receiver cleanup
+- **Resumable Transfer**: Chunks written by chunk_index positioning, failed retransmissions don't affect received parts
+- **Integrity Check**: Validates file size on FILE_END, discards temp file if incomplete
 
 ## Change Log
+
+### 2026.6.21 R4
+- Added initial full sync mechanism on first connection to align differences between both ends
+- Added transfer cancellation mechanism to handle file corruption caused by file changes during transfer
+- Improved transfer queue, fixed file skip error caused by queue conflicts
+- Fixed blocking errors encountered during transfer cancellation
+- Fixed numerous handle overflow and residual issues
+- Optimized asynchronous processing logic during sync
+- Fixed TCP buffer overflow issue
 
 ### 2026.6.20 R3
 **#01**

@@ -15,11 +15,15 @@ class MessageType:
     DELETE = 0x02         # 删除指令
     AUTH_REQ = 0x03       # 验证请求
     AUTH_RESP = 0x04      # 验证响应
+    FILE_LIST_REQ = 0x08  # 请求文件列表
+    FILE_LIST_RESP = 0x09 # 响应文件列表（JSON格式）
+    FILE_REQUEST = 0x0A   # 请求特定文件
     HEARTBEAT = 0x07      # 心跳
     FILE_BEGIN = 0x0C     # 大文件传输开始
     FILE_DATA = 0x0D      # 大文件数据块
     FILE_END = 0x0E       # 大文件传输结束
     DIR_CREATE = 0x0B     # 目录创建
+    FILE_CANCEL = 0x0F    # 取消文件传输
 
 
 class Protocol:
@@ -131,6 +135,48 @@ class Protocol:
         """创建目录创建消息"""
         rel_path = os.path.relpath(dirpath, base_dir).replace('\\', '/')
         return Protocol.pack_message(MessageType.DIR_CREATE, rel_path)
+    
+    @staticmethod
+    def create_file_list_request() -> bytes:
+        """创建文件列表请求消息"""
+        return Protocol.pack_message(MessageType.FILE_LIST_REQ)
+    
+    @staticmethod
+    def create_file_list_response(file_list: list) -> bytes:
+        """创建文件列表响应消息
+        
+        Args:
+            file_list: 文件列表，格式为 [{"filename": "test.txt", "size": 1024, "mtime": 1234567890.123}, ...]
+        
+        Returns:
+            消息字节
+        """
+        content = json.dumps(file_list).encode('utf-8')
+        return Protocol.pack_message(MessageType.FILE_LIST_RESP, '', len(content), False, content)
+    
+    @staticmethod
+    def create_file_request(filename: str) -> bytes:
+        """创建文件请求消息
+        
+        Args:
+            filename: 请求的文件名（相对路径）
+        
+        Returns:
+            消息字节
+        """
+        return Protocol.pack_message(MessageType.FILE_REQUEST, filename)
+    
+    @staticmethod
+    def create_file_cancel(filename: str) -> bytes:
+        """创建文件取消传输消息
+        
+        Args:
+            filename: 要取消传输的文件名（相对路径）
+        
+        Returns:
+            消息字节
+        """
+        return Protocol.pack_message(MessageType.FILE_CANCEL, filename)
 
 
 class MessageReceiver:
@@ -151,8 +197,10 @@ class MessageReceiver:
         try:
             msg_type, filename_len, file_size, _, _ = Protocol.unpack_header(self.buffer)
             
-            # FILE_BEGIN 和 FILE_END 消息没有 content
-            if msg_type == MessageType.FILE_BEGIN or msg_type == MessageType.FILE_END:
+            # FILE_BEGIN、FILE_END、FILE_LIST_REQ、FILE_REQUEST、FILE_CANCEL 消息没有 content
+            if msg_type in [MessageType.FILE_BEGIN, MessageType.FILE_END, 
+                           MessageType.FILE_LIST_REQ, MessageType.FILE_REQUEST, 
+                           MessageType.FILE_CANCEL]:
                 content_size = 0
             else:
                 content_size = file_size
@@ -171,7 +219,9 @@ class MessageReceiver:
         msg_type, filename_len, file_size, mtime, hide_flag = Protocol.unpack_header(self.buffer)
         
         # 根据消息类型判断 content 大小
-        if msg_type == MessageType.FILE_BEGIN or msg_type == MessageType.FILE_END:
+        if msg_type in [MessageType.FILE_BEGIN, MessageType.FILE_END, 
+                       MessageType.FILE_LIST_REQ, MessageType.FILE_REQUEST, 
+                       MessageType.FILE_CANCEL]:
             content_size = 0
         else:
             content_size = file_size
@@ -190,6 +240,11 @@ class MessageReceiver:
             chunk_index = struct.unpack('!I', content[:4])[0]
             chunk_data = content[4:]
             return msg_type, filename, file_size, mtime, hide_flag, (chunk_index, chunk_data)
+        
+        # 对于FILE_LIST_RESP消息，解析JSON
+        if msg_type == MessageType.FILE_LIST_RESP:
+            file_list = json.loads(content.decode('utf-8'))
+            return msg_type, filename, file_size, mtime, hide_flag, file_list
         
         return msg_type, filename, file_size, mtime, hide_flag, content
     

@@ -277,8 +277,19 @@ class FileListWidget(QWidget):
         # 标记是否正在接收远程文件（刷新文件列表时不触发同步）
         self._receiving_remote = False
         
+        # 取消传输回调（由 SyncWindow 设置，直接调用避免 Qt 信号异步性问题）
+        self._cancel_transfer_callback = None
+        
         self.init_ui()
         self.load_files()
+    
+    def set_cancel_transfer_callback(self, callback):
+        """设置取消传输回调函数
+        
+        Args:
+            callback: 回调函数，签名为 callback(rel_path: str)
+        """
+        self._cancel_transfer_callback = callback
     
     # ========== 同步标记方法 ==========
     
@@ -647,12 +658,41 @@ class FileListWidget(QWidget):
         
         if msg_box.clickedButton() == yes_btn:
             import shutil
+            import time
             for file in files:
                 try:
-                    if file.is_dir():
-                        shutil.rmtree(file)
-                    else:
-                        file.unlink()
+                    # 删除前先取消该文件的传输任务，避免 Windows 文件锁导致删除失败
+                    try:
+                        rel_path = str(file.relative_to(self.folder_path)).replace('\\', '/')
+                        # 直接调用回调（同步执行），避免 Qt 信号异步性导致主线程阻塞时信号无法处理
+                        if self._cancel_transfer_callback:
+                            self._cancel_transfer_callback(rel_path)
+                    except Exception:
+                        pass
+                    
+                    # 循环尝试删除，覆盖发送任务退出期间的最坏情况：
+                    # sendall(chunk) 超时 1 秒 + sendall(FILE_CANCEL) 超时 1 秒 = 2 秒
+                    # 固定 sleep 无法保证覆盖，改用循环重试，最多 3 秒
+                    deleted = False
+                    last_error = None
+                    for attempt in range(30):
+                        try:
+                            if file.is_dir():
+                                shutil.rmtree(file)
+                            else:
+                                file.unlink()
+                            deleted = True
+                            break
+                        except PermissionError as pe:
+                            last_error = pe
+                            time.sleep(0.1)
+                        except OSError as oe:
+                            last_error = oe
+                            time.sleep(0.1)
+                    
+                    if not deleted:
+                        raise last_error if last_error else Exception("删除失败")
+                    
                     # 只有本地操作才触发同步信号
                     if not self.is_syncing(str(file)):
                         self.file_deleted.emit(str(file))
@@ -758,7 +798,33 @@ class FileListWidget(QWidget):
                     return
                 
                 try:
-                    old_path.rename(new_path)
+                    # 重命名前先取消该文件的传输任务，避免 Windows 文件锁导致重命名失败
+                    import time
+                    try:
+                        old_rel_path = str(old_path.relative_to(self.folder_path)).replace('\\', '/')
+                        if self._cancel_transfer_callback:
+                            self._cancel_transfer_callback(old_rel_path)
+                    except Exception:
+                        pass
+                    
+                    # 循环尝试重命名，覆盖发送任务退出期间的最坏情况（最多 2 秒阻塞）
+                    renamed = False
+                    last_error = None
+                    for attempt in range(30):
+                        try:
+                            old_path.rename(new_path)
+                            renamed = True
+                            break
+                        except PermissionError as pe:
+                            last_error = pe
+                            time.sleep(0.1)
+                        except OSError as oe:
+                            last_error = oe
+                            time.sleep(0.1)
+                    
+                    if not renamed:
+                        raise last_error if last_error else Exception("重命名失败")
+                    
                     # 只有本地操作才触发同步信号
                     if not self.is_syncing(str(old_path)):
                         self.file_renamed.emit(str(old_path), str(new_path))

@@ -11,7 +11,7 @@ class Config:
     
     # 应用信息
     APP_NAME = "LANSyncBox"
-    APP_VERSION = "R3"
+    APP_VERSION = "R4"
     APP_AUTHOR = "Lisselde_E"
     APP_EMAIL = "Lisselde.E@outlook.com"
     

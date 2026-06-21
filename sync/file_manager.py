@@ -19,7 +19,7 @@ class FileManager:
         self.folder_path = folder_path
     
     def get_file_list(self) -> List[Dict]:
-        """获取文件列表"""
+        """获取文件列表（包含哈希值，用于详细文件信息）"""
         files = []
         
         if not self.folder_path.exists():
@@ -33,6 +33,32 @@ class FileManager:
                     'size': item.stat().st_size,
                     'mtime': item.stat().st_mtime,
                     'hash': self.calculate_file_hash(item)
+                }
+                files.append(file_info)
+        
+        return files
+    
+    def get_file_list_for_sync(self) -> List[Dict]:
+        """获取文件列表用于同步（不包含哈希值，更快）
+        
+        Returns:
+            文件列表，格式为 [{"filename": "test.txt", "size": 1024, "mtime": 1234567890.123}, ...]
+        """
+        files = []
+        
+        if not self.folder_path.exists():
+            return files
+        
+        for item in self.folder_path.rglob('*'):
+            if item.is_file():
+                # 跳过临时文件（以 .tmp 结尾）
+                if item.name.endswith('.tmp'):
+                    continue
+                
+                file_info = {
+                    'filename': str(item.relative_to(self.folder_path)).replace('\\', '/'),
+                    'size': item.stat().st_size,
+                    'mtime': item.stat().st_mtime
                 }
                 files.append(file_info)
         
@@ -73,7 +99,7 @@ class FileManager:
             if file_path.is_dir():
                 shutil.rmtree(file_path)
             else:
-                file.unlink(file_path)
+                file_path.unlink()
             return True
         except Exception:
             return False

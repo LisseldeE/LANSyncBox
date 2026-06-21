@@ -1,6 +1,8 @@
 """
 同步窗口
 """
+import threading
+import os
 from PySide6.QtWidgets import (
     QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, 
     QLabel, QPushButton, QTextEdit, QFrame, QSplitter, QMessageBox,
@@ -177,6 +179,8 @@ class SyncWindow(QMainWindow):
         self.file_list.file_added.connect(self.on_file_added)
         self.file_list.file_deleted.connect(self.on_file_deleted)
         self.file_list.file_renamed.connect(self.on_file_renamed)
+        # 设置取消传输回调（直接调用，避免 Qt 信号异步性问题）
+        self.file_list.set_cancel_transfer_callback(self.on_cancel_transfer)
         splitter.addWidget(self.file_list)
         
         # 设置分隔器比例
@@ -243,6 +247,8 @@ class SyncWindow(QMainWindow):
             # 客户端发送文件的进度信号
             self.client.file_send_progress.connect(self.on_file_send_progress)
             self.client.file_sent.connect(self.on_file_sent)
+            # 客户端文件列表接收信号
+            self.client.file_list_received.connect(self.on_file_list_received)
             
             # 连接到服务器
             host = self.host_address or "127.0.0.1"
@@ -278,6 +284,36 @@ class SyncWindow(QMainWindow):
         """连接成功"""
         self.status_label.setText(I18n.tr('status_synced'))
         self.status_label.setStyleSheet("color: green;")
+        
+        # 发送自己的文件列表给主机端（连接端）
+        if not self.is_host and self.client:
+            from sync.file_manager import FileManager
+            from pathlib import Path
+            
+            file_manager = FileManager(Path(self.room_folder))
+            local_file_list = file_manager.get_file_list_for_sync()
+            
+            # 发送文件列表给主机端
+            self._send_file_list_to_server(local_file_list)
+    
+    def _send_file_list_to_server(self, file_list: list):
+        """发送文件列表给主机端
+        
+        Args:
+            file_list: 文件列表，格式为 [{"filename": "test.txt", "size": 1024, "mtime": 1234567890.123}, ...]
+        """
+        if not self.client or not self.client.authenticated:
+            return
+        
+        # 发送文件列表响应消息（实际上是发送自己的文件列表）
+        import json
+        content = json.dumps(file_list).encode('utf-8')
+        
+        from network.protocol import Protocol, MessageType
+        message = Protocol.pack_message(MessageType.FILE_LIST_RESP, '', len(content), False, content)
+        self.client.socket.sendall(message)
+        
+        self._add_record("", "发送", f"发送文件列表: {len(file_list)} 个文件")
     
     def on_auth_failed(self, message: str):
         """验证失败"""
@@ -292,6 +328,98 @@ class SyncWindow(QMainWindow):
         self._add_record("", I18n.tr('disconnected'), "")
         self.status_label.setText(I18n.tr('status_disconnected'))
         self.status_label.setStyleSheet("color: red;")
+    
+    def on_file_list_received(self, remote_file_list: list):
+        """收到文件列表响应（连接端）
+        
+        Args:
+            remote_file_list: 远程文件列表，格式为 [{"filename": "test.txt", "size": 1024, "mtime": 1234567890.123}, ...]
+        """
+        # 获取本地文件列表
+        from sync.file_manager import FileManager
+        from pathlib import Path
+        
+        file_manager = FileManager(Path(self.room_folder))
+        local_file_list = file_manager.get_file_list_for_sync()
+        
+        # 对比文件列表，找出需要同步的文件
+        files_to_request = self._compare_file_lists(local_file_list, remote_file_list)
+        
+        if files_to_request:
+            self._add_record("", "同步", f"需要同步 {len(files_to_request)} 个文件")
+            
+            # 将文件请求加入传输队列
+            for filename in files_to_request:
+                self._request_file_from_server(filename)
+        else:
+            self._add_record("", "同步", "无需同步")
+    
+    def _compare_file_lists(self, local_files: list, remote_files: list) -> list:
+        """对比文件列表，找出需要请求的文件
+        
+        Args:
+            local_files: 本地文件列表
+            remote_files: 远程文件列表
+        
+        Returns:
+            需要请求的文件名列表
+        """
+        # 创建本地文件字典（文件名 -> 文件信息）
+        local_dict = {f['filename']: f for f in local_files}
+        
+        # 创建远程文件字典（文件名 -> 文件信息）
+        remote_dict = {f['filename']: f for f in remote_files}
+        
+        # 找出需要请求的文件
+        files_to_request = []
+        
+        for filename, remote_info in remote_dict.items():
+            if filename not in local_dict:
+                # 本地缺失的文件，需要请求
+                files_to_request.append(filename)
+            else:
+                # 文件存在，比较大小和修改时间
+                local_info = local_dict[filename]
+                if remote_info['size'] != local_info['size']:
+                    # 文件大小不同，需要同步（请求远程版本）
+                    files_to_request.append(filename)
+                elif remote_info['mtime'] > local_info['mtime']:
+                    # 远程文件更新，需要请求
+                    files_to_request.append(filename)
+        
+        return files_to_request
+    
+    def _request_file_from_server(self, filename: str):
+        """从服务器请求文件（加入传输队列）
+        
+        Args:
+            filename: 文件名（相对路径）
+        """
+        if not self.client:
+            return
+        
+        # 添加到传输队列
+        self.transfer_queue.add_task(
+            'file_request',
+            self._do_request_file,
+            filename,
+            filename
+        )
+    
+    def _do_request_file(self, stop_event: threading.Event, filename: str):
+        """实际执行：请求文件
+        
+        Args:
+            stop_event: 停止标志
+            filename: 文件名（相对路径）
+        """
+        # 检查是否需要停止
+        if stop_event.is_set():
+            return
+        
+        # 请求文件
+        if self.client and self.client.authenticated:
+            self.client.request_file(filename)
     
     def on_network_error(self, error: str):
         """网络错误"""
@@ -586,6 +714,11 @@ class SyncWindow(QMainWindow):
         """添加日志（兼容旧代码）"""
         self._add_record(message, log_type, "")
     
+    @Slot(str)
+    def on_cancel_transfer(self, rel_path: str):
+        """取消文件传输（删除/重命名前调用，避免 Windows 文件锁）"""
+        self.transfer_queue.cancel_tasks_by_filename(rel_path)
+    
     def on_file_added(self, file_path: str):
         """文件添加事件（本地操作）"""
         from pathlib import Path
@@ -593,25 +726,33 @@ class SyncWindow(QMainWindow):
         file_name = Path(file_path).name
         self._add_record(file_name, "添加", "")
         
+        # 取消该文件的所有传输任务（支持复合键 client_id:filename）
+        rel_path = os.path.relpath(file_path, self.room_folder).replace('\\', '/')
+        self.transfer_queue.cancel_tasks_by_filename(rel_path)
+        
         # 更新状态为同步中
         self.status_label.setText(I18n.tr('status_syncing'))
         self.status_label.setStyleSheet("color: #339af0;")
         
         # 定义同步函数
-        def sync_file():
+        def sync_file(stop_event: threading.Event):
             try:
+                # 检查是否需要停止
+                if stop_event.is_set():
+                    return
+                
                 # 根据设计文档的同步逻辑：
                 # 主机端：直接广播给所有连接端
                 # 连接端：发送给主机端，主机端转发给其他连接端
                 if self.is_host and self.server:
-                    self.server.broadcast_file(file_path)
+                    self.server.broadcast_file(file_path, stop_event)
                 elif self.client:
-                    self.client.send_file(file_path)
+                    self.client.send_file(file_path, stop_event)
             except Exception as e:
                 self.add_log("错误", f"同步文件失败: {e}")
         
         # 将任务加入传输队列
-        self.transfer_queue.add_task('file', sync_file)
+        self.transfer_queue.add_task('file', sync_file, rel_path)
     
     def on_file_deleted(self, file_path: str):
         """文件删除事件（本地操作）"""
@@ -620,13 +761,21 @@ class SyncWindow(QMainWindow):
         file_name = Path(file_path).name
         self._add_record(file_name, "删除", "")
         
+        # 取消该文件的所有传输任务（支持复合键 client_id:filename）
+        rel_path = os.path.relpath(file_path, self.room_folder).replace('\\', '/')
+        self.transfer_queue.cancel_tasks_by_filename(rel_path)
+        
         # 更新状态为同步中
         self.status_label.setText(I18n.tr('status_syncing'))
         self.status_label.setStyleSheet("color: #339af0;")
         
         # 定义同步函数
-        def sync_delete():
+        def sync_delete(stop_event: threading.Event):
             try:
+                # 检查是否需要停止
+                if stop_event.is_set():
+                    return
+                
                 if self.is_host and self.server:
                     self.server.broadcast_delete(file_path)
                 elif self.client:
@@ -635,7 +784,7 @@ class SyncWindow(QMainWindow):
                 self.add_log("错误", f"同步删除失败: {e}")
         
         # 将任务加入传输队列
-        self.transfer_queue.add_task('delete', sync_delete)
+        self.transfer_queue.add_task('delete', sync_delete, rel_path)
     
     def on_file_renamed(self, old_path: str, new_path: str):
         """文件重命名事件（本地操作）"""
@@ -645,13 +794,21 @@ class SyncWindow(QMainWindow):
         new_name = Path(new_path).name
         self.add_log("重命名", f"{old_name} -> {new_name}")
         
+        # 取消旧文件的传输（如果正在传输）
+        old_rel_path = os.path.relpath(old_path, self.room_folder).replace('\\', '/')
+        self.transfer_queue.cancel_tasks_by_filename(old_rel_path)
+        
         # 更新状态为同步中
         self.status_label.setText(I18n.tr('status_syncing'))
         self.status_label.setStyleSheet("color: #339af0;")
         
         # 定义同步函数
-        def sync_rename():
+        def sync_rename(stop_event: threading.Event):
             try:
+                # 检查是否需要停止
+                if stop_event.is_set():
+                    return
+                
                 if self.is_host and self.server:
                     self.server.broadcast_rename(old_path, new_path)
                 elif self.client:
@@ -660,7 +817,8 @@ class SyncWindow(QMainWindow):
                 self.add_log("错误", f"同步重命名失败: {e}")
         
         # 将任务加入传输队列
-        self.transfer_queue.add_task('rename', sync_rename)
+        new_rel_path = os.path.relpath(new_path, self.room_folder).replace('\\', '/')
+        self.transfer_queue.add_task('rename', sync_rename, new_rel_path)
     
     def on_disconnect(self):
         """断开连接"""
