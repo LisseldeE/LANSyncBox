@@ -13,6 +13,15 @@ LANSyncBox 是一款轻量级的局域网文件实时同步工具，实现多人
 - **项目仓库**: https://github.com/LisseldeE/LANSyncBox
 - **国内构建版本下载镜像**: https://gitee.com/Lisselde_E/LANSyncBox （推荐国内用户使用）
 
+## 下载
+
+<a href="https://apps.microsoft.com/detail/9nsjvp7fxkm3?referrer=appbadge&mode=full" target="_blank"  rel="noopener noreferrer">
+	<img src="https://get.microsoft.com/images/zh-cn%20dark.svg" width="200"/>
+</a>
+
+- **GitHub Releases**: https://github.com/LisseldeE/LANSyncBox/releases
+- **Gitee 镜像下载**: https://gitee.com/Lisselde_E/LANSyncBox/releases （推荐国内用户使用）
+
 ## 功能特性
 
 ### 实时同步
@@ -138,6 +147,11 @@ LANSyncBox 是一款轻量级的局域网文件实时同步工具，实现多人
 - 文件预览设置为只读，避免误修改
 - 修复了端口占用依旧可以新开房间的错误
 - 修复了新开重复端口房间连接端无法加入的错误
+
+**#02**
+- 用户配置文件 config.json 存储位置迁移至 AppData\\Roaming\\LANSyncBox
+- 旧路径配置文件首次启动时自动迁移
+- 适配微软商店 MSIX 打包环境的沙箱权限要求
 
 ### 2026.6.21 R4
 **#01**

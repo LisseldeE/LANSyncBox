@@ -13,6 +13,15 @@ LANSyncBox is a lightweight LAN real-time file synchronization tool that enables
 - **Project Repository**: https://github.com/LisseldeE/LANSyncBox
 - **Domestic Build Download Mirror**: https://gitee.com/Lisselde_E/LANSyncBox (Recommended for users in China)
 
+## Download
+
+<a href="https://apps.microsoft.com/detail/9nsjvp7fxkm3?referrer=appbadge&mode=full" target="_blank"  rel="noopener noreferrer">
+	<img src="https://get.microsoft.com/images/en-us%20dark.svg" width="200"/>
+</a>
+
+- **GitHub Releases**: https://github.com/LisseldeE/LANSyncBox/releases
+- **Gitee Mirror Download**: https://gitee.com/Lisselde_E/LANSyncBox/releases (Recommended for users in China)
+
 ## Features
 
 ### Real-time Sync
@@ -138,6 +147,11 @@ File conflicts are handled by the system file manager. Sync ensures consistency 
 - File preview set to read-only to prevent accidental modifications
 - Fixed the error where new rooms could still be created when port was already occupied
 - Fixed the error where clients couldn't join rooms with duplicate ports
+
+**#02**
+- Migrated user config.json storage location to AppData\\Roaming\\LANSyncBox
+- Automatic migration of existing config file on first launch
+- Adapted to sandbox permission requirements of Microsoft Store MSIX packaging
 
 ### 2026.6.21 R4
 **#01**

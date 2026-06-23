@@ -18,7 +18,7 @@ class Config:
 
     # 功能开关
     # 检查更新按钮：True=显示（GitHub 版本），False=隐藏（微软商店版本）
-    ENABLE_CHECK_UPDATE = False
+    ENABLE_CHECK_UPDATE = True
 
     # 仓库信息
     GITHUB_REPO = "LisseldeE/LANSyncBox"
@@ -67,6 +67,19 @@ class Config:
         else:
             # 开发环境：使用脚本所在目录
             return Path(__file__).parent
+
+    @staticmethod
+    def get_data_dir() -> Path:
+        """获取用户数据目录（AppData\\Roaming\\LANSyncBox），用于存放用户配置"""
+        if sys.platform == 'win32':
+            appdata = os.environ.get('APPDATA', str(Path.home() / 'AppData' / 'Roaming'))
+        else:
+            # 非 Windows 平台 fallback：~/.config/LANSyncBox
+            xdg = os.environ.get('XDG_CONFIG_HOME', str(Path.home() / '.config'))
+            appdata = str(Path(xdg))
+        data_dir = Path(appdata) / Config.APP_NAME
+        data_dir.mkdir(parents=True, exist_ok=True)
+        return data_dir
 
     @staticmethod
     def get_downloads_folder() -> Path:
@@ -148,10 +161,17 @@ class UserConfig:
 
     @classmethod
     def _get_config_path(cls) -> Path:
-        """获取配置文件路径"""
+        """获取配置文件路径（位于 AppData\\Roaming\\LANSyncBox\\config.json）"""
         if cls._config_path is None:
-            cls._config_path = Config.get_app_dir() / "config.json"
+            cls._config_path = Config.get_data_dir() / "config.json"
         return cls._config_path
+
+    @classmethod
+    def _migrate_if_needed(cls):
+        """旧版迁移逻辑已移除，不再处理程序目录下的 config.json"""
+        # 新路径已有配置，无需处理
+        if cls._get_config_path().exists():
+            return
 
     @classmethod
     def load(cls) -> dict:
@@ -164,6 +184,9 @@ class UserConfig:
             "fixed_room_code_enabled": False,
             "fixed_room_code": ""
         }
+
+        # 首次加载时尝试从旧路径迁移配置
+        cls._migrate_if_needed()
 
         config_path = cls._get_config_path()
         if config_path.exists():
