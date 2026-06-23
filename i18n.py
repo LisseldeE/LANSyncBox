@@ -26,12 +26,17 @@ class I18n:
             "language": "语言",
             "chinese": "中文",
             "english": "English",
+            "manage_cache": "管理缓存",
+            "manage_cache_error": "无法打开缓存文件夹",
+            "manage_cache_not_found": "缓存文件夹不存在",
             
             # 创建房间对话框
             "create_room_title": "创建房间",
             "room_code": "房间号",
             "room_code_hint": "6位数字房间号",
             "regenerate_room_code": "重新生成",
+            "fixed_room_code": "固定房间号",
+            "fixed_room_code_hint": "启用后固定房间号，不自动刷新",
             "password": "密码",
             "password_hint": "可选，留空则无需密码",
             "sync_folder": "同步文件夹",
@@ -59,6 +64,8 @@ class I18n:
             "room_found": "已找到房间 ({ip})",
             "room_found_manual": "已找到房间",
             "ready_waiting": "就绪，等待输入...",
+            "version_mismatch": "版本不一致（本机 {local} / 主机 {remote}），请升级后连接",
+            "version_match": "版本一致，可连接",
             
             # 同步界面
             "host_mode": "主机端",
@@ -74,6 +81,7 @@ class I18n:
             "file_size": "大小",
             "file_modified": "修改时间",
             "file_status": "状态",
+            "drag_files_hint": "拖拽文件以操作",
             "folder": "文件夹",
             "file": "文件",
             
@@ -92,6 +100,7 @@ class I18n:
             "rename": "重命名",
             "select_all": "全选",
             "refresh": "刷新",
+            "go_up": "↑ 上级",
             
             # 拖拽操作
             "drag_add": "添加文件",
@@ -184,12 +193,17 @@ class I18n:
             "language": "Language",
             "chinese": "中文",
             "english": "English",
+            "manage_cache": "Manage Cache",
+            "manage_cache_error": "Cannot open cache folder",
+            "manage_cache_not_found": "Cache folder does not exist",
             
             # Create room dialog
             "create_room_title": "Create Room",
             "room_code": "Room Code",
             "room_code_hint": "6-digit room code",
             "regenerate_room_code": "Regenerate",
+            "fixed_room_code": "Fixed Room Code",
+            "fixed_room_code_hint": "When enabled, the room code is fixed and will not auto-refresh",
             "password": "Password",
             "password_hint": "Optional, leave empty for no password",
             "sync_folder": "Sync Folder",
@@ -217,6 +231,8 @@ class I18n:
             "room_found": "Room found ({ip})",
             "room_found_manual": "Room found",
             "ready_waiting": "Ready, waiting for input...",
+            "version_mismatch": "Version mismatch (local {local} / host {remote}), please upgrade before connecting",
+            "version_match": "Version matches, ready to connect",
             
             # Sync window
             "host_mode": "Host",
@@ -232,6 +248,7 @@ class I18n:
             "file_size": "Size",
             "file_modified": "Modified",
             "file_status": "Status",
+            "drag_files_hint": "Drag files to operate",
             "folder": "Folder",
             "file": "File",
             
@@ -250,6 +267,7 @@ class I18n:
             "rename": "Rename",
             "select_all": "Select All",
             "refresh": "Refresh",
+            "go_up": "↑ Up",
             
             # Drag operations
             "drag_add": "Add Files",

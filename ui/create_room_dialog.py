@@ -3,14 +3,14 @@
 """
 import random
 from PySide6.QtWidgets import (
-    QDialog, QVBoxLayout, QHBoxLayout, QLabel, 
-    QLineEdit, QPushButton, QFrame, QMessageBox, QWidget
+    QDialog, QVBoxLayout, QHBoxLayout, QLabel,
+    QLineEdit, QPushButton, QFrame, QMessageBox, QWidget, QCheckBox
 )
 from PySide6.QtCore import Qt
 from PySide6.QtGui import QPalette, QFont
 
 from i18n import I18n
-from config import Config
+from config import Config, UserConfig
 from ui.widgets import AnimatedButton, BUTTON_STYLES
 
 
@@ -97,8 +97,29 @@ class CreateRoomDialog(QDialog):
         self.room_code_display = RoomCodeDisplay()
         room_code_layout.addWidget(self.room_code_display)
         
-        # 自动生成随机房间号
-        self.generate_room_code()
+        # 固定房间号勾选框
+        self.fixed_room_code_checkbox = QCheckBox(I18n.tr('fixed_room_code'))
+        self.fixed_room_code_checkbox.setToolTip(I18n.tr('fixed_room_code_hint'))
+        self.fixed_room_code_checkbox.stateChanged.connect(self.on_fixed_room_code_toggled)
+        room_code_layout.addWidget(self.fixed_room_code_checkbox)
+        
+        # 加载固定房间号设置（阻塞信号，避免在 regenerate_btn 创建前触发回调）
+        fixed_enabled = UserConfig.get_fixed_room_code_enabled()
+        self.fixed_room_code_checkbox.blockSignals(True)
+        self.fixed_room_code_checkbox.setChecked(fixed_enabled)
+        self.fixed_room_code_checkbox.blockSignals(False)
+        
+        # 初始化房间号：若启用固定，使用已保存的房间号；否则生成随机
+        if fixed_enabled:
+            saved_code = UserConfig.get_fixed_room_code()
+            if saved_code and saved_code.isdigit() and len(saved_code) == 6:
+                self.room_code_display.set_room_code(saved_code)
+            else:
+                # 没有有效的保存值，生成一个并保存
+                self.generate_room_code()
+                UserConfig.set_fixed_room_code(self.room_code_display.get_room_code())
+        else:
+            self.generate_room_code()
         
         # 重新生成按钮
         regenerate_btn_layout = QHBoxLayout()
@@ -109,6 +130,9 @@ class CreateRoomDialog(QDialog):
         self.regenerate_btn.setStyleSheet(BUTTON_STYLES['outline'])
         regenerate_btn_layout.addWidget(self.regenerate_btn)
         room_code_layout.addLayout(regenerate_btn_layout)
+        
+        # 根据固定状态设置重新生成按钮的可用性（需在按钮创建后调用）
+        self._apply_fixed_state(fixed_enabled)
         
         layout.addLayout(room_code_layout)
         
@@ -176,11 +200,40 @@ class CreateRoomDialog(QDialog):
         room_code = str(random.randint(Config.ROOM_CODE_MIN, Config.ROOM_CODE_MAX))
         self.room_code_display.set_room_code(room_code)
     
+    def on_fixed_room_code_toggled(self, state: int):
+        """固定房间号勾选框状态变化"""
+        enabled = bool(state)
+        # 持久化启用状态
+        UserConfig.set_fixed_room_code_enabled(enabled)
+        
+        if enabled:
+            # 启用固定：保存当前房间号作为固定房间号
+            current_code = self.room_code_display.get_room_code()
+            if current_code and current_code.isdigit() and len(current_code) == 6:
+                UserConfig.set_fixed_room_code(current_code)
+        # 切换重新生成按钮的可用性
+        self._apply_fixed_state(enabled)
+    
+    def _apply_fixed_state(self, fixed_enabled: bool):
+        """根据固定状态设置重新生成按钮的可用性"""
+        if not hasattr(self, 'regenerate_btn') or self.regenerate_btn is None:
+            return
+        self.regenerate_btn.setEnabled(not fixed_enabled)
+        if fixed_enabled:
+            # 固定时隐藏重新生成按钮（不自动刷新）
+            self.regenerate_btn.setVisible(False)
+        else:
+            self.regenerate_btn.setVisible(True)
+    
     def on_create(self):
         """创建房间"""
         # 保存信息
         self.room_code = self.room_code_display.get_room_code()
         self.password = self.password_edit.text()
+        
+        # 若启用固定房间号，持久化当前房间号
+        if self.fixed_room_code_checkbox.isChecked():
+            UserConfig.set_fixed_room_code(self.room_code)
         
         # 接受对话框
         self.accept()

@@ -99,15 +99,16 @@ class AboutDialog(QDialog):
         btn_layout = QHBoxLayout()
         btn_layout.addStretch()
 
-        # 检查更新按钮
-        check_update_btn = AnimatedButton(I18n.tr('about_check_update'))
-        check_update_btn.setMinimumWidth(120)
-        check_update_btn.setFixedHeight(36)
-        check_update_btn.setStyleSheet(BUTTON_STYLES['primary'])
-        check_update_btn.clicked.connect(self._check_update)
-        btn_layout.addWidget(check_update_btn)
+        if Config.ENABLE_CHECK_UPDATE:
+            # 检查更新按钮（仅 GitHub 版本显示）
+            check_update_btn = AnimatedButton(I18n.tr('about_check_update'))
+            check_update_btn.setMinimumWidth(120)
+            check_update_btn.setFixedHeight(36)
+            check_update_btn.setStyleSheet(BUTTON_STYLES['primary'])
+            check_update_btn.clicked.connect(self._check_update)
+            btn_layout.addWidget(check_update_btn)
 
-        btn_layout.addSpacing(10)
+            btn_layout.addSpacing(10)
 
         # 关闭按钮
         close_btn = AnimatedButton(I18n.tr('close'))

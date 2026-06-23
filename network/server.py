@@ -43,6 +43,7 @@ class SyncServer(QObject):
         self.password = password
         self.server_socket: Optional[socket.socket] = None
         self.running = False
+        self.port = Config.DEFAULT_PORT  # 实际使用的端口
         self.clients: Dict[str, dict] = {}  # {client_id: {socket, receiver, thread}}
         self.sync_folder = Config.get_room_folder(room_code)
         self._lock = threading.Lock()
@@ -54,27 +55,43 @@ class SyncServer(QObject):
         self.requesting_files: Dict[str, str] = {}
     
     def start(self, port: int = None) -> bool:
-        """启动服务器"""
-        port = port or Config.DEFAULT_PORT
+        """启动服务器，尝试多个端口（9527-9536）"""
+        start_port = port or Config.DEFAULT_PORT
+        max_port = start_port + 10  # 尝试最多10个端口
         
-        try:
-            self.server_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-            self.server_socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-            self.server_socket.bind(('0.0.0.0', port))
-            self.server_socket.listen(10)
-            self.server_socket.settimeout(1.0)
-            
-            self.running = True
-            
-            # 启动接受连接线程
-            accept_thread = threading.Thread(target=self._accept_loop, daemon=True)
-            accept_thread.start()
-            
-            return True
-            
-        except Exception as e:
-            self.error_occurred.emit(f"启动服务器失败: {e}")
-            return False
+        for try_port in range(start_port, max_port):
+            try:
+                self.server_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+                # 不使用 SO_REUSEADDR，避免端口被占用时仍能绑定
+                self.server_socket.bind(('0.0.0.0', try_port))
+                self.server_socket.listen(10)
+                self.server_socket.settimeout(1.0)
+                
+                self.running = True
+                self.port = try_port  # 记录实际使用的端口
+                
+                # 启动接受连接线程
+                accept_thread = threading.Thread(target=self._accept_loop, daemon=True)
+                accept_thread.start()
+                
+                return True
+                
+            except OSError as e:
+                # 端口被占用，尝试下一个端口
+                if self.server_socket:
+                    try:
+                        self.server_socket.close()
+                    except Exception:
+                        pass
+                self.server_socket = None
+                continue
+            except Exception as e:
+                self.error_occurred.emit(f"启动服务器失败: {e}")
+                return False
+        
+        # 所有端口都尝试失败
+        self.error_occurred.emit(f"启动服务器失败: 端口 {start_port}-{max_port-1} 均被占用")
+        return False
     
     def stop(self):
         """停止服务器"""
@@ -170,7 +187,7 @@ class SyncServer(QObject):
                 )
                 client_thread.start()
                 
-                self.client_connected.emit(client_id)
+                # 不在连接时发出信号，等认证成功后再发出
                 
             except socket.timeout:
                 continue
@@ -434,6 +451,8 @@ class SyncServer(QObject):
                 response = Protocol.create_auth_response(True, "验证成功")
                 self.clients[client_id]['socket'].sendall(response)
                 self.log_message.emit(f"客户端 {client_id} 验证成功")
+                # 认证成功后通知 UI 更新连接数
+                self.client_connected.emit(client_id)
             else:
                 response = Protocol.create_auth_response(False, "验证失败")
                 self.clients[client_id]['socket'].sendall(response)

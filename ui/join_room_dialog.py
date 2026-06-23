@@ -179,9 +179,11 @@ class JoinRoomDialog(QDialog):
         self.password = ""
         self.host_address = ""
         self.discovered_host = ""  # 发现的主机地址
+        self.host_port = Config.DEFAULT_PORT  # 发现的主机端口（默认9527）
         self._fade_animations = {}  # 动画字典
         self._room_requires_password = False  # 房间是否需要密码
         self._room_checked = False  # 房间是否已检测
+        self._is_checking = False  # 是否正在检测中
         self.init_ui()
     
     def init_ui(self):
@@ -267,18 +269,23 @@ class JoinRoomDialog(QDialog):
     def _on_code_completed(self):
         """输入完成时自动检测房间"""
         # 如果正在检测中，则不触发
-        if not self.connect_btn.isEnabled():
+        if self._is_checking:
             return
+        
+        # 重新启用连接按钮（可能因版本不一致被禁用）
+        self.connect_btn.setEnabled(True)
         
         # 添加一个小延迟，让用户看到输入完成
         QTimer.singleShot(300, self._check_room_exists)
     
     def _check_room_exists(self):
         """检测房间是否存在"""
+        self._is_checking = True
         room_code = self.room_code_input.get_room_code()
         
         # 验证房间号
         if not self.room_code_input.is_complete():
+            self._is_checking = False
             QMessageBox.warning(self, I18n.tr('join_room_title'), I18n.tr('invalid_room_code'))
             return
         
@@ -288,6 +295,7 @@ class JoinRoomDialog(QDialog):
             # 显示状态：已找到房间
             self._show_status(I18n.tr('room_found_manual'), color='#51cf66')
             self._room_checked = True
+            self._is_checking = False
             # 显示密码输入框
             self._show_password_input()
             return
@@ -313,24 +321,46 @@ class JoinRoomDialog(QDialog):
         self.status_label.setText(text)
         self.status_label.setStyleSheet(f"color: {color}; font-size: 12px;")
     
-    def on_room_found(self, host_ip: str, room_code: str, port: int):
-        """发现房间"""
+    def on_room_found(self, host_ip: str, room_code: str, port: int, version: str = ""):
+        """发现房间
+        Args:
+            host_ip: 主机IP
+            room_code: 房间号
+            port: 端口
+            version: 主机版本号
+        """
         # 找到房间，停止发现
         self.discovery.stop_discovery()
         
         self.room_code = room_code
         self.host_address = host_ip
+        self.host_port = port
         self.discovered_host = host_ip
         
-        # 显示状态：已找到房间
+        # 版本号核对
+        local_version = Config.APP_VERSION
+        if version and version != local_version:
+            # 版本不一致：红字显示，禁用连接按钮
+            self._show_status(
+                I18n.tr('version_mismatch', local=local_version, remote=version),
+                color='#ff6b6b'
+            )
+            self.connect_btn.setEnabled(False)
+            self._room_checked = False
+            self._is_checking = False
+            return
+        
+        # 版本一致：显示已找到房间
         self._show_status(I18n.tr('room_found', ip=host_ip), color='#51cf66')
         self._room_checked = True
+        self._is_checking = False
         
         # 显示密码输入框
         self._show_password_input()
     
     def on_discovery_finished(self, rooms: list):
         """发现完成"""
+        self._is_checking = False
         if not rooms:
             # 没有找到房间
             self._show_status(I18n.tr('room_not_found'), color='#ff6b6b')
@@ -340,6 +370,7 @@ class JoinRoomDialog(QDialog):
         """发现错误"""
         self._show_status(error, color='#ff6b6b')
         self._room_checked = False
+        self._is_checking = False
     
     def _show_password_input(self):
         """显示密码输入框（淡入动画）"""
@@ -389,6 +420,10 @@ class JoinRoomDialog(QDialog):
     def get_host_address(self) -> str:
         """获取主机地址"""
         return self.host_address
+    
+    def get_host_port(self) -> int:
+        """获取主机端口"""
+        return self.host_port
     
     def get_discovered_host(self) -> str:
         """获取发现的主机地址"""

@@ -7,7 +7,7 @@ LANSyncBox is a lightweight LAN real-time file synchronization tool that enables
 ## Project Information
 
 - **Project Name**: LANSyncBox
-- **Project Version**: R4
+- **Project Version**: R5
 - **Project Author**: Lisselde_E
 - **Contact Email**: Lisselde.E@outlook.com
 - **Project Repository**: https://github.com/LisseldeE/LANSyncBox
@@ -22,6 +22,7 @@ LANSyncBox is a lightweight LAN real-time file synchronization tool that enables
 - Large file streaming transfers to avoid high memory usage
 - Concurrent transfer limit (max 3 files simultaneously) to optimize system resource usage
 - Initial full sync on first connection, automatically aligns differences between both ends
+- Dual-end version verification when joining a room, ensuring connection compatibility
 
 ### Transfer Reliability
 - Transfer cancellation: Auto-cancels when file changes during transfer, preventing file corruption
@@ -44,6 +45,14 @@ LANSyncBox is a lightweight LAN real-time file synchronization tool that enables
 - Real-time sync status display
 - Auto incremental sync after reconnection
 - Real-time progress display with file transfer progress bar
+
+### File Preview
+- Double-click files to open in read-only preview mode
+- Prevents accidental modifications during preview
+
+### Cache Management
+- Manage sync cache, clear local cache files
+- Independent cache path management to reduce system disk usage
 
 ### Multi-language Support
 - Chinese/English interface switching
@@ -118,6 +127,17 @@ File conflicts are handled by the system file manager. Sync ensures consistency 
 - **Integrity Check**: Validates file size on FILE_END, discards temp file if incomplete
 
 ## Change Log
+
+### 2026.6.22 R5
+**#01**
+- Changed program cache folder location
+- Added dual-end version verification when joining a room to ensure connection compatibility
+- Fixed some translation errors
+- Added cache management functionality, supports clearing sync cache
+- Added double-click to open file preview
+- File preview set to read-only to prevent accidental modifications
+- Fixed the error where new rooms could still be created when port was already occupied
+- Fixed the error where clients couldn't join rooms with duplicate ports
 
 ### 2026.6.21 R4
 **#01**

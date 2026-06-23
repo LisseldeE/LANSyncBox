@@ -16,8 +16,8 @@ class RoomDiscovery(QObject):
     """房间发现服务（客户端使用）"""
     
     # 信号
-    room_found = Signal(str, str, int)  # 发现房间 (ip, room_code, port)
-    discovery_finished = Signal(list)  # 发现完成 [(ip, room_code, port), ...]
+    room_found = Signal(str, str, int, str)  # 发现房间 (ip, room_code, port, version)
+    discovery_finished = Signal(list)  # 发现完成 [(ip, room_code, port, version), ...]
     error_occurred = Signal(str)  # 错误消息
     
     # UDP端口
@@ -28,7 +28,7 @@ class RoomDiscovery(QObject):
         super().__init__(parent)
         self.socket: Optional[socket.socket] = None
         self.running = False
-        self.discovered_rooms: Dict[str, dict] = {}  # {ip: {room_code, port, timestamp}}
+        self.discovered_rooms: Dict[str, dict] = {}  # {ip: {room_code, port, version, timestamp}}
         self._lock = threading.Lock()
     
     def discover_room(self, room_code: str, timeout: int = None) -> bool:
@@ -119,17 +119,19 @@ class RoomDiscovery(QObject):
                     host_ip = addr[0]
                     room_code = response.get('room_code')
                     port = response.get('port', Config.DEFAULT_PORT)
+                    version = response.get('version', '')
                     
                     with self._lock:
                         self.discovered_rooms[host_ip] = {
                             'room_code': room_code,
                             'port': port,
+                            'version': version,
                             'timestamp': time.time()
                         }
                     
                     # 安全发射信号
                     try:
-                        self.room_found.emit(host_ip, room_code, port)
+                        self.room_found.emit(host_ip, room_code, port, version)
                     except RuntimeError:
                         # 对象已被删除，停止循环
                         break
@@ -148,7 +150,8 @@ class RoomDiscovery(QObject):
                 {
                     'ip': ip,
                     'room_code': info['room_code'],
-                    'port': info['port']
+                    'port': info['port'],
+                    'version': info.get('version', '')
                 }
                 for ip, info in self.discovered_rooms.items()
             ]
@@ -167,7 +170,8 @@ class RoomDiscovery(QObject):
                 {
                     'ip': ip,
                     'room_code': info['room_code'],
-                    'port': info['port']
+                    'port': info['port'],
+                    'version': info.get('version', '')
                 }
                 for ip, info in self.discovered_rooms.items()
             ]
@@ -242,11 +246,12 @@ class RoomResponder(QObject):
                     if target_room and target_room != self.room_code:
                         continue
                     
-                    # 发送响应
+                    # 发送响应（携带版本号供客户端核对）
                     response = json.dumps({
                         'type': 'discovery_response',
                         'room_code': self.room_code,
-                        'port': self.port
+                        'port': self.port,
+                        'version': Config.APP_VERSION
                     }).encode('utf-8')
                     
                     self.socket.sendto(response, addr)

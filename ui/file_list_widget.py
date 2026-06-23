@@ -352,7 +352,7 @@ class FileListWidget(QWidget):
         toolbar_layout.setContentsMargins(5, 5, 5, 5)
         
         # 返回上级按钮
-        self.back_btn = QPushButton("↑ 上级")
+        self.back_btn = QPushButton(I18n.tr('go_up'))
         self.back_btn.setFixedWidth(80)
         self.back_btn.clicked.connect(self.go_back)
         toolbar_layout.addWidget(self.back_btn)
@@ -363,7 +363,7 @@ class FileListWidget(QWidget):
         toolbar_layout.addWidget(self.path_edit)
         
         # 刷新按钮
-        refresh_btn = QPushButton("刷新")
+        refresh_btn = QPushButton(I18n.tr('refresh'))
         refresh_btn.setFixedWidth(60)
         refresh_btn.clicked.connect(self.load_files)
         toolbar_layout.addWidget(refresh_btn)
@@ -401,6 +401,12 @@ class FileListWidget(QWidget):
         self.table.customContextMenuRequested.connect(self.show_context_menu)
         
         layout.addWidget(self.table)
+        
+        # 拖拽提示
+        drag_hint = QLabel(I18n.tr('drag_files_hint'))
+        drag_hint.setAlignment(Qt.AlignCenter)
+        drag_hint.setStyleSheet("color: #868e96; font-size: 12px; padding: 5px;")
+        layout.addWidget(drag_hint)
         
         # 更新路径显示
         self.update_path_display()
@@ -495,18 +501,35 @@ class FileListWidget(QWidget):
             self.load_files()
             self.update_path_display()
         else:
-            # 双击文件：提示拖拽保存
-            # 创建自定义消息框
-            msg_box = QMessageBox(self)
-            msg_box.setWindowTitle(I18n.tr('file'))
-            msg_box.setText(I18n.tr('tip_open_file'))
-            msg_box.setIcon(QMessageBox.Information)
-            
-            # 添加自定义按钮
-            ok_btn = msg_box.addButton(I18n.tr('ok'), QMessageBox.AcceptRole)
-            ok_btn.setStyleSheet(BUTTON_STYLES['primary'])
-            
-            msg_box.exec()
+            # 双击文件：复制到预览目录后打开（只读预览模式）
+            try:
+                # 获取预览目录（不按房间号分隔）
+                preview_folder = Config.get_preview_folder()
+                
+                # 复制文件到预览目录（保持相对路径结构）
+                relative_path = path.relative_to(self.folder_path)
+                preview_path = preview_folder / relative_path
+                
+                # 确保目标目录存在
+                preview_path.parent.mkdir(parents=True, exist_ok=True)
+                
+                # 复制文件（覆盖已存在的同名预览文件）
+                shutil.copy2(path, preview_path)
+                
+                # 设置只读属性（Windows API）
+                import ctypes
+                # FILE_ATTRIBUTE_READONLY = 0x1
+                ctypes.windll.kernel32.SetFileAttributesW(str(preview_path), 0x1)
+                
+                # 用系统默认应用打开预览副本
+                os.startfile(str(preview_path))
+                
+            except Exception as e:
+                QMessageBox.warning(
+                    self,
+                    I18n.tr('file'),
+                    f"{I18n.tr('tip_open_file')}\n\n错误: {e}"
+                )
     
     def show_context_menu(self, pos: QPoint):
         """显示右键菜单"""

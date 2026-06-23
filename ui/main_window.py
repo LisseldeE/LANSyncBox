@@ -1,15 +1,16 @@
 """
 主窗口
 """
+import os
 from PySide6.QtWidgets import (
     QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
-    QPushButton, QLabel, QFrame, QSpacerItem, QSizePolicy
+    QPushButton, QLabel, QFrame, QSpacerItem, QSizePolicy, QMessageBox
 )
-from PySide6.QtCore import Qt, QSize
-from PySide6.QtGui import QFont
+from PySide6.QtCore import Qt, QSize, QUrl
+from PySide6.QtGui import QFont, QDesktopServices
 
 from i18n import I18n
-from config import Config
+from config import Config, UserConfig
 from ui.create_room_dialog import CreateRoomDialog
 from ui.join_room_dialog import JoinRoomDialog
 from ui.about_dialog import AboutDialog
@@ -87,9 +88,12 @@ class MainWindow(QMainWindow):
         # 弹性空间
         main_layout.addSpacerItem(QSpacerItem(20, 40, QSizePolicy.Minimum, QSizePolicy.Expanding))
         
-        # 底部按钮区域
+        # 底部按钮区域（三个按钮均匀分布）
         bottom_layout = QHBoxLayout()
         bottom_layout.setSpacing(10)
+        
+        # 弹性空间 - 首部
+        bottom_layout.addStretch()
         
         # 语言切换按钮
         self.lang_btn = AnimatedButton(self._get_language_text())
@@ -98,12 +102,28 @@ class MainWindow(QMainWindow):
         self.lang_btn.setStyleSheet(BUTTON_STYLES['secondary'])
         bottom_layout.addWidget(self.lang_btn)
         
+        # 弹性空间 - 中间
+        bottom_layout.addStretch()
+        
+        # 管理缓存按钮
+        self.manage_cache_btn = AnimatedButton(I18n.tr('manage_cache'))
+        self.manage_cache_btn.setFixedWidth(100)
+        self.manage_cache_btn.clicked.connect(self.on_manage_cache)
+        self.manage_cache_btn.setStyleSheet(BUTTON_STYLES['outline'])
+        bottom_layout.addWidget(self.manage_cache_btn)
+        
+        # 弹性空间 - 中间
+        bottom_layout.addStretch()
+        
         # 关于按钮
         about_btn = AnimatedButton(I18n.tr('about'))
         about_btn.setFixedWidth(100)
         about_btn.clicked.connect(self.on_about)
         about_btn.setStyleSheet(BUTTON_STYLES['outline'])
         bottom_layout.addWidget(about_btn)
+        
+        # 弹性空间 - 尾部
+        bottom_layout.addStretch()
         
         main_layout.addLayout(bottom_layout)
         
@@ -132,9 +152,10 @@ class MainWindow(QMainWindow):
             room_code = dialog.get_room_code()
             password = dialog.get_password()
             host_address = dialog.get_host_address()
+            host_port = dialog.get_host_port()
             
             # 打开同步窗口
-            self.open_sync_window(is_host=False, room_code=room_code, password=password, host_address=host_address)
+            self.open_sync_window(is_host=False, room_code=room_code, password=password, host_address=host_address, host_port=host_port)
     
     def on_toggle_language(self):
         """切换语言"""
@@ -144,8 +165,21 @@ class MainWindow(QMainWindow):
         else:
             I18n.set_language("zh_CN")
         
+        # 持久化语言设置到 config.json
+        UserConfig.set_language(I18n.get_language())
+        
         # 刷新界面
         self._refresh_ui()
+    
+    def on_manage_cache(self):
+        """打开 SyncFolder 缓存文件夹"""
+        sync_folder = Config.get_sync_folder()
+        if not sync_folder.exists():
+            QMessageBox.warning(self, I18n.tr('manage_cache'), I18n.tr('manage_cache_not_found'))
+            return
+        url = QUrl.fromLocalFile(str(sync_folder))
+        if not QDesktopServices.openUrl(url):
+            QMessageBox.warning(self, I18n.tr('manage_cache'), I18n.tr('manage_cache_error'))
     
     def _get_language_text(self) -> str:
         """获取语言按钮显示文本"""
@@ -185,10 +219,15 @@ class MainWindow(QMainWindow):
                     if join_btn:
                         join_btn.setText(I18n.tr('join_room'))
                 
-                # 底部按钮
+                # 底部按钮（布局：stretch, lang_btn, stretch, manage_cache_btn, stretch, about_btn, stretch）
                 bottom_layout = layout.itemAt(5)
                 if bottom_layout:
-                    about_btn = bottom_layout.itemAt(1).widget()
+                    # manage_cache_btn 在索引 3
+                    manage_cache_btn = bottom_layout.itemAt(3).widget()
+                    if manage_cache_btn:
+                        manage_cache_btn.setText(I18n.tr('manage_cache'))
+                    # about_btn 在索引 5
+                    about_btn = bottom_layout.itemAt(5).widget()
                     if about_btn:
                         about_btn.setText(I18n.tr('about'))
                 
@@ -202,7 +241,7 @@ class MainWindow(QMainWindow):
         dialog = AboutDialog(self)
         dialog.exec()
     
-    def open_sync_window(self, is_host: bool, room_code: str, password: str = "", host_address: str = ""):
+    def open_sync_window(self, is_host: bool, room_code: str, password: str = "", host_address: str = "", host_port: int = None):
         """打开同步窗口"""
         from ui.sync_window import SyncWindow
         
@@ -214,7 +253,8 @@ class MainWindow(QMainWindow):
             is_host=is_host,
             room_code=room_code,
             password=password,
-            host_address=host_address
+            host_address=host_address,
+            host_port=host_port
         )
         self._sync_window.setWindowTitle(f"{I18n.tr('app_name')} - {I18n.tr('room_info', code=room_code)}")
         self._sync_window.setMinimumSize(Config.WINDOW_MIN_WIDTH, Config.WINDOW_MIN_HEIGHT)

@@ -11,7 +11,7 @@ from PySide6.QtGui import QIcon, QFont
 
 from ui.main_window import MainWindow
 from i18n import I18n
-from config import Config
+from config import Config, UserConfig
 
 
 def get_resource_path(relative_path):
@@ -47,8 +47,8 @@ def main():
     if os.path.exists(icon_path):
         app.setWindowIcon(QIcon(icon_path))
     
-    # 设置默认语言
-    I18n.set_language("zh_CN")
+    # 设置默认语言（从 config.json 加载用户偏好）
+    I18n.set_language(UserConfig.get_language())
     
     # 创建主窗口
     window = MainWindow()

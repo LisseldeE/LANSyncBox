@@ -3,19 +3,21 @@
 """
 import threading
 import os
+import shutil
 from PySide6.QtWidgets import (
     QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, 
     QLabel, QPushButton, QTextEdit, QFrame, QSplitter, QMessageBox,
     QTableWidget, QTableWidgetItem, QProgressBar, QHeaderView, QApplication
 )
 from PySide6.QtCore import Qt, Signal, QMetaObject, Q_ARG, Slot, QTimer
-from PySide6.QtGui import QColor
+from PySide6.QtGui import QColor, QIcon, QPixmap
 from pathlib import Path
 
 from i18n import I18n
 from config import Config
 from ui.file_list_widget import FileListWidget
 from ui.widgets import AnimatedButton, BUTTON_STYLES
+from ui.about_dialog import AboutDialog
 from network.server import SyncServer
 from network.client import SyncClient
 from network.discovery import RoomResponder
@@ -28,12 +30,13 @@ class SyncWindow(QMainWindow):
     # 信号
     closed = Signal()
     
-    def __init__(self, is_host: bool, room_code: str, password: str = "", host_address: str = ""):
+    def __init__(self, is_host: bool, room_code: str, password: str = "", host_address: str = "", host_port: int = None):
         super().__init__()
         self.is_host = is_host
         self.room_code = room_code
         self.password = password
         self.host_address = host_address
+        self.host_port = host_port
         
         # 获取房间文件夹
         self.room_folder = Config.get_room_folder(room_code)
@@ -201,6 +204,30 @@ class SyncWindow(QMainWindow):
         
         bottom_layout.addStretch()
         
+        # 关于按钮（图标形式）
+        about_btn = QPushButton("i")
+        about_btn.setFixedSize(18, 18)
+        about_btn.setFlat(True)
+        about_btn.setToolTip(I18n.tr('about_title'))
+        about_btn.setCursor(Qt.PointingHandCursor)
+        about_btn.setStyleSheet("""
+            QPushButton {
+                font-size: 11px;
+                font-weight: bold;
+                color: #868e96;
+                border: 1px solid #dee2e6;
+                border-radius: 9px;
+                background: transparent;
+            }
+            QPushButton:hover {
+                color: #495057;
+                border-color: #adb5bd;
+                background: #f8f9fa;
+            }
+        """)
+        about_btn.clicked.connect(self._show_about)
+        bottom_layout.addWidget(about_btn)
+        
         main_layout.addWidget(bottom_frame)
     
     def init_network(self):
@@ -224,11 +251,11 @@ class SyncWindow(QMainWindow):
             self.server.file_sent.connect(self.on_file_sent)
             
             if self.server.start():
-                self._add_record(f"端口: {Config.DEFAULT_PORT}", "启动", "")
+                self._add_record(f"端口: {self.server.port}", "启动", "")
                 
-                # 启动房间响应服务
+                # 启动房间响应服务（传递实际使用的端口）
                 self.responder = RoomResponder(self)
-                if self.responder.start(self.room_code):
+                if self.responder.start(self.room_code, self.server.port):
                     pass
             else:
                 self._add_record("启动失败", "错误", "")
@@ -255,8 +282,9 @@ class SyncWindow(QMainWindow):
             
             # 连接到服务器
             host = self.host_address or "127.0.0.1"
-            if self.client.connect_to_server(host):
-                self._add_record(f"{host}:{Config.DEFAULT_PORT}", "连接", "")
+            port = self.host_port or Config.DEFAULT_PORT
+            if self.client.connect_to_server(host, port):
+                self._add_record(f"{host}:{port}", "连接", "")
             else:
                 self._add_record("连接失败", "错误", "")
     
@@ -898,10 +926,32 @@ class SyncWindow(QMainWindow):
         if msg_box.clickedButton() == yes_btn:
             self.close()
     
+    def _show_about(self):
+        """显示关于对话框"""
+        dialog = AboutDialog(self)
+        dialog.exec()
+    
     def closeEvent(self, event):
         """窗口关闭事件"""
         # 清理传输队列
         self.transfer_queue.clear()
+        
+        # 清空整个预览文件夹
+        try:
+            preview_folder = Config.get_preview_folder()
+            if preview_folder.exists():
+                # 先移除所有文件的只读属性，确保可以删除
+                import ctypes
+                for item in preview_folder.rglob('*'):
+                    if item.is_file():
+                        try:
+                            # FILE_ATTRIBUTE_NORMAL = 0x80 (移除只读)
+                            ctypes.windll.kernel32.SetFileAttributesW(str(item), 0x80)
+                        except Exception:
+                            pass
+                shutil.rmtree(preview_folder)
+        except Exception:
+            pass  # 清理失败不影响关闭
         
         # 停止网络服务
         if self.server:
