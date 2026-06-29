@@ -356,9 +356,9 @@ class SyncClient(QObject):
             if os.path.isfile(file_path):
                 os.remove(file_path)
             elif os.path.isdir(file_path):
-                import shutil
-                shutil.rmtree(file_path)
-            
+                from sync.file_manager import safe_rmtree
+                safe_rmtree(file_path)
+
             self.log_message.emit(f"删除: {filename}")
             self.file_deleted.emit(filename)
             

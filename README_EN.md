@@ -7,11 +7,10 @@ LANSyncBox is a lightweight LAN real-time file synchronization tool that enables
 ## Project Information
 
 - **Project Name**: LANSyncBox
-- **Project Version**: R5
+- **Project Version**: R6
 - **Project Author**: Lisselde_E
 - **Contact Email**: Lisselde.E@outlook.com
 - **Project Repository**: https://github.com/LisseldeE/LANSyncBox
-- **Domestic Build Download Mirror**: https://gitee.com/Lisselde_E/LANSyncBox (Recommended for users in China)
 
 ## Download
 
@@ -55,6 +54,12 @@ LANSyncBox is a lightweight LAN real-time file synchronization tool that enables
 - Auto incremental sync after reconnection
 - Real-time progress display with file transfer progress bar
 
+### File Operations
+- Double-click empty list area to popup menu for quick file/folder addition
+- Right-click menu supports adding files, adding folders, creating new folders
+- New folder creation supports ESC cancellation during rename phase, avoiding accidental creation
+- Supports common file operations: copy, cut, paste, delete, rename
+
 ### File Preview
 - Double-click files to open in read-only preview mode
 - Prevents accidental modifications during preview
@@ -95,9 +100,10 @@ LANSyncBox is a lightweight LAN real-time file synchronization tool that enables
 
 1. Click "Join Connection" button
 2. Enter room code
-3. If password required, enter in popup dialog
-4. Select folder path for synced files
-5. Click connect - automatic full sync from host
+3. If password required, enter directly in join dialog for pre-verification
+4. Verification failures are displayed directly in the join dialog, allowing immediate retry with corrected info
+5. Select folder path for synced files
+6. Click connect - automatic full sync from host
 
 ## Sync Logic
 
@@ -137,71 +143,16 @@ File conflicts are handled by the system file manager. Sync ensures consistency 
 
 ## Change Log
 
-### 2026.6.22 R5
+### 2026.6.29 R6
 **#01**
-- Changed program cache folder location
-- Added dual-end version verification when joining a room to ensure connection compatibility
-- Fixed some translation errors
-- Added cache management functionality, supports clearing sync cache
-- Added double-click to open file preview
-- File preview set to read-only to prevent accidental modifications
-- Fixed the error where new rooms could still be created when port was already occupied
-- Fixed the error where clients couldn't join rooms with duplicate ports
+- Adapted Microsoft Store version number display
+- Optimized room joining experience with direct in-dialog verification feedback
+- Fixed sync interface accidental exit without confirmation
+- Added double-click empty area and right-click menu options for adding files/folders and creating new folders
+- Fixed right-click menu item logic anomalies
+- Fixed read-only file deletion failure issue
 
-**#02**
-- Migrated user config.json storage location to AppData\\Roaming\\LANSyncBox
-- Automatic migration of existing config file on first launch
-- Adapted to sandbox permission requirements of Microsoft Store MSIX packaging
-
-### 2026.6.21 R4
-**#01**
-- Added initial full sync mechanism on first connection to align differences between both ends
-- Added transfer cancellation mechanism to handle file corruption caused by file changes during transfer
-- Improved transfer queue, fixed file skip error caused by queue conflicts
-- Fixed blocking errors encountered during transfer cancellation
-- Fixed numerous handle overflow and residual issues
-- Optimized asynchronous processing logic during sync
-- Fixed TCP buffer overflow issue
-
-**#02**
-- Fixed progress bar residual issue during sync cancellation
-- Fixed UI handle overflow error caused by sync cancellation
-
-### 2026.6.20 R3
-**#01**
-- Completely discarded previous versions, rebuilt the program
-- New version uses cache files and list operations to handle sync content
-- New Qt6 architecture
-- Optimized many UI interaction logic, improved user experience
-- Optimized UI element display logic
-- Initial UI logic construction
-- Sync logic not yet implemented
-
-**#02**
-- Added and optimized all sync logic
-- Optimized encrypted room interaction logic
-- Optimized multi-connection sync logic
-- Fixed large file sync errors
-- Fixed some known errors
-- Optimized some text display content
-
-### 2026.6.18 R1 (Deprecated)
-**#01**
-- Initial software build with sync functionality
-
-### 2026.6.19 R2 (Deprecated)
-**#01**
-- Implemented multi-language switching, adapted to multi-language environments
-- Optimized program update check logic
-- Fixed some issues in sync logic
-- Fixed abnormal delete signal error during file modification
-- Optimized program startup speed, improved user experience
-
-**#02**
-- Refactored code logic, fixed some known errors
-- Updated full sync to bidirectional sync
-- Removed peer-to-peer sync between clients, now all clients stay consistent
-- Added support for large file sync
+See: `https://github.com/LisseldeE/LANSyncBox/blob/main/%E6%9B%B4%E6%96%B0%E6%97%A5%E5%BF%97.log`
 
 ## Tech Stack
 

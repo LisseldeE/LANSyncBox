@@ -16,7 +16,7 @@ from PySide6.QtWidgets import (
     QFileDialog, QAbstractItemView, QLabel, QPushButton, QLineEdit
 )
 from PySide6.QtCore import Qt, Signal, QMimeData, QUrl, QPoint, QThread, QMetaObject, Q_ARG
-from PySide6.QtGui import QAction, QIcon, QDrag, QDropEvent, QDragEnterEvent, QDragMoveEvent
+from PySide6.QtGui import QAction, QIcon, QDrag, QDropEvent, QDragEnterEvent, QDragMoveEvent, QCursor
 from PySide6.QtWidgets import QApplication
 
 from i18n import I18n
@@ -26,9 +26,10 @@ from ui.widgets import BUTTON_STYLES
 
 class DragableTableWidget(QTableWidget):
     """支持拖拽的表格控件"""
-    
+
     files_dragged = Signal(list, str, bool)  # 文件拖拽信号（文件列表，目标路径，是否内部拖拽）
-    
+    empty_area_double_clicked = Signal()  # 空白区域双击信号（用于触发添加文件）
+
     def __init__(self, parent=None):
         super().__init__(parent)
         # 不启用默认的拖拽功能，我们手动控制
@@ -77,7 +78,20 @@ class DragableTableWidget(QTableWidget):
         self._mouse_press_item = None
         self._is_dragging = False
         super().mouseReleaseEvent(event)
-    
+
+    def mouseDoubleClickEvent(self, event):
+        """鼠标双击事件
+
+        双击空白区域（无单元格）时发射 empty_area_double_clicked 信号，
+        用于触发"添加文件"操作；双击单元格时交给父类处理（触发 cellDoubleClicked）。
+        """
+        if event.button() == Qt.LeftButton:
+            # itemAt 返回 None 表示双击在空白区域
+            if self.itemAt(event.pos()) is None:
+                self.empty_area_double_clicked.emit()
+                return
+        super().mouseDoubleClickEvent(event)
+
     def _start_drag(self):
         """开始拖拽"""
         # 获取选中的文件
@@ -199,7 +213,8 @@ class FileCopyWorker(QThread):
                     if src.is_dir():
                         # 复制文件夹（如果目标存在，先删除再复制）
                         if dst.exists():
-                            shutil.rmtree(dst)
+                            from sync.file_manager import safe_rmtree
+                            safe_rmtree(dst)
                         shutil.copytree(src, dst)
                     else:
                         # 复制文件（分块复制以显示进度）
@@ -254,18 +269,21 @@ class FileCopyWorker(QThread):
 
 class FileListWidget(QWidget):
     """文件列表组件"""
-    
+
     # 信号 - 所有同步信号由 UI 操作触发
     file_added = Signal(str)  # 文件添加信号（本地操作触发）
     file_deleted = Signal(str)  # 文件删除信号（本地操作触发）
     file_renamed = Signal(str, str)  # 文件重命名信号（旧名，新名）
     dir_created = Signal(str)  # 目录创建信号（本地操作触发）
-    
+
     def __init__(self, folder_path: Path, parent=None):
         super().__init__(parent)
         self.folder_path = folder_path
         self.current_path = folder_path
-        
+
+        # 上次文件对话框使用的目录（实例变量，重启程序后自动重置）
+        self._last_dialog_dir: Optional[str] = None
+
         # 剪贴板
         self.clipboard_files: List[Path] = []
         self.clipboard_is_cut = False
@@ -392,9 +410,11 @@ class FileListWidget(QWidget):
         
         # 连接拖拽信号
         self.table.files_dragged.connect(self._handle_files_dragged)
-        
+
         # 双击事件
         self.table.cellDoubleClicked.connect(self.on_double_click)
+        # 双击空白区域 → 在鼠标位置弹出添加文件/文件夹菜单
+        self.table.empty_area_double_clicked.connect(self.on_add_via_double_click)
         
         # 右键菜单
         self.table.setContextMenuPolicy(Qt.CustomContextMenu)
@@ -534,30 +554,55 @@ class FileListWidget(QWidget):
     def show_context_menu(self, pos: QPoint):
         """显示右键菜单"""
         menu = QMenu(self)
-        
+
+        # 添加文件
+        add_file_action = QAction(I18n.tr('drag_add'), self)
+        add_file_action.triggered.connect(self.on_add_files)
+        menu.addAction(add_file_action)
+
+        # 添加文件夹
+        add_folder_action = QAction(I18n.tr('add_folder'), self)
+        add_folder_action.triggered.connect(self.on_add_folder)
+        menu.addAction(add_folder_action)
+
+        menu.addSeparator()
+
+        # 新建文件夹
+        new_folder_action = QAction(I18n.tr('new_folder'), self)
+        new_folder_action.triggered.connect(self.on_new_folder)
+        menu.addAction(new_folder_action)
+
+        menu.addSeparator()
+
+        # 是否有选中的文件（用于控制复制/剪切/删除/重命名的启用状态）
+        has_selection = len(self.get_selected_files()) > 0
+
         # 复制
         copy_action = QAction(I18n.tr('copy'), self)
         copy_action.triggered.connect(self.copy_files)
+        copy_action.setEnabled(has_selection)
         menu.addAction(copy_action)
-        
+
         # 剪切
         cut_action = QAction(I18n.tr('cut'), self)
         cut_action.triggered.connect(self.cut_files)
+        cut_action.setEnabled(has_selection)
         menu.addAction(cut_action)
-        
+
         # 粘贴
         paste_action = QAction(I18n.tr('paste'), self)
         paste_action.triggered.connect(self.paste_files)
         paste_action.setEnabled(len(self.clipboard_files) > 0)
         menu.addAction(paste_action)
-        
+
         menu.addSeparator()
-        
+
         # 删除
         delete_action = QAction(I18n.tr('delete'), self)
         delete_action.triggered.connect(self.delete_files)
+        delete_action.setEnabled(has_selection)
         menu.addAction(delete_action)
-        
+
         # 重命名 - 检查选中的行数
         rename_action = QAction(I18n.tr('rename'), self)
         rename_action.triggered.connect(self.rename_file)
@@ -696,12 +741,13 @@ class FileListWidget(QWidget):
                     # 循环尝试删除，覆盖发送任务退出期间的最坏情况：
                     # sendall(chunk) 超时 1 秒 + sendall(FILE_CANCEL) 超时 1 秒 = 2 秒
                     # 固定 sleep 无法保证覆盖，改用循环重试，最多 3 秒
+                    from sync.file_manager import safe_rmtree
                     deleted = False
                     last_error = None
                     for attempt in range(30):
                         try:
                             if file.is_dir():
-                                shutil.rmtree(file)
+                                safe_rmtree(file)
                             else:
                                 file.unlink()
                             deleted = True
@@ -712,7 +758,7 @@ class FileListWidget(QWidget):
                         except OSError as oe:
                             last_error = oe
                             time.sleep(0.1)
-                    
+
                     if not deleted:
                         raise last_error if last_error else Exception("删除失败")
                     
@@ -729,11 +775,143 @@ class FileListWidget(QWidget):
                     # 添加自定义按钮
                     ok_btn = msg_box.addButton(I18n.tr('ok'), QMessageBox.AcceptRole)
                     ok_btn.setStyleSheet(BUTTON_STYLES['primary'])
-                    
+
                     msg_box.exec()
-            
+
             self.load_files()
-    
+
+    def on_add_via_double_click(self):
+        """双击空白区域：在鼠标位置弹出"添加文件/文件夹"选择菜单"""
+        menu = QMenu(self)
+        file_action = menu.addAction(I18n.tr('drag_add'))
+        folder_action = menu.addAction(I18n.tr('add_folder'))
+
+        # 在鼠标光标位置显示菜单
+        chosen = menu.exec(QCursor.pos())
+
+        if chosen == file_action:
+            self.on_add_files()
+        elif chosen == folder_action:
+            self.on_add_folder()
+
+    def _get_dialog_start_dir(self) -> str:
+        """获取文件对话框的起始目录：优先使用上次记忆的目录，否则用当前路径"""
+        return self._last_dialog_dir or str(self.current_path)
+
+    def on_add_files(self):
+        """添加文件：打开系统文件选择对话框（支持多选），调用 add_files 同步"""
+        files, _ = QFileDialog.getOpenFileNames(
+            self,
+            I18n.tr('drag_add'),
+            self._get_dialog_start_dir()
+        )
+        if files:
+            # 记忆本次选择的目录，下次打开时定位到此
+            self._last_dialog_dir = str(Path(files[0]).parent)
+            self.add_files(files)
+
+    def on_add_folder(self):
+        """添加文件夹：打开系统文件夹选择对话框，调用 add_files 同步"""
+        folder = QFileDialog.getExistingDirectory(
+            self,
+            I18n.tr('add_folder'),
+            self._get_dialog_start_dir()
+        )
+        if folder:
+            # 记忆本次选择的目录，下次打开时定位到此
+            self._last_dialog_dir = folder
+            self.add_files([folder])
+
+    def on_new_folder(self):
+        """新建文件夹
+
+        流程：弹出重命名对话框（预填默认名）→ 确认名称后正式创建并触发同步；
+        对话框阶段按 ESC 或取消则不创建任何文件夹。
+        """
+        from PySide6.QtWidgets import QDialog, QVBoxLayout, QLabel, QDialogButtonBox
+
+        dialog = QDialog(self)
+        dialog.setWindowTitle(I18n.tr('new_folder'))
+        dialog.setMinimumWidth(400)
+
+        layout = QVBoxLayout(dialog)
+
+        label = QLabel(f"{I18n.tr('new_name')}:")
+        layout.addWidget(label)
+
+        # 预填默认名"新建文件夹"，全选便于直接输入替换
+        default_name = I18n.tr('new_folder')
+        name_edit = QLineEdit(default_name)
+        layout.addWidget(name_edit)
+
+        button_box = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
+        button_box.accepted.connect(dialog.accept)
+        button_box.rejected.connect(dialog.reject)
+
+        ok_btn = button_box.button(QDialogButtonBox.Ok)
+        if ok_btn:
+            ok_btn.setStyleSheet(BUTTON_STYLES['primary'])
+            ok_btn.setText(I18n.tr('ok'))
+        cancel_btn = button_box.button(QDialogButtonBox.Cancel)
+        if cancel_btn:
+            cancel_btn.setStyleSheet(BUTTON_STYLES['secondary'])
+            cancel_btn.setText(I18n.tr('cancel'))
+
+        layout.addWidget(button_box)
+
+        name_edit.selectAll()
+        name_edit.setFocus()
+
+        # ESC / 取消 → dialog.exec() 返回 Rejected，直接返回不创建
+        if dialog.exec() != QDialog.Accepted:
+            return
+
+        new_name = name_edit.text().strip()
+        if not new_name:
+            return
+
+        # 校验文件名合法性
+        if not self.is_valid_filename(new_name):
+            msg_box = QMessageBox(self)
+            msg_box.setWindowTitle("错误")
+            msg_box.setText(I18n.tr('error_invalid_name'))
+            msg_box.setIcon(QMessageBox.Warning)
+            ok_btn = msg_box.addButton(I18n.tr('ok'), QMessageBox.AcceptRole)
+            ok_btn.setStyleSheet(BUTTON_STYLES['primary'])
+            msg_box.exec()
+            return
+
+        new_path = self.current_path / new_name
+
+        # 检查是否已存在
+        if new_path.exists():
+            msg_box = QMessageBox(self)
+            msg_box.setWindowTitle("错误")
+            msg_box.setText(I18n.tr('error_file_exists'))
+            msg_box.setIcon(QMessageBox.Warning)
+            ok_btn = msg_box.addButton(I18n.tr('ok'), QMessageBox.AcceptRole)
+            ok_btn.setStyleSheet(BUTTON_STYLES['primary'])
+            msg_box.exec()
+            return
+
+        try:
+            # 正式创建文件夹
+            new_path.mkdir(parents=True, exist_ok=False)
+
+            # 触发同步信号（本地操作）
+            self.dir_created.emit(str(new_path))
+
+            # 刷新文件列表
+            self.load_files()
+        except Exception as e:
+            msg_box = QMessageBox(self)
+            msg_box.setWindowTitle("错误")
+            msg_box.setText(f"创建文件夹失败: {str(e)}")
+            msg_box.setIcon(QMessageBox.Critical)
+            ok_btn = msg_box.addButton(I18n.tr('ok'), QMessageBox.AcceptRole)
+            ok_btn.setStyleSheet(BUTTON_STYLES['primary'])
+            msg_box.exec()
+
     def rename_file(self):
         """重命名文件"""
         files = self.get_selected_files()
@@ -752,25 +930,27 @@ class FileListWidget(QWidget):
         layout = QVBoxLayout(dialog)
         
         # 标签
-        label = QLabel(f"新名称:")
+        label = QLabel(f"{I18n.tr('new_name')}:")
         layout.addWidget(label)
-        
+
         # 文件名输入框
         name_edit = QLineEdit(old_name)
         layout.addWidget(name_edit)
-        
+
         # 按钮
         button_box = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
         button_box.accepted.connect(dialog.accept)
         button_box.rejected.connect(dialog.reject)
-        
+
         # 应用全局按钮样式
         ok_btn = button_box.button(QDialogButtonBox.Ok)
         if ok_btn:
             ok_btn.setStyleSheet(BUTTON_STYLES['primary'])
+            ok_btn.setText(I18n.tr('ok'))
         cancel_btn = button_box.button(QDialogButtonBox.Cancel)
         if cancel_btn:
             cancel_btn.setStyleSheet(BUTTON_STYLES['secondary'])
+            cancel_btn.setText(I18n.tr('cancel'))
         
         layout.addWidget(button_box)
         

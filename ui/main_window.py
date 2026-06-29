@@ -128,7 +128,7 @@ class MainWindow(QMainWindow):
         main_layout.addLayout(bottom_layout)
         
         # 版本信息
-        version_label = QLabel(I18n.tr('about_version', version=Config.APP_VERSION))
+        version_label = QLabel(I18n.tr('about_version', version=Config.DISPLAY_VERSION))
         version_label.setAlignment(Qt.AlignCenter)
         version_label.setStyleSheet("color: #999; font-size: 11px;")
         main_layout.addWidget(version_label)
@@ -153,9 +153,11 @@ class MainWindow(QMainWindow):
             password = dialog.get_password()
             host_address = dialog.get_host_address()
             host_port = dialog.get_host_port()
-            
+            # 获取预验证成功的 Client 实例（避免 SyncWindow 重复连接）
+            verified_client = dialog.get_verified_client()
+
             # 打开同步窗口
-            self.open_sync_window(is_host=False, room_code=room_code, password=password, host_address=host_address, host_port=host_port)
+            self.open_sync_window(is_host=False, room_code=room_code, password=password, host_address=host_address, host_port=host_port, existing_client=verified_client)
     
     def on_toggle_language(self):
         """切换语言"""
@@ -234,27 +236,28 @@ class MainWindow(QMainWindow):
                 # 版本信息
                 version_label = layout.itemAt(6).widget()
                 if version_label:
-                    version_label.setText(I18n.tr('about_version', version=Config.APP_VERSION))
+                    version_label.setText(I18n.tr('about_version', version=Config.DISPLAY_VERSION))
     
     def on_about(self):
         """关于"""
         dialog = AboutDialog(self)
         dialog.exec()
     
-    def open_sync_window(self, is_host: bool, room_code: str, password: str = "", host_address: str = "", host_port: int = None):
+    def open_sync_window(self, is_host: bool, room_code: str, password: str = "", host_address: str = "", host_port: int = None, existing_client=None):
         """打开同步窗口"""
         from ui.sync_window import SyncWindow
-        
+
         # 隐藏主窗口
         self.hide()
-        
+
         # 创建同步窗口并保持引用
         self._sync_window = SyncWindow(
             is_host=is_host,
             room_code=room_code,
             password=password,
             host_address=host_address,
-            host_port=host_port
+            host_port=host_port,
+            existing_client=existing_client,
         )
         self._sync_window.setWindowTitle(f"{I18n.tr('app_name')} - {I18n.tr('room_info', code=room_code)}")
         self._sync_window.setMinimumSize(Config.WINDOW_MIN_WIDTH, Config.WINDOW_MIN_HEIGHT)

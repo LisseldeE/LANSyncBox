@@ -3,6 +3,7 @@
 负责本地文件操作和管理
 """
 import os
+import stat
 import hashlib
 import shutil
 from pathlib import Path
@@ -10,6 +11,32 @@ from typing import List, Dict, Optional
 from datetime import datetime
 
 from config import Config
+
+
+def safe_rmtree(path, onerror=None):
+    """安全删除目录树，处理 Windows 只读文件导致的权限问题。
+
+    Windows 上 shutil.rmtree 遇到只读文件会抛 PermissionError，导致留下空目录。
+    本函数在删除失败时清除只读属性后重试，确保目录被完整删除。
+
+    Args:
+        path: 要删除的目录路径
+        onerror: 自定义错误处理回调（兼容 shutil.rmtree 的 onerror 签名）
+    """
+    def _default_onerror(func, p, exc_info):
+        try:
+            os.chmod(p, stat.S_IWRITE)
+        except Exception:
+            pass
+        try:
+            func(p)
+        except Exception as e:
+            if onerror:
+                onerror(func, p, exc_info)
+            else:
+                raise e
+
+    shutil.rmtree(path, onerror=_default_onerror)
 
 
 class FileManager:
@@ -97,7 +124,7 @@ class FileManager:
         """删除文件"""
         try:
             if file_path.is_dir():
-                shutil.rmtree(file_path)
+                safe_rmtree(file_path)
             else:
                 file_path.unlink()
             return True

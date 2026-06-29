@@ -3,7 +3,6 @@
 """
 import threading
 import os
-import shutil
 from PySide6.QtWidgets import (
     QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, 
     QLabel, QPushButton, QTextEdit, QFrame, QSplitter, QMessageBox,
@@ -30,13 +29,14 @@ class SyncWindow(QMainWindow):
     # 信号
     closed = Signal()
     
-    def __init__(self, is_host: bool, room_code: str, password: str = "", host_address: str = "", host_port: int = None):
+    def __init__(self, is_host: bool, room_code: str, password: str = "", host_address: str = "", host_port: int = None, existing_client=None):
         super().__init__()
         self.is_host = is_host
         self.room_code = room_code
         self.password = password
         self.host_address = host_address
         self.host_port = host_port
+        self._existing_client = existing_client  # 由 JoinRoomDialog 预验证成功的 client（可选，避免重复连接）
         
         # 获取房间文件夹
         self.room_folder = Config.get_room_folder(room_code)
@@ -52,7 +52,10 @@ class SyncWindow(QMainWindow):
         
         # 传输队列管理器（限制同时传输3个文件）
         self.transfer_queue = TransferQueue(max_concurrent=3)
-        
+
+        # 关闭确认标志（避免 on_disconnect 确认后 close() 再次弹窗）
+        self._close_confirmed = False
+
         self.init_ui()
         self.init_network()
     
@@ -183,6 +186,7 @@ class SyncWindow(QMainWindow):
         self.file_list.file_added.connect(self.on_file_added)
         self.file_list.file_deleted.connect(self.on_file_deleted)
         self.file_list.file_renamed.connect(self.on_file_renamed)
+        self.file_list.dir_created.connect(self.on_dir_created)
         # 设置取消传输回调（直接调用，避免 Qt 信号异步性问题）
         self.file_list.set_cancel_transfer_callback(self.on_cancel_transfer)
         splitter.addWidget(self.file_list)
@@ -261,7 +265,13 @@ class SyncWindow(QMainWindow):
                 self._add_record("启动失败", "错误", "")
         else:
             # 客户端：连接到服务器
-            self.client = SyncClient(self.room_code, self.password)
+            if self._existing_client is not None:
+                # 复用 JoinRoomDialog 预验证成功的 client（已建立连接并通过验证）
+                self.client = self._existing_client
+                self._existing_client = None
+            else:
+                # 自行创建并连接
+                self.client = SyncClient(self.room_code, self.password)
             self.client.connected.connect(self.on_connected)
             self.client.disconnected.connect(self.on_disconnected)
             self.client.error_occurred.connect(self.on_network_error)
@@ -279,11 +289,14 @@ class SyncWindow(QMainWindow):
             self.client.file_sent.connect(self.on_file_sent)
             # 客户端文件列表接收信号
             self.client.file_list_received.connect(self.on_file_list_received)
-            
-            # 连接到服务器
+
+            # 连接到服务器（复用模式下 client 已验证通过，直接记录日志）
             host = self.host_address or "127.0.0.1"
             port = self.host_port or Config.DEFAULT_PORT
-            if self.client.connect_to_server(host, port):
+            if self.client.authenticated:
+                self._add_record(f"{host}:{port}", "连接", "")
+                self.on_connected()
+            elif self.client.connect_to_server(host, port):
                 self._add_record(f"{host}:{port}", "连接", "")
             else:
                 self._add_record("连接失败", "错误", "")
@@ -350,8 +363,9 @@ class SyncWindow(QMainWindow):
         """验证失败"""
         # 显示错误提示
         QMessageBox.critical(self, I18n.tr('auth_failed'), I18n.tr('auth_failed_msg', msg=message))
-        
-        # 关闭窗口
+
+        # 关闭窗口（标记已确认，避免触发 closeEvent 的"确认离开"弹窗）
+        self._close_confirmed = True
         self.close()
     
     def on_disconnected(self):
@@ -903,7 +917,35 @@ class SyncWindow(QMainWindow):
         # 将任务加入传输队列
         new_rel_path = os.path.relpath(new_path, self.room_folder).replace('\\', '/')
         self.transfer_queue.add_task('rename', sync_rename, new_rel_path)
-    
+
+    def on_dir_created(self, dir_path: str):
+        """目录创建事件（本地操作）"""
+        from pathlib import Path
+
+        dir_name = Path(dir_path).name
+        self._add_record(dir_name, "创建目录", "")
+
+        # 更新状态为同步中
+        self.status_label.setText(I18n.tr('status_syncing'))
+        self.status_label.setStyleSheet("color: #339af0;")
+
+        # 定义同步函数
+        def sync_dir_create(stop_event: threading.Event):
+            try:
+                if stop_event.is_set():
+                    return
+
+                if self.is_host and self.server:
+                    self.server.broadcast_dir_create(dir_path)
+                elif self.client:
+                    self.client.send_dir_create(dir_path)
+            except Exception as e:
+                self.add_log("错误", f"同步创建目录失败: {e}")
+
+        # 将任务加入传输队列
+        rel_path = os.path.relpath(dir_path, self.room_folder).replace('\\', '/')
+        self.transfer_queue.add_task('dir_create', sync_dir_create, rel_path)
+
     def on_disconnect(self):
         """断开连接"""
         # 创建自定义消息框
@@ -922,8 +964,9 @@ class SyncWindow(QMainWindow):
         
         msg_box.setDefaultButton(no_btn)
         msg_box.exec()
-        
+
         if msg_box.clickedButton() == yes_btn:
+            self._close_confirmed = True
             self.close()
     
     def _show_about(self):
@@ -933,6 +976,28 @@ class SyncWindow(QMainWindow):
     
     def closeEvent(self, event):
         """窗口关闭事件"""
+        # 未确认时弹出确认弹窗（点击叉号或外部触发关闭时）
+        if not self._close_confirmed:
+            msg_box = QMessageBox(self)
+            msg_box.setWindowTitle(I18n.tr('confirm_leave'))
+            msg_box.setText(I18n.tr('confirm_leave_msg'))
+            msg_box.setIcon(QMessageBox.Question)
+
+            yes_btn = msg_box.addButton(I18n.tr('yes'), QMessageBox.YesRole)
+            no_btn = msg_box.addButton(I18n.tr('no'), QMessageBox.NoRole)
+
+            yes_btn.setStyleSheet(BUTTON_STYLES['danger'])
+            no_btn.setStyleSheet(BUTTON_STYLES['secondary'])
+
+            msg_box.setDefaultButton(no_btn)
+            msg_box.exec()
+
+            if msg_box.clickedButton() != yes_btn:
+                event.ignore()
+                return
+
+            self._close_confirmed = True
+
         # 清理传输队列
         self.transfer_queue.clear()
         
@@ -940,16 +1005,9 @@ class SyncWindow(QMainWindow):
         try:
             preview_folder = Config.get_preview_folder()
             if preview_folder.exists():
-                # 先移除所有文件的只读属性，确保可以删除
-                import ctypes
-                for item in preview_folder.rglob('*'):
-                    if item.is_file():
-                        try:
-                            # FILE_ATTRIBUTE_NORMAL = 0x80 (移除只读)
-                            ctypes.windll.kernel32.SetFileAttributesW(str(item), 0x80)
-                        except Exception:
-                            pass
-                shutil.rmtree(preview_folder)
+                # 使用 safe_rmtree 处理 Windows 只读文件导致的权限问题
+                from sync.file_manager import safe_rmtree
+                safe_rmtree(preview_folder)
         except Exception:
             pass  # 清理失败不影响关闭
         

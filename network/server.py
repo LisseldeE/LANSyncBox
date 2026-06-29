@@ -454,7 +454,12 @@ class SyncServer(QObject):
                 # 认证成功后通知 UI 更新连接数
                 self.client_connected.emit(client_id)
             else:
-                response = Protocol.create_auth_response(False, "验证失败")
+                # 区分错误类型：房间号错误 / 密码错误
+                if room_code != self.room_code:
+                    fail_msg = "房间号错误"
+                else:
+                    fail_msg = "密码错误"
+                response = Protocol.create_auth_response(False, fail_msg)
                 self.clients[client_id]['socket'].sendall(response)
                 self._remove_client(client_id)
                 
@@ -503,9 +508,9 @@ class SyncServer(QObject):
             if os.path.isfile(file_path):
                 os.remove(file_path)
             elif os.path.isdir(file_path):
-                import shutil
-                shutil.rmtree(file_path)
-            
+                from sync.file_manager import safe_rmtree
+                safe_rmtree(file_path)
+
             self.log_message.emit(f"删除: {filename}")
             self.file_deleted.emit(filename)
             

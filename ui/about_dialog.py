@@ -44,7 +44,7 @@ class AboutDialog(QDialog):
         layout.addWidget(title_label)
 
         # 版本信息
-        version_label = QLabel(f"{I18n.tr('about_version_label')} {Config.APP_VERSION}")
+        version_label = QLabel(f"{I18n.tr('about_version_label')} {Config.DISPLAY_VERSION}")
         version_label.setStyleSheet("font-size: 13px; color: #495057;")
         version_label.setAlignment(Qt.AlignCenter)
         layout.addWidget(version_label)

@@ -53,6 +53,7 @@ class I18n:
             "password_required": "此房间需要密码",
             "connect": "连接",
             "connecting": "正在连接...",
+            "verifying": "正在验证...",
             "connection_failed": "连接失败",
             "invalid_room_code": "无效的房间号",
             "incorrect_password": "密码错误",
@@ -98,6 +99,8 @@ class I18n:
             "paste": "粘贴",
             "delete": "删除",
             "rename": "重命名",
+            "new_folder": "新建文件夹",
+            "new_name": "新名称",
             "select_all": "全选",
             "refresh": "刷新",
             "go_up": "↑ 上级",
@@ -107,6 +110,7 @@ class I18n:
             "drag_copy": "复制文件",
             "drag_move": "移动文件",
             "drag_files_count": "{count} 个文件",
+            "add_folder": "添加文件夹",
             
             # 确认对话框
             "confirm_delete": "确认删除",
@@ -220,6 +224,7 @@ class I18n:
             "password_required": "This room requires password",
             "connect": "Connect",
             "connecting": "Connecting...",
+            "verifying": "Verifying...",
             "connection_failed": "Connection failed",
             "invalid_room_code": "Invalid room code",
             "incorrect_password": "Incorrect password",
@@ -265,6 +270,8 @@ class I18n:
             "paste": "Paste",
             "delete": "Delete",
             "rename": "Rename",
+            "new_folder": "New Folder",
+            "new_name": "New Name",
             "select_all": "Select All",
             "refresh": "Refresh",
             "go_up": "↑ Up",
@@ -274,6 +281,7 @@ class I18n:
             "drag_copy": "Copy Files",
             "drag_move": "Move Files",
             "drag_files_count": "{count} file(s)",
+            "add_folder": "Add Folder",
             
             # Confirm dialogs
             "confirm_delete": "Confirm Delete",

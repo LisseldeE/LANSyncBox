@@ -12,13 +12,19 @@ class Config:
 
     # 应用信息
     APP_NAME = "LANSyncBox"
-    APP_VERSION = "R5"
+    APP_VERSION = "R6"             # 内部版本号（开源直装版显示 + 检查更新比较用）
+    STORE_VERSION = "6.1.0.0"      # 微软商店版本号（四段式，符合 MSIX 打包要求）
     APP_AUTHOR = "Lisselde_E"
     APP_EMAIL = "Lisselde.E@outlook.com"
 
     # 功能开关
-    # 检查更新按钮：True=显示（GitHub 版本），False=隐藏（微软商店版本）
+    # 检查更新按钮：True=显示（开源直装版），False=隐藏（微软商店版本）
     ENABLE_CHECK_UPDATE = True
+
+    # 显示用版本号：根据发布渠道动态选择
+    # 开源直装版（ENABLE_CHECK_UPDATE=True）→ APP_VERSION（R5）
+    # 微软商店版（ENABLE_CHECK_UPDATE=False）→ STORE_VERSION（5.3.0.0）
+    DISPLAY_VERSION = STORE_VERSION if not ENABLE_CHECK_UPDATE else APP_VERSION
 
     # 仓库信息
     GITHUB_REPO = "LisseldeE/LANSyncBox"

@@ -2,16 +2,17 @@
 加入房间对话框
 """
 from PySide6.QtWidgets import (
-    QDialog, QVBoxLayout, QHBoxLayout, QLabel, 
+    QDialog, QVBoxLayout, QHBoxLayout, QLabel,
     QLineEdit, QPushButton, QFrame, QMessageBox, QWidget,
     QGraphicsOpacityEffect, QApplication
 )
-from PySide6.QtCore import Qt, Signal, QTimer, QPropertyAnimation, QByteArray
+from PySide6.QtCore import Qt, Signal, QTimer, QPropertyAnimation, QByteArray, QEventLoop
 from PySide6.QtGui import QFont, QValidator, QKeyEvent
 
 from i18n import I18n
 from config import Config
 from network.discovery import RoomDiscovery
+from network.client import SyncClient
 from ui.widgets import AnimatedButton, BUTTON_STYLES, fade_widget
 
 
@@ -184,6 +185,8 @@ class JoinRoomDialog(QDialog):
         self._room_requires_password = False  # 房间是否需要密码
         self._room_checked = False  # 房间是否已检测
         self._is_checking = False  # 是否正在检测中
+        self._is_verifying = False  # 是否正在验证密码
+        self._verified_client = None  # 预验证成功的 Client 实例（传递给 SyncWindow 复用）
         self.init_ui()
     
     def init_ui(self):
@@ -383,32 +386,150 @@ class JoinRoomDialog(QDialog):
         fade_widget(self, self.password_widget, False, duration=150)
     
     def on_connect(self):
-        """连接房间"""
+        """连接房间（先预验证密码，成功后 accept；失败则在对话框内显示错误）"""
+        # 防止重复点击
+        if self._is_verifying:
+            return
+
         room_code = self.room_code_input.get_room_code()
-        
+
         # 验证房间号
         if not self.room_code_input.is_complete():
             QMessageBox.warning(self, I18n.tr('join_room_title'), I18n.tr('invalid_room_code'))
             return
-        
+
         # 如果没有检测过房间，先检测
         if not self._room_checked and not self.host_edit.text().strip():
             self._check_room_exists()
             return
-        
+
         # 设置房间信息
         self.room_code = room_code
         self.password = self.password_edit.text()
-        
+
         # 如果用户指定了主机地址，使用它
         host_address = self.host_edit.text().strip()
         if host_address:
             self.host_address = host_address
             self.discovered_host = host_address
-        
-        # 接受对话框
-        self.accept()
-    
+
+        # 预验证：连接主机并验证密码
+        self._verify_password()
+
+    def _verify_password(self):
+        """预验证密码：创建临时 Client 连接 + 验证，成功后保留 client 并 accept"""
+        self._is_verifying = True
+        self.connect_btn.setEnabled(False)
+        self.cancel_btn.setEnabled(False)
+        self._show_status(I18n.tr('verifying'), color='#339af0')
+
+        host = self.host_address or "127.0.0.1"
+        port = self.host_port or Config.DEFAULT_PORT
+
+        # 创建临时 Client 进行验证
+        client = SyncClient(self.room_code, self.password)
+        self._verified_client = client
+
+        # 用事件循环等待验证结果
+        loop = QEventLoop(self)
+        timeout_timer = QTimer(self)
+        timeout_timer.setSingleShot(True)
+
+        result = {'status': None, 'message': ''}  # None / 'success' / 'failed' / 'timeout' / 'error'
+
+        def on_connected():
+            result['status'] = 'success'
+            timeout_timer.stop()
+            loop.quit()
+
+        def on_auth_failed(msg):
+            result['status'] = 'failed'
+            result['message'] = msg
+            timeout_timer.stop()
+            loop.quit()
+
+        def on_error(msg):
+            if result['status'] is None:
+                result['status'] = 'error'
+                result['message'] = msg
+                timeout_timer.stop()
+                loop.quit()
+
+        def on_timeout():
+            if result['status'] is None:
+                result['status'] = 'timeout'
+                loop.quit()
+
+        client.connected.connect(on_connected)
+        client.auth_failed.connect(on_auth_failed)
+        client.error_occurred.connect(on_error)
+        timeout_timer.timeout.connect(on_timeout)
+
+        # 尝试连接
+        if not client.connect_to_server(host, port):
+            # 连接建立失败（同步返回 False）
+            self._is_verifying = False
+            self.connect_btn.setEnabled(True)
+            self.cancel_btn.setEnabled(True)
+            self._verified_client = None
+            try:
+                client.disconnect()
+            except Exception:
+                pass
+            self._show_status(I18n.tr('connection_failed'), color='#ff6b6b')
+            return
+
+        # 等待验证结果（10 秒超时）
+        timeout_timer.start(10000)
+        loop.exec()
+
+        # 处理结果
+        if result['status'] == 'success':
+            # 验证成功：断开临时信号连接（避免 SyncWindow 复用时闭包被意外调用），保留 client 实例
+            try:
+                client.connected.disconnect(on_connected)
+                client.auth_failed.disconnect(on_auth_failed)
+                client.error_occurred.disconnect(on_error)
+            except Exception:
+                pass
+            self._is_verifying = False
+            self._show_status(I18n.tr('room_found', ip=host), color='#51cf66')
+            self.accept()
+            return
+
+        # 验证失败 / 超时 / 错误：断开 client，显示错误，保持对话框打开
+        self._is_verifying = False
+        self.connect_btn.setEnabled(True)
+        self.cancel_btn.setEnabled(True)
+        self._verified_client = None
+
+        try:
+            client.disconnect()
+        except Exception:
+            pass
+
+        # 移除房间号输入框的焦点（QEventLoop 退出后 QDialog 会自动聚焦第一个可聚焦控件）
+        for edit in self.room_code_input.digit_edits:
+            edit.clearFocus()
+        # 将焦点设置到密码输入框，方便用户直接修改密码重试
+        if self._room_requires_password:
+            self.password_edit.setFocus()
+            self.password_edit.selectAll()
+
+        if result['status'] == 'failed':
+            # 验证失败：直接显示服务器返回的错误信息（如 "密码错误"、"房间号错误"）
+            self._show_status(result['message'] or I18n.tr('auth_failed'), color='#ff6b6b')
+        elif result['status'] == 'timeout':
+            self._show_status(I18n.tr('connection_failed'), color='#ff6b6b')
+        elif result['status'] == 'error':
+            self._show_status(result['message'] or I18n.tr('connection_failed'), color='#ff6b6b')
+
+    def get_verified_client(self):
+        """获取预验证成功的 Client 实例（供 SyncWindow 复用，避免重复连接）"""
+        client = self._verified_client
+        self._verified_client = None  # 转移所有权
+        return client
+
     def get_room_code(self) -> str:
         """获取房间号"""
         return self.room_code
