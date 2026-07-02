@@ -12,8 +12,8 @@ class Config:
 
     # 应用信息
     APP_NAME = "LANSyncBox"
-    APP_VERSION = "R6"             # 内部版本号（开源直装版显示 + 检查更新比较用）
-    STORE_VERSION = "6.1.0.0"      # 微软商店版本号（四段式，符合 MSIX 打包要求）
+    APP_VERSION = "R6.2"             # 内部版本号（开源直装版显示 + 检查更新比较用）
+    STORE_VERSION = "6.2.0.0"      # 微软商店版本号（四段式，符合 MSIX 打包要求）
     APP_AUTHOR = "Lisselde_E"
     APP_EMAIL = "Lisselde.E@outlook.com"
 
@@ -147,7 +147,7 @@ class Config:
     def get_preview_folder(room_code: str = "") -> Path:
         """获取预览文件夹路径（用于只读打开文件）
         Args:
-            room_code: 房间号，可选。如果提供，则创建房间专属预览子目录
+            room_code: 房间号（可选），用于区分不同房间的预览文件
         Returns:
             预览文件夹路径
         """
@@ -157,6 +157,30 @@ class Config:
             preview_folder = preview_folder / room_code
         preview_folder.mkdir(parents=True, exist_ok=True)
         return preview_folder
+
+    @staticmethod
+    def get_cache_size() -> int:
+        """计算缓存目录总大小（字节）
+        Returns:
+            缓存目录大小（字节），如果目录不存在返回 0
+        """
+        sync_folder = Config.get_sync_folder()
+        if not sync_folder.exists():
+            return 0
+
+        total_size = 0
+        try:
+            for dirpath, dirnames, filenames in os.walk(sync_folder):
+                for filename in filenames:
+                    filepath = os.path.join(dirpath, filename)
+                    # 忽略符号链接等特殊情况
+                    if os.path.isfile(filepath):
+                        total_size += os.path.getsize(filepath)
+        except (OSError, PermissionError):
+            # 访问失败时返回 0
+            pass
+
+        return total_size
 
 
 class UserConfig:

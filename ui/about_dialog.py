@@ -22,7 +22,9 @@ class AboutDialog(QDialog):
     def __init__(self, parent=None):
         super().__init__(parent)
         self.setWindowTitle(I18n.tr('about_title'))
-        self.setWindowFlags(self.windowFlags() & ~Qt.WindowContextHelpButtonHint)
+        # 明确设置窗口标志，确保包含关闭按钮
+        flags = Qt.Dialog | Qt.WindowCloseButtonHint
+        self.setWindowFlags(flags)
         self.setFixedSize(400, 320)
         self._init_ui()
 
@@ -102,8 +104,7 @@ class AboutDialog(QDialog):
         if Config.ENABLE_CHECK_UPDATE:
             # 检查更新按钮（仅 GitHub 版本显示）
             check_update_btn = AnimatedButton(I18n.tr('about_check_update'))
-            check_update_btn.setMinimumWidth(120)
-            check_update_btn.setFixedHeight(36)
+            check_update_btn.setFixedSize(120, 36)
             check_update_btn.setStyleSheet(BUTTON_STYLES['primary'])
             check_update_btn.clicked.connect(self._check_update)
             btn_layout.addWidget(check_update_btn)
@@ -112,7 +113,7 @@ class AboutDialog(QDialog):
 
         # 关闭按钮
         close_btn = AnimatedButton(I18n.tr('close'))
-        close_btn.setFixedSize(100, 36)
+        close_btn.setFixedSize(120, 36)
         close_btn.setStyleSheet(BUTTON_STYLES['secondary'])
         close_btn.clicked.connect(self.accept)
         btn_layout.addWidget(close_btn)
@@ -157,13 +158,14 @@ class AboutDialog(QDialog):
 
             # 遍历所有 tags，找到版本号最大的那个
             latest_tag = None
-            latest_version_num = -1
+            latest_version_num = -1.0
 
             for tag in data:
                 tag_name = tag.get('name', '')
-                version_match = re.search(r'R(\d+)', tag_name)
+                # 支持 Rx 和 Rx.x 格式（如 R6、R6.1）
+                version_match = re.search(r'R(\d+(?:\.\d+)?)', tag_name)
                 if version_match:
-                    version_num = int(version_match.group(1))
+                    version_num = float(version_match.group(1))
                     if version_num > latest_version_num:
                         latest_version_num = version_num
                         latest_tag = tag_name
@@ -172,15 +174,15 @@ class AboutDialog(QDialog):
                 QMessageBox.warning(self, I18n.tr('about_check_update'), I18n.tr('about_remote_parse_error'))
                 return
 
-            # 解析当前版本号
-            current_version_match = re.search(r'R(\d+)', Config.APP_VERSION)
+            # 解析当前版本号（支持 Rx 和 Rx.x 格式）
+            current_version_match = re.search(r'R(\d+(?:\.\d+)?)', Config.APP_VERSION)
             if not current_version_match:
                 QMessageBox.warning(self, I18n.tr('about_check_update'), I18n.tr('about_parse_error'))
                 return
 
-            current_version = int(current_version_match.group(1))
+            current_version = float(current_version_match.group(1))
 
-            # 比较版本号
+            # 比较版本号（浮点数比较）
             if latest_version_num > current_version:
                 # 发现新版本
                 msg_box = QMessageBox(self)

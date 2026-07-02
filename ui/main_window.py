@@ -6,7 +6,7 @@ from PySide6.QtWidgets import (
     QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
     QPushButton, QLabel, QFrame, QSpacerItem, QSizePolicy, QMessageBox
 )
-from PySide6.QtCore import Qt, QSize, QUrl
+from PySide6.QtCore import Qt, QSize, QUrl, QFileSystemWatcher, QTimer
 from PySide6.QtGui import QFont, QDesktopServices
 
 from i18n import I18n
@@ -19,11 +19,72 @@ from ui.widgets import AnimatedButton, BUTTON_STYLES
 
 class MainWindow(QMainWindow):
     """主窗口"""
-    
+
     def __init__(self):
         super().__init__()
         self._sync_window = None  # 保持同步窗口引用
+        self._version_label = None  # 版本和缓存信息标签
+        self._cache_watcher = None  # 文件系统监控器
+        self._cache_refresh_timer = None  # 缓存刷新延迟定时器
+        
         self.init_ui()
+        self._setup_cache_watcher()
+
+    def _setup_cache_watcher(self):
+        """设置缓存文件夹监控器"""
+        self._cache_watcher = QFileSystemWatcher()
+        self._cache_refresh_timer = QTimer()
+        self._cache_refresh_timer.setSingleShot(True)  # 单次触发
+        self._cache_refresh_timer.timeout.connect(self._refresh_cache_size)
+        
+        # 获取缓存文件夹路径（确保存在）
+        cache_folder = Config.get_sync_folder()
+        cache_folder_str = str(cache_folder)
+        
+        # 监听缓存文件夹及其所有子文件夹
+        paths_to_watch = [cache_folder_str]
+        
+        # 递归添加子文件夹（如果有）
+        if cache_folder.exists():
+            for root, dirs, files in os.walk(cache_folder_str):
+                for dir_name in dirs:
+                    dir_path = os.path.join(root, dir_name)
+                    paths_to_watch.append(dir_path)
+        
+        # 添加所有路径到监控器
+        for path in paths_to_watch:
+            if os.path.exists(path):
+                self._cache_watcher.addPath(path)
+        
+        # 当文件夹内容变化时，延迟刷新缓存大小（避免频繁触发）
+        self._cache_watcher.directoryChanged.connect(self._delayed_refresh_cache)
+
+    def _delayed_refresh_cache(self):
+        """延迟刷新缓存大小（合并短时间内多次触发）"""
+        # 如果定时器已经在运行，重启它（合并多次触发）
+        if self._cache_refresh_timer.isActive():
+            self._cache_refresh_timer.stop()
+        # 延迟500ms后刷新，避免频繁计算
+        self._cache_refresh_timer.start(500)
+
+    def _format_size(self, size_bytes: int) -> str:
+        """格式化文件大小（字节转换为人类可读格式）"""
+        if size_bytes == 0:
+            return "0 B"
+
+        units = ['B', 'KB', 'MB', 'GB', 'TB']
+        unit_index = 0
+        size = float(size_bytes)
+
+        while size >= 1024 and unit_index < len(units) - 1:
+            size /= 1024
+            unit_index += 1
+
+        # 小于1MB显示整数，大于等于1MB显示两位小数
+        if unit_index < 2:  # B 或 KB
+            return f"{int(size)} {units[unit_index]}"
+        else:
+            return f"{size:.2f} {units[unit_index]}"
     
     def init_ui(self):
         """初始化界面"""
@@ -126,12 +187,15 @@ class MainWindow(QMainWindow):
         bottom_layout.addStretch()
         
         main_layout.addLayout(bottom_layout)
-        
-        # 版本信息
-        version_label = QLabel(I18n.tr('about_version', version=Config.DISPLAY_VERSION))
-        version_label.setAlignment(Qt.AlignCenter)
-        version_label.setStyleSheet("color: #999; font-size: 11px;")
-        main_layout.addWidget(version_label)
+
+        # 版本和缓存信息
+        cache_size = Config.get_cache_size()
+        cache_size_str = self._format_size(cache_size)
+        version_text = f"{I18n.tr('about_version', version=Config.DISPLAY_VERSION)}  |  {I18n.tr('cache_size', size=cache_size_str)}"
+        self._version_label = QLabel(version_text)
+        self._version_label.setAlignment(Qt.AlignCenter)
+        self._version_label.setStyleSheet("color: #999; font-size: 11px;")
+        main_layout.addWidget(self._version_label)
     
     def on_create_room(self):
         """创建房间"""
@@ -232,11 +296,13 @@ class MainWindow(QMainWindow):
                     about_btn = bottom_layout.itemAt(5).widget()
                     if about_btn:
                         about_btn.setText(I18n.tr('about'))
-                
-                # 版本信息
-                version_label = layout.itemAt(6).widget()
-                if version_label:
-                    version_label.setText(I18n.tr('about_version', version=Config.DISPLAY_VERSION))
+
+                # 版本和缓存信息
+                if self._version_label:
+                    cache_size = Config.get_cache_size()
+                    cache_size_str = self._format_size(cache_size)
+                    version_text = f"{I18n.tr('about_version', version=Config.DISPLAY_VERSION)}  |  {I18n.tr('cache_size', size=cache_size_str)}"
+                    self._version_label.setText(version_text)
     
     def on_about(self):
         """关于"""
@@ -262,8 +328,24 @@ class MainWindow(QMainWindow):
         self._sync_window.setWindowTitle(f"{I18n.tr('app_name')} - {I18n.tr('room_info', code=room_code)}")
         self._sync_window.setMinimumSize(Config.WINDOW_MIN_WIDTH, Config.WINDOW_MIN_HEIGHT)
         self._sync_window.resize(1000, 700)
-        
-        # 窗口关闭时显示主窗口
-        self._sync_window.closed.connect(self.show)
-        
+
+        # 窗口关闭时刷新缓存大小并显示主窗口
+        self._sync_window.closed.connect(self._show_and_refresh_cache)
+
         self._sync_window.show()
+
+    def _refresh_cache_size(self):
+        """刷新缓存大小显示"""
+        if self._version_label:
+            cache_size = Config.get_cache_size()
+            cache_size_str = self._format_size(cache_size)
+            version_text = f"{I18n.tr('about_version', version=Config.DISPLAY_VERSION)}  |  {I18n.tr('cache_size', size=cache_size_str)}"
+            self._version_label.setText(version_text)
+
+    def _show_and_refresh_cache(self):
+        """刷新缓存大小后显示主窗口"""
+        # 刷新缓存大小显示
+        self._refresh_cache_size()
+
+        # 显示主窗口
+        self.show()

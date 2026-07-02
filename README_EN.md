@@ -7,7 +7,6 @@ LANSyncBox is a lightweight LAN real-time file synchronization tool that enables
 ## Project Information
 
 - **Project Name**: LANSyncBox
-- **Project Version**: R6
 - **Project Author**: Lisselde_E
 - **Contact Email**: Lisselde.E@outlook.com
 - **Project Repository**: https://github.com/LisseldeE/LANSyncBox
@@ -90,11 +89,8 @@ LANSyncBox is a lightweight LAN real-time file synchronization tool that enables
 ### Host (Create Connection)
 
 1. Click "Create Connection" button
-2. Enter a custom 6-digit room code (system checks availability)
-3. Optional: Set password protection
-4. Select the folder path to sync
-5. Optional: Enable "Allow peer-to-peer sync"
-6. Click create to enter sync status window
+2. Optional: Set password protection
+3. Click create to enter sync status window
 
 ### Client (Join Connection)
 
@@ -102,8 +98,7 @@ LANSyncBox is a lightweight LAN real-time file synchronization tool that enables
 2. Enter room code
 3. If password required, enter directly in join dialog for pre-verification
 4. Verification failures are displayed directly in the join dialog, allowing immediate retry with corrected info
-5. Select folder path for synced files
-6. Click connect - automatic full sync from host
+5. Click connect - automatic full sync from host
 
 ## Sync Logic
 
@@ -113,9 +108,9 @@ File conflicts are handled by the system file manager. Sync ensures consistency 
 
 ### Host Side
 
-- Monitors all changes in sync folder (add/modify/delete/rename)
+- Sync file changes via operation list
 - Changes synced to all connected clients in real-time
-- Receives files from clients, forwards based on "hide flag"
+- Receives client files, syncs to other clients in real-time
 - Support for concurrent transfer limit (max 3 files simultaneously) to avoid high resource usage
 - Support for folder sync, automatically recursively sync all files in folder
 - Large files use streaming transfer to avoid high memory usage
@@ -124,16 +119,15 @@ File conflicts are handled by the system file manager. Sync ensures consistency 
 
 ### Client Side
 
-- File changes uploaded to host (not directly to other clients)
-- "Hide files from others" toggle support
+- File list changes uploaded to host (not directly to other clients)
 - Real-time sync status display
-- Auto incremental sync after reconnection
+- Auto sync and align after reconnection
 - Real-time progress display with file transfer progress bar
 
 ### Additional Rules
 
 - **Conflict Handling**: Latest modification time wins
-- **Host Offline**: All clients notified "Room closed"
+- **Host Offline**: All clients notified "Connection disconnected"
 - **Transfer Protocol**: TCP + custom protocol
 - **Large File Handling**: Streaming chunked transfer to avoid high memory usage
 - **Concurrency Control**: Max 3 files transferred simultaneously to optimize system resource usage
@@ -151,13 +145,18 @@ File conflicts are handled by the system file manager. Sync ensures consistency 
 - Added double-click empty area and right-click menu options for adding files/folders and creating new folders
 - Fixed right-click menu item logic anomalies
 - Fixed read-only file deletion failure issue
+**#02**
+- Fixed about dialog window close button unresponsive issue
+- Added cache usage size display
+- Updated to support new version number comparison and verification
+- Removed sync status from sync interface, added IP display
 
-See: `https://github.com/LisseldeE/LANSyncBox/blob/main/%E6%9B%B4%E6%96%B0%E6%97%A5%E5%BF%97.log`
+See: https://github.com/LisseldeE/LANSyncBox/blob/main/%E6%9B%B4%E6%96%B0%E6%97%A5%E5%BF%97.log
 
 ## Tech Stack
 
 - Python 3.x
-- PySide6 (Qt6 GUI Framework)
+- PySide6
 - Custom TCP Protocol
 
 ## Installation & Running

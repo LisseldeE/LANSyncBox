@@ -39,7 +39,7 @@ class I18n:
             "fixed_room_code_hint": "启用后固定房间号，不自动刷新",
             "password": "密码",
             "password_hint": "可选，留空则无需密码",
-            "sync_folder": "同步文件夹",
+            "sync_folder": "缓存文件夹",
             "check_availability": "检测可用性",
             "room_code_available": "房间号可用",
             "room_code_unavailable": "房间号已被占用",
@@ -88,10 +88,18 @@ class I18n:
             
             # 文件状态
             "status_synced": "已同步",
+            "status_connected": "已连接",
             "status_syncing": "正在同步",
             "status_conflict": "冲突",
             "status_failed": "同步失败",
             "status_disconnected": "已断开连接",
+            
+            # 提示文字
+            "click_to_copy_room": "点击复制房间号",
+            "click_to_copy_ip": "点击复制IP地址",
+            "copied": "已复制!",
+            "ip_prefix": "IP: ",
+            "ip_unknown": "IP: Unknown",
             
             # 右键菜单
             "copy": "复制",
@@ -169,6 +177,7 @@ class I18n:
             "about_title": "关于 LANSyncBox",
             "about_version": "版本: {version}",
             "about_version_label": "版本",
+            "cache_size": "缓存占用: {size}",
             "about_author": "作者",
             "about_description": "局域网文件实时同步工具\n实现多人隔空文件共享",
             "about_check_update": "检查更新",
@@ -210,7 +219,7 @@ class I18n:
             "fixed_room_code_hint": "When enabled, the room code is fixed and will not auto-refresh",
             "password": "Password",
             "password_hint": "Optional, leave empty for no password",
-            "sync_folder": "Sync Folder",
+            "sync_folder": "Cache Folder",
             "check_availability": "Check Availability",
             "room_code_available": "Room code available",
             "room_code_unavailable": "Room code already in use",
@@ -259,10 +268,18 @@ class I18n:
             
             # File status
             "status_synced": "Synced",
+            "status_connected": "Connected",
             "status_syncing": "Syncing",
             "status_conflict": "Conflict",
             "status_failed": "Failed",
             "status_disconnected": "Disconnected",
+            
+            # Tooltip texts
+            "click_to_copy_room": "Click to copy room code",
+            "click_to_copy_ip": "Click to copy IP address",
+            "copied": "Copied!",
+            "ip_prefix": "IP: ",
+            "ip_unknown": "IP: Unknown",
             
             # Context menu
             "copy": "Copy",
@@ -340,6 +357,7 @@ class I18n:
             "about_title": "About LANSyncBox",
             "about_version": "Version: {version}",
             "about_version_label": "Version",
+            "cache_size": "Cache Size: {size}",
             "about_author": "Author",
             "about_description": "LAN Real-time File Sync Tool\nMulti-user File Sharing",
             "about_check_update": "Check for Updates",

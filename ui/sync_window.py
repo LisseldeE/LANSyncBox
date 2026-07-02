@@ -100,19 +100,24 @@ class SyncWindow(QMainWindow):
         self.room_label = QLabel(I18n.tr('room_info', code=self.room_code))
         self.room_label.setAlignment(Qt.AlignCenter)
         self.room_label.setCursor(Qt.PointingHandCursor)
-        self.room_label.setToolTip("点击复制房间号")
+        self.room_label.setToolTip(I18n.tr('click_to_copy_room'))
         self.room_label.mousePressEvent = self._copy_room_code
         info_layout.addWidget(self.room_label)
-        
-        # 连接状态（主机端显示连接数）
+
+        # IP地址显示（点击可复制）
+        self.ip_label = QLabel(self._get_local_ip_display())
+        self.ip_label.setAlignment(Qt.AlignCenter)
+        self.ip_label.setCursor(Qt.PointingHandCursor)
+        self.ip_label.setToolTip(I18n.tr('click_to_copy_ip'))
+        self.ip_label.setStyleSheet("color: #666; font-size: 11px;")
+        self.ip_label.mousePressEvent = self._copy_ip_address
+        info_layout.addWidget(self.ip_label)
+
+        # 状态标签（主机端显示"已连接 | 在线: X"，连接端显示"已连接/已断开"）
         if self.is_host:
-            self.clients_label = QLabel(f"{I18n.tr('online_count')}: 0")
-            self.clients_label.setAlignment(Qt.AlignCenter)
-            info_layout.addWidget(self.clients_label)
-        
-        # 状态标签
-        self.status_label = QLabel(I18n.tr('status_synced'))
-        self.status_label.setStyleSheet("color: green;")
+            self.status_label = QLabel(f'<span style="color: green;">{I18n.tr("status_connected")}</span> | {I18n.tr("online_count")}: 0')
+        else:
+            self.status_label = QLabel(I18n.tr('status_connected'))
         self.status_label.setAlignment(Qt.AlignCenter)
         info_layout.addWidget(self.status_label)
         
@@ -322,12 +327,17 @@ class SyncWindow(QMainWindow):
         if self.is_host and self.server:
             with self.server._lock:
                 count = len([c for c in self.server.clients.values() if c['authenticated']])
-            self.clients_label.setText(f"{I18n.tr('online_count')}: {count}")
-    
+            # 主机端显示"已连接 | 在线: X"，"已连接"为绿色，其余为系统默认颜色
+            self.status_label.setText(f'<span style="color: green;">{I18n.tr("status_connected")}</span> | {I18n.tr("online_count")}: {count}')
+
     def on_connected(self):
         """连接成功"""
-        self.status_label.setText(I18n.tr('status_synced'))
-        self.status_label.setStyleSheet("color: green;")
+        if self.is_host:
+            # 主机端显示"已连接 | 在线: X"，"已连接"为绿色，其余为系统默认颜色
+            self.status_label.setText(f'<span style="color: green;">{I18n.tr("status_connected")}</span> | {I18n.tr("online_count")}: 0')
+        else:
+            # 连接端显示"已连接"（绿色）
+            self.status_label.setText(f'<span style="color: green;">{I18n.tr("status_connected")}</span>')
         
         # 发送自己的文件列表给主机端（连接端）
         if not self.is_host and self.client:
@@ -474,10 +484,41 @@ class SyncWindow(QMainWindow):
         """复制房间号到剪贴板"""
         clipboard = QApplication.clipboard()
         clipboard.setText(self.room_code)
-        
+
         # 显示提示
-        self.room_label.setToolTip("已复制!")
-        QTimer.singleShot(2000, lambda: self.room_label.setToolTip("点击复制房间号"))
+        self.room_label.setToolTip(I18n.tr('copied'))
+        QTimer.singleShot(2000, lambda: self.room_label.setToolTip(I18n.tr('click_to_copy_room')))
+
+    def _get_local_ip_display(self) -> str:
+        """获取本机IP地址并格式化显示"""
+        import socket
+        try:
+            # 创建临时socket获取本机IP
+            s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+            s.connect(("8.8.8.8", 80))
+            local_ip = s.getsockname()[0]
+            s.close()
+            return f"{I18n.tr('ip_prefix')}{local_ip}"
+        except Exception:
+            return I18n.tr('ip_unknown')
+
+    def _copy_ip_address(self, event):
+        """复制IP地址到剪贴板"""
+        import socket
+        try:
+            s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+            s.connect(("8.8.8.8", 80))
+            local_ip = s.getsockname()[0]
+            s.close()
+
+            clipboard = QApplication.clipboard()
+            clipboard.setText(local_ip)
+
+            # 显示提示
+            self.ip_label.setToolTip(I18n.tr('copied'))
+            QTimer.singleShot(2000, lambda: self.ip_label.setToolTip(I18n.tr('click_to_copy_ip')))
+        except Exception:
+            pass
     
     def on_file_receive_start(self, filename: str):
         """开始接收远程文件（线程安全）"""
@@ -529,10 +570,12 @@ class SyncWindow(QMainWindow):
         # 刷新文件列表（不会触发同步信号）
         self.file_list.refresh()
 
-        # 只有当没有其他文件正在同步时，才更新状态为"已同步"
+        # 只有当没有其他文件正在同步时，才更新状态为"已连接"
         if not self._transfer_rows:
-            self.status_label.setText(I18n.tr('status_synced'))
-            self.status_label.setStyleSheet("color: green;")
+            if self.is_host:
+                self._update_clients_count()
+            else:
+                self.status_label.setText(f'<span style="color: green;">{I18n.tr("status_connected")}</span>')
 
     def on_remote_file_cancelled(self, filename: str):
         """远程文件接收被取消（线程安全）"""
@@ -552,10 +595,12 @@ class SyncWindow(QMainWindow):
         # 刷新文件列表
         self.file_list.refresh()
 
-        # 只有当没有其他文件正在同步时，才更新状态为"已同步"
+        # 只有当没有其他文件正在同步时，才更新状态为"已连接"
         if not self._transfer_rows:
-            self.status_label.setText(I18n.tr('status_synced'))
-            self.status_label.setStyleSheet("color: green;")
+            if self.is_host:
+                self._update_clients_count()
+            else:
+                self.status_label.setText(f'<span style="color: green;">{I18n.tr("status_connected")}</span>')
     
     def on_remote_file_deleted(self, filename: str):
         """远程文件已删除（线程安全）"""
@@ -571,11 +616,12 @@ class SyncWindow(QMainWindow):
         
         from pathlib import Path
         self._add_record(Path(filename).name, "删除", "")
-        
-        # 只有当没有其他文件正在同步时，才更新状态为"已同步"
+        # 只有当没有其他文件正在同步时，才更新状态为"已连接"
         if not self._transfer_rows:
-            self.status_label.setText(I18n.tr('status_synced'))
-            self.status_label.setStyleSheet("color: green;")
+            if self.is_host:
+                self._update_clients_count()
+            else:
+                self.status_label.setText(f'<span style="color: green;">{I18n.tr("status_connected")}</span>')
     
     def on_file_send_progress(self, filename: str, current: int, total: int):
         """主机端发送文件进度（线程安全）"""
@@ -607,11 +653,12 @@ class SyncWindow(QMainWindow):
         """实际执行：主机端发送文件完成"""
         # 完成进度条
         self._finish_transfer_progress(filename)
-        
-        # 只有当没有其他文件正在同步时，才更新状态为"已同步"
+        # 只有当没有其他文件正在同步时，才更新状态为"已连接"
         if not self._transfer_rows:
-            self.status_label.setText(I18n.tr('status_synced'))
-            self.status_label.setStyleSheet("color: green;")
+            if self.is_host:
+                self._update_clients_count()
+            else:
+                self.status_label.setText(f'<span style="color: green;">{I18n.tr("status_connected")}</span>')
     
     def on_remote_file_renamed(self, old_name: str, new_name: str):
         """远程文件已重命名（线程安全）"""
@@ -626,11 +673,12 @@ class SyncWindow(QMainWindow):
         self.file_list.refresh()
         
         self._add_record(f"{old_name} -> {new_name}", "重命名", "")
-        
-        # 只有当没有其他文件正在同步时，才更新状态为"已同步"
+        # 只有当没有其他文件正在同步时，才更新状态为"已连接"
         if not self._transfer_rows:
-            self.status_label.setText(I18n.tr('status_synced'))
-            self.status_label.setStyleSheet("color: green;")
+            if self.is_host:
+                self._update_clients_count()
+            else:
+                self.status_label.setText(f'<span style="color: green;">{I18n.tr("status_connected")}</span>')
     
     def on_remote_dir_created(self, dirname: str):
         """远程目录已创建（线程安全）"""
@@ -646,11 +694,12 @@ class SyncWindow(QMainWindow):
         
         from pathlib import Path
         self._add_record(Path(dirname).name, "创建目录", "")
-        
-        # 只有当没有其他文件正在同步时，才更新状态为"已同步"
+        # 只有当没有其他文件正在同步时，才更新状态为"已连接"
         if not self._transfer_rows:
-            self.status_label.setText(I18n.tr('status_synced'))
-            self.status_label.setStyleSheet("color: green;")
+            if self.is_host:
+                self._update_clients_count()
+            else:
+                self.status_label.setText(f'<span style="color: green;">{I18n.tr("status_connected")}</span>')
     
     def _add_record(self, content: str, action: str, status: str = ""):
         """添加同步记录
@@ -827,11 +876,7 @@ class SyncWindow(QMainWindow):
         # 清除取消标记，让新传输能添加新进度条
         self._cancelled_transfers.discard(rel_path)
         self._transfer_rows.pop(rel_path, None)
-        
-        # 更新状态为同步中
-        self.status_label.setText(I18n.tr('status_syncing'))
-        self.status_label.setStyleSheet("color: #339af0;")
-        
+
         # 定义同步函数
         def sync_file(stop_event: threading.Event):
             try:
@@ -862,11 +907,7 @@ class SyncWindow(QMainWindow):
         # 取消该文件的所有传输任务（支持复合键 client_id:filename）
         rel_path = os.path.relpath(file_path, self.room_folder).replace('\\', '/')
         self.transfer_queue.cancel_tasks_by_filename(rel_path)
-        
-        # 更新状态为同步中
-        self.status_label.setText(I18n.tr('status_syncing'))
-        self.status_label.setStyleSheet("color: #339af0;")
-        
+
         # 定义同步函数
         def sync_delete(stop_event: threading.Event):
             try:
@@ -895,11 +936,7 @@ class SyncWindow(QMainWindow):
         # 取消旧文件的传输（如果正在传输）
         old_rel_path = os.path.relpath(old_path, self.room_folder).replace('\\', '/')
         self.transfer_queue.cancel_tasks_by_filename(old_rel_path)
-        
-        # 更新状态为同步中
-        self.status_label.setText(I18n.tr('status_syncing'))
-        self.status_label.setStyleSheet("color: #339af0;")
-        
+
         # 定义同步函数
         def sync_rename(stop_event: threading.Event):
             try:
@@ -924,10 +961,6 @@ class SyncWindow(QMainWindow):
 
         dir_name = Path(dir_path).name
         self._add_record(dir_name, "创建目录", "")
-
-        # 更新状态为同步中
-        self.status_label.setText(I18n.tr('status_syncing'))
-        self.status_label.setStyleSheet("color: #339af0;")
 
         # 定义同步函数
         def sync_dir_create(stop_event: threading.Event):
