@@ -36,26 +36,38 @@ class MainWindow(QMainWindow):
         self._cache_refresh_timer = QTimer()
         self._cache_refresh_timer.setSingleShot(True)  # 单次触发
         self._cache_refresh_timer.timeout.connect(self._refresh_cache_size)
-        
+
         # 获取缓存文件夹路径（确保存在）
-        cache_folder = Config.get_sync_folder()
-        cache_folder_str = str(cache_folder)
-        
+        try:
+            cache_folder = Config.get_sync_folder()
+            cache_folder_str = str(cache_folder)
+        except Exception as e:
+            # 路径获取失败,不继续初始化监控器
+            return
+
         # 监听缓存文件夹及其所有子文件夹
         paths_to_watch = [cache_folder_str]
-        
+
         # 递归添加子文件夹（如果有）
         if cache_folder.exists():
-            for root, dirs, files in os.walk(cache_folder_str):
-                for dir_name in dirs:
-                    dir_path = os.path.join(root, dir_name)
-                    paths_to_watch.append(dir_path)
-        
+            try:
+                for root, dirs, files in os.walk(cache_folder_str):
+                    for dir_name in dirs:
+                        dir_path = os.path.join(root, dir_name)
+                        paths_to_watch.append(dir_path)
+            except Exception as e:
+                # 遍历失败,只监控根目录
+                paths_to_watch = [cache_folder_str]
+
         # 添加所有路径到监控器
         for path in paths_to_watch:
             if os.path.exists(path):
-                self._cache_watcher.addPath(path)
-        
+                try:
+                    self._cache_watcher.addPath(path)
+                except Exception as e:
+                    # 添加失败,跳过此路径
+                    pass
+
         # 当文件夹内容变化时，延迟刷新缓存大小（避免频繁触发）
         self._cache_watcher.directoryChanged.connect(self._delayed_refresh_cache)
 

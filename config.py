@@ -13,13 +13,13 @@ class Config:
     # 应用信息
     APP_NAME = "LANSyncBox"
     APP_VERSION = "R6.2"             # 内部版本号（开源直装版显示 + 检查更新比较用）
-    STORE_VERSION = "6.2.0.0"      # 微软商店版本号（四段式，符合 MSIX 打包要求）
+    STORE_VERSION = "6.2.1.0"      # 微软商店版本号（四段式，符合 MSIX 打包要求）
     APP_AUTHOR = "Lisselde_E"
     APP_EMAIL = "Lisselde.E@outlook.com"
 
     # 功能开关
     # 检查更新按钮：True=显示（开源直装版），False=隐藏（微软商店版本）
-    ENABLE_CHECK_UPDATE = True
+    ENABLE_CHECK_UPDATE = False
 
     # 显示用版本号：根据发布渠道动态选择
     # 开源直装版（ENABLE_CHECK_UPDATE=True）→ APP_VERSION（R5）
@@ -129,10 +129,16 @@ class Config:
 
     @staticmethod
     def get_sync_folder() -> Path:
-        """获取同步文件夹路径（位于系统下载目录下）"""
-        downloads = Config.get_downloads_folder()
-        sync_folder = downloads / Config.SYNC_FOLDER_NAME
-        sync_folder.mkdir(exist_ok=True)
+        """
+        获取同步文件夹路径（位于用户数据目录下）
+        """
+        # 使用AppData\Roaming\LANSyncBox作为基础路径
+        data_dir = Config.get_data_dir()
+
+        # 同步文件夹位于: AppData\Roaming\LANSyncBox\SyncFolder
+        sync_folder = data_dir / Config.SYNC_FOLDER_NAME
+        sync_folder.mkdir(parents=True, exist_ok=True)
+
         return sync_folder
 
     @staticmethod
@@ -175,9 +181,13 @@ class Config:
                     filepath = os.path.join(dirpath, filename)
                     # 忽略符号链接等特殊情况
                     if os.path.isfile(filepath):
-                        total_size += os.path.getsize(filepath)
+                        try:
+                            total_size += os.path.getsize(filepath)
+                        except (OSError, PermissionError):
+                            # 单个文件访问失败,跳过继续计算
+                            pass
         except (OSError, PermissionError):
-            # 访问失败时返回 0
+            # 遍历失败时返回 0
             pass
 
         return total_size

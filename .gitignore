@@ -1,5 +1,6 @@
 __pycache__/
 .idea/
+.vs/
 output/
 标记文件/
 SyncFolder/
