@@ -12,14 +12,14 @@ class Config:
 
     # 应用信息
     APP_NAME = "LANSyncBox"
-    APP_VERSION = "R6.2"             # 内部版本号（开源直装版显示 + 检查更新比较用）
-    STORE_VERSION = "6.2.1.0"      # 微软商店版本号（四段式，符合 MSIX 打包要求）
+    APP_VERSION = "R6.3"             # 内部版本号（开源直装版显示 + 检查更新比较用）
+    STORE_VERSION = "6.3.0.0"      # 微软商店版本号（四段式，符合 MSIX 打包要求）
     APP_AUTHOR = "Lisselde_E"
     APP_EMAIL = "Lisselde.E@outlook.com"
 
     # 功能开关
     # 检查更新按钮：True=显示（开源直装版），False=隐藏（微软商店版本）
-    ENABLE_CHECK_UPDATE = False
+    ENABLE_CHECK_UPDATE = True
 
     # 显示用版本号：根据发布渠道动态选择
     # 开源直装版（ENABLE_CHECK_UPDATE=True）→ APP_VERSION（R5）
@@ -86,6 +86,20 @@ class Config:
         data_dir = Path(appdata) / Config.APP_NAME
         data_dir.mkdir(parents=True, exist_ok=True)
         return data_dir
+
+    @staticmethod
+    def get_data_dir_path_only() -> Path:
+        """获取用户数据目录路径（不创建文件夹）
+
+        用于UI显示预期路径，避免触发文件系统操作导致窗口闪烁。
+        """
+        if sys.platform == 'win32':
+            appdata = os.environ.get('APPDATA', str(Path.home() / 'AppData' / 'Roaming'))
+        else:
+            # 非 Windows 平台 fallback：~/.config/LANSyncBox
+            xdg = os.environ.get('XDG_CONFIG_HOME', str(Path.home() / '.config'))
+            appdata = str(Path(xdg))
+        return Path(appdata) / Config.APP_NAME
 
     @staticmethod
     def get_downloads_folder() -> Path:
@@ -201,9 +215,16 @@ class UserConfig:
 
     @classmethod
     def _get_config_path(cls) -> Path:
-        """获取配置文件路径（位于 AppData\\Roaming\\LANSyncBox\\config.json）"""
+        """获取配置文件路径（位于 AppData\\Roaming\\LANSyncBox\\config.json）
+        注意：此方法不创建文件夹，避免在加载配置时触发文件系统操作"""
         if cls._config_path is None:
-            cls._config_path = Config.get_data_dir() / "config.json"
+            # 直接构建路径，不调用 get_data_dir()（避免触发 mkdir）
+            if sys.platform == 'win32':
+                appdata = os.environ.get('APPDATA', str(Path.home() / 'AppData' / 'Roaming'))
+            else:
+                xdg = os.environ.get('XDG_CONFIG_HOME', str(Path.home() / '.config'))
+                appdata = str(Path(xdg))
+            cls._config_path = Path(appdata) / Config.APP_NAME / "config.json"
         return cls._config_path
 
     @classmethod
@@ -252,6 +273,8 @@ class UserConfig:
             return
         config_path = cls._get_config_path()
         try:
+            # 确保配置文件所在目录存在（只在首次保存时创建）
+            config_path.parent.mkdir(parents=True, exist_ok=True)
             with open(config_path, 'w', encoding='utf-8') as f:
                 json.dump(cls._config_data, f, ensure_ascii=False, indent=2)
         except (IOError, OSError):
