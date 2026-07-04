@@ -165,6 +165,9 @@ LANSyncBox 是一款轻量级的局域网文件实时同步工具，实现多人
 - 优化文件预览时的处理逻辑
 - 优化界面显示效果
 
+**#04.1**
+- 修复了偶现使用原虚拟路径的问题
+
 详见： https://github.com/LisseldeE/LANSyncBox/blob/main/%E6%9B%B4%E6%96%B0%E6%97%A5%E5%BF%97.log
 
 ## 技术栈

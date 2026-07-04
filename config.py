@@ -12,8 +12,8 @@ class Config:
 
     # 应用信息
     APP_NAME = "LANSyncBox"
-    APP_VERSION = "R6.3"             # 内部版本号（开源直装版显示 + 检查更新比较用）
-    STORE_VERSION = "6.3.0.0"      # 微软商店版本号（四段式，符合 MSIX 打包要求）
+    APP_VERSION = "R6.4"             # 内部版本号（开源直装版显示 + 检查更新比较用）
+    STORE_VERSION = "6.4.1.0"      # 微软商店版本号（四段式，符合 MSIX 打包要求）
     APP_AUTHOR = "Lisselde_E"
     APP_EMAIL = "Lisselde.E@outlook.com"
 
@@ -76,79 +76,32 @@ class Config:
 
     @staticmethod
     def get_real_appdata() -> Path:
-        """获取真实的、未被MSIX虚拟化的AppData\\Roaming路径
+        """获取用户数据存储路径（避开MSIX虚拟化）
 
-        使用Windows API SHGetKnownFolderPath + KF_FLAG_NO_PACKAGE_REDIRECTION标志，
-        确保在MSIX环境下也能获取真实路径，避免文件系统虚拟化导致的路径不一致问题。
-
-        普通exe模式下，此方法返回标准AppData路径（兼容性良好）。
+        MSIX虚拟化会对AppData\\Roaming路径进行重定向，即使manifest设置为mediumIL。
+        为了彻底解决虚拟化问题，使用用户主目录下的独立文件夹。
 
         Returns:
-            Path: 真实的AppData\\Roaming路径
+            Path: 用户主目录下的LANSyncBox文件夹
         """
         if sys.platform != 'win32':
             # 非 Windows 平台：直接返回 ~/.config 或 XDG_CONFIG_HOME
             xdg = os.environ.get('XDG_CONFIG_HOME', str(Path.home() / '.config'))
             return Path(xdg)
 
-        try:
-            # Windows平台：使用SHGetKnownFolderPath获取真实路径
-            import ctypes
-            from ctypes import wintypes
-
-            # FOLDERID_RoamingAppData GUID
-            # {3EB685DB-65F9-4CF6-A03A-E3EF65729F3D}
-            FOLDERID_RoamingAppData = ctypes.c_byte(16)
-            guid_bytes = bytes([
-                0xDB, 0x85, 0xB6, 0x3E,  # Data1 (little endian)
-                0xF9, 0x65,              # Data2 (little endian)
-                0xF6, 0x4C,              # Data3 (little endian)
-                0xA0, 0x3A,              # Data4[0-1]
-                0xE3, 0xEF, 0x65, 0x72, 0x9F, 0x3D  # Data4[2-7]
-            ])
-            guid = (ctypes.c_byte * 16)(*guid_bytes)
-
-            # KF_FLAG_NO_PACKAGE_REDIRECTION = 0x10000
-            # 此标志确保在MSIX环境下获取真实路径，而非虚拟化路径
-            KF_FLAG_NO_PACKAGE_REDIRECTION = 0x10000
-
-            # 调用 SHGetKnownFolderPath
-            # HRESULT SHGetKnownFolderPath(
-            #   REFKNOWNFOLDERID rfid,
-            #   DWORD dwFlags,
-            #   HANDLE hToken,
-            #   PWSTR *ppszPath
-            # );
-            path_ptr = wintypes.LPWSTR()
-            result = ctypes.windll.shell32.SHGetKnownFolderPath(
-                guid,
-                KF_FLAG_NO_PACKAGE_REDIRECTION,
-                None,  # hToken = NULL (当前用户)
-                ctypes.byref(path_ptr)
-            )
-
-            if result == 0:  # S_OK
-                # 成功获取路径
-                path = Path(path_ptr.value)
-                # 释放内存（CoTaskMemFree）
-                ctypes.windll.ole32.CoTaskMemFree(path_ptr)
-                return path
-            else:
-                # API调用失败，fallback到环境变量
-                return Path(os.environ.get('APPDATA', str(Path.home() / 'AppData' / 'Roaming')))
-
-        except Exception:
-            # 异常情况（如API不可用），fallback到环境变量
-            return Path(os.environ.get('APPDATA', str(Path.home() / 'AppData' / 'Roaming')))
+        # Windows平台：使用用户主目录下的独立文件夹（避开MSIX虚拟化）
+        # 文件位置：C:\\Users\\<用户>\\LANSyncBox\\
+        # 这个路径不受MSIX文件系统虚拟化影响
+        return Path.home() / 'LANSyncBox'
 
     @staticmethod
     def get_data_dir() -> Path:
-        """获取用户数据目录（AppData\\Roaming\\LANSyncBox），用于存放用户配置
+        """获取用户数据目录（用户主目录\\LANSyncBox），用于存放用户配置
 
-        注意：使用真实路径（避免MSIX虚拟化），确保外部程序也能访问。
+        注意：使用用户主目录下的独立文件夹（避开MSIX虚拟化），确保外部程序也能访问。
         """
         appdata = Config.get_real_appdata()
-        data_dir = appdata / Config.APP_NAME
+        data_dir = appdata  # 已经是用户主目录下的LANSyncBox文件夹
         data_dir.mkdir(parents=True, exist_ok=True)
         return data_dir
 
@@ -158,10 +111,9 @@ class Config:
 
         用于UI显示预期路径，避免触发文件系统操作导致窗口闪烁。
 
-        注意：使用真实路径（避免MSIX虚拟化），确保外部程序也能访问。
+        注意：使用用户主目录下的独立文件夹（避开MSIX虚拟化），确保外部程序也能访问。
         """
-        appdata = Config.get_real_appdata()
-        return appdata / Config.APP_NAME
+        return Config.get_real_appdata()  # 已经是用户主目录下的LANSyncBox文件夹
 
     @staticmethod
     def get_downloads_folder() -> Path:
@@ -206,12 +158,12 @@ class Config:
     @staticmethod
     def get_sync_folder() -> Path:
         """
-        获取同步文件夹路径（位于用户数据目录下）
+        获取同步文件夹路径（位于用户主目录\\LANSyncBox\\SyncFolder）
         """
-        # 使用AppData\Roaming\LANSyncBox作为基础路径
+        # 使用用户主目录下的LANSyncBox作为基础路径
         data_dir = Config.get_data_dir()
 
-        # 同步文件夹位于: AppData\Roaming\LANSyncBox\SyncFolder
+        # 同步文件夹位于: C:\\Users\\<用户>\\LANSyncBox\\SyncFolder
         sync_folder = data_dir / Config.SYNC_FOLDER_NAME
         sync_folder.mkdir(parents=True, exist_ok=True)
 
@@ -277,13 +229,13 @@ class UserConfig:
 
     @classmethod
     def _get_config_path(cls) -> Path:
-        """获取配置文件路径（位于 AppData\\Roaming\\LANSyncBox\\config.json）
+        """获取配置文件路径（位于用户主目录\\LANSyncBox\\config.json）
         注意：此方法不创建文件夹，避免在加载配置时触发文件系统操作。
-        使用真实路径（避免MSIX虚拟化），确保配置文件与同步文件夹在同一位置。"""
+        使用用户主目录下的独立文件夹（避开MSIX虚拟化），确保配置文件与同步文件夹在同一位置。"""
         if cls._config_path is None:
-            # 使用真实路径（避免MSIX虚拟化导致的脑裂问题）
-            appdata = Config.get_real_appdata()
-            cls._config_path = appdata / Config.APP_NAME / "config.json"
+            # 使用用户主目录下的独立文件夹（避开MSIX虚拟化）
+            appdata = Config.get_real_appdata()  # 已经包含LANSyncBox
+            cls._config_path = appdata / "config.json"  # 不再添加APP_NAME
         return cls._config_path
 
     @classmethod

@@ -165,6 +165,9 @@ File conflicts are handled by the system file manager. Sync ensures consistency 
 - Optimized file preview handling logic
 - Optimized UI display effects
 
+**#04.1**
+- Fixed the occasional issue where the original virtual path was used
+
 See: https://github.com/LisseldeE/LANSyncBox/blob/main/%E6%9B%B4%E6%96%B0%E6%97%A5%E5%BF%97.log
 
 ## Tech Stack
