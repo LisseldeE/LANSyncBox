@@ -145,11 +145,25 @@ File conflicts are handled by the system file manager. Sync ensures consistency 
 - Added double-click empty area and right-click menu options for adding files/folders and creating new folders
 - Fixed right-click menu item logic anomalies
 - Fixed read-only file deletion failure issue
+
 **#02**
 - Fixed about dialog window close button unresponsive issue
 - Added cache usage size display
 - Updated to support new version number comparison and verification
 - Removed sync status from sync interface, added IP display
+
+**#02.1**
+- Adapted to MSIX environment, migrated cache path to AppData
+
+**#03**
+- Fixed create room dialog window flickering issue
+- Optimized file creation and reading logic
+- Optimized and unified some logic content
+
+**#04**
+- Fixed MSIX environment virtualized path error
+- Optimized file preview handling logic
+- Optimized UI display effects
 
 See: https://github.com/LisseldeE/LANSyncBox/blob/main/%E6%9B%B4%E6%96%B0%E6%97%A5%E5%BF%97.log
 

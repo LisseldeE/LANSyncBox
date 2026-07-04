@@ -75,15 +75,80 @@ class Config:
             return Path(__file__).parent
 
     @staticmethod
-    def get_data_dir() -> Path:
-        """获取用户数据目录（AppData\\Roaming\\LANSyncBox），用于存放用户配置"""
-        if sys.platform == 'win32':
-            appdata = os.environ.get('APPDATA', str(Path.home() / 'AppData' / 'Roaming'))
-        else:
-            # 非 Windows 平台 fallback：~/.config/LANSyncBox
+    def get_real_appdata() -> Path:
+        """获取真实的、未被MSIX虚拟化的AppData\\Roaming路径
+
+        使用Windows API SHGetKnownFolderPath + KF_FLAG_NO_PACKAGE_REDIRECTION标志，
+        确保在MSIX环境下也能获取真实路径，避免文件系统虚拟化导致的路径不一致问题。
+
+        普通exe模式下，此方法返回标准AppData路径（兼容性良好）。
+
+        Returns:
+            Path: 真实的AppData\\Roaming路径
+        """
+        if sys.platform != 'win32':
+            # 非 Windows 平台：直接返回 ~/.config 或 XDG_CONFIG_HOME
             xdg = os.environ.get('XDG_CONFIG_HOME', str(Path.home() / '.config'))
-            appdata = str(Path(xdg))
-        data_dir = Path(appdata) / Config.APP_NAME
+            return Path(xdg)
+
+        try:
+            # Windows平台：使用SHGetKnownFolderPath获取真实路径
+            import ctypes
+            from ctypes import wintypes
+
+            # FOLDERID_RoamingAppData GUID
+            # {3EB685DB-65F9-4CF6-A03A-E3EF65729F3D}
+            FOLDERID_RoamingAppData = ctypes.c_byte(16)
+            guid_bytes = bytes([
+                0xDB, 0x85, 0xB6, 0x3E,  # Data1 (little endian)
+                0xF9, 0x65,              # Data2 (little endian)
+                0xF6, 0x4C,              # Data3 (little endian)
+                0xA0, 0x3A,              # Data4[0-1]
+                0xE3, 0xEF, 0x65, 0x72, 0x9F, 0x3D  # Data4[2-7]
+            ])
+            guid = (ctypes.c_byte * 16)(*guid_bytes)
+
+            # KF_FLAG_NO_PACKAGE_REDIRECTION = 0x10000
+            # 此标志确保在MSIX环境下获取真实路径，而非虚拟化路径
+            KF_FLAG_NO_PACKAGE_REDIRECTION = 0x10000
+
+            # 调用 SHGetKnownFolderPath
+            # HRESULT SHGetKnownFolderPath(
+            #   REFKNOWNFOLDERID rfid,
+            #   DWORD dwFlags,
+            #   HANDLE hToken,
+            #   PWSTR *ppszPath
+            # );
+            path_ptr = wintypes.LPWSTR()
+            result = ctypes.windll.shell32.SHGetKnownFolderPath(
+                guid,
+                KF_FLAG_NO_PACKAGE_REDIRECTION,
+                None,  # hToken = NULL (当前用户)
+                ctypes.byref(path_ptr)
+            )
+
+            if result == 0:  # S_OK
+                # 成功获取路径
+                path = Path(path_ptr.value)
+                # 释放内存（CoTaskMemFree）
+                ctypes.windll.ole32.CoTaskMemFree(path_ptr)
+                return path
+            else:
+                # API调用失败，fallback到环境变量
+                return Path(os.environ.get('APPDATA', str(Path.home() / 'AppData' / 'Roaming')))
+
+        except Exception:
+            # 异常情况（如API不可用），fallback到环境变量
+            return Path(os.environ.get('APPDATA', str(Path.home() / 'AppData' / 'Roaming')))
+
+    @staticmethod
+    def get_data_dir() -> Path:
+        """获取用户数据目录（AppData\\Roaming\\LANSyncBox），用于存放用户配置
+
+        注意：使用真实路径（避免MSIX虚拟化），确保外部程序也能访问。
+        """
+        appdata = Config.get_real_appdata()
+        data_dir = appdata / Config.APP_NAME
         data_dir.mkdir(parents=True, exist_ok=True)
         return data_dir
 
@@ -92,14 +157,11 @@ class Config:
         """获取用户数据目录路径（不创建文件夹）
 
         用于UI显示预期路径，避免触发文件系统操作导致窗口闪烁。
+
+        注意：使用真实路径（避免MSIX虚拟化），确保外部程序也能访问。
         """
-        if sys.platform == 'win32':
-            appdata = os.environ.get('APPDATA', str(Path.home() / 'AppData' / 'Roaming'))
-        else:
-            # 非 Windows 平台 fallback：~/.config/LANSyncBox
-            xdg = os.environ.get('XDG_CONFIG_HOME', str(Path.home() / '.config'))
-            appdata = str(Path(xdg))
-        return Path(appdata) / Config.APP_NAME
+        appdata = Config.get_real_appdata()
+        return appdata / Config.APP_NAME
 
     @staticmethod
     def get_downloads_folder() -> Path:
@@ -216,15 +278,12 @@ class UserConfig:
     @classmethod
     def _get_config_path(cls) -> Path:
         """获取配置文件路径（位于 AppData\\Roaming\\LANSyncBox\\config.json）
-        注意：此方法不创建文件夹，避免在加载配置时触发文件系统操作"""
+        注意：此方法不创建文件夹，避免在加载配置时触发文件系统操作。
+        使用真实路径（避免MSIX虚拟化），确保配置文件与同步文件夹在同一位置。"""
         if cls._config_path is None:
-            # 直接构建路径，不调用 get_data_dir()（避免触发 mkdir）
-            if sys.platform == 'win32':
-                appdata = os.environ.get('APPDATA', str(Path.home() / 'AppData' / 'Roaming'))
-            else:
-                xdg = os.environ.get('XDG_CONFIG_HOME', str(Path.home() / '.config'))
-                appdata = str(Path(xdg))
-            cls._config_path = Path(appdata) / Config.APP_NAME / "config.json"
+            # 使用真实路径（避免MSIX虚拟化导致的脑裂问题）
+            appdata = Config.get_real_appdata()
+            cls._config_path = appdata / Config.APP_NAME / "config.json"
         return cls._config_path
 
     @classmethod

@@ -62,7 +62,7 @@ class SyncWindow(QMainWindow):
     def init_ui(self):
         """初始化界面"""
         # 窗口设置
-        self.setWindowTitle(f"{I18n.tr('app_name')} - {I18n.tr('room_info', code=self.room_code)}")
+        self.setWindowTitle(I18n.tr('app_name'))
         self.setMinimumSize(600, 400)
         
         # 创建中心部件

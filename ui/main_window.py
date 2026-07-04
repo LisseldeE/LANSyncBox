@@ -101,7 +101,7 @@ class MainWindow(QMainWindow):
     def init_ui(self):
         """初始化界面"""
         # 窗口设置
-        self.setWindowTitle(f"{I18n.tr('app_name')} - {I18n.tr('app_title')}")
+        self.setWindowTitle(I18n.tr('app_name'))
         self.setMinimumSize(400, 500)
         self.resize(400, 500)
         
@@ -269,7 +269,7 @@ class MainWindow(QMainWindow):
     
     def _refresh_ui(self):
         """刷新界面文本"""
-        self.setWindowTitle(f"{I18n.tr('app_name')} - {I18n.tr('app_title')}")
+        self.setWindowTitle(I18n.tr('app_name'))
         self.lang_btn.setText(self._get_language_text())
         
         # 刷新子控件
@@ -337,7 +337,7 @@ class MainWindow(QMainWindow):
             host_port=host_port,
             existing_client=existing_client,
         )
-        self._sync_window.setWindowTitle(f"{I18n.tr('app_name')} - {I18n.tr('room_info', code=room_code)}")
+        self._sync_window.setWindowTitle(I18n.tr('app_name'))
         self._sync_window.setMinimumSize(Config.WINDOW_MIN_WIDTH, Config.WINDOW_MIN_HEIGHT)
         self._sync_window.resize(1000, 700)
 

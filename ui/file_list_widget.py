@@ -532,8 +532,22 @@ class FileListWidget(QWidget):
                 
                 # 确保目标目录存在
                 preview_path.parent.mkdir(parents=True, exist_ok=True)
-                
-                # 复制文件（覆盖已存在的同名预览文件）
+
+                # 如果预览文件已存在，移除只读属性（让shutil.copy2可覆盖）
+                if preview_path.exists():
+                    try:
+                        import ctypes
+                        # 移除只读属性（FILE_ATTRIBUTE_NORMAL = 0x80）
+                        ctypes.windll.kernel32.SetFileAttributesW(str(preview_path), 0x80)
+                    except Exception:
+                        # 移除属性失败（如权限问题），让shutil.copy2自然抛出PermissionError
+                        # 外层try/except会捕获并显示错误消息
+                        pass
+
+                # 复制文件（覆盖旧的预览文件）
+                # shutil.copy2会直接打开文件写入（不先删除）：
+                # - 普通文件：成功覆盖（Windows允许写入已占用文件）
+                # - 只读文件：抛出PermissionError（外层捕获）
                 shutil.copy2(path, preview_path)
                 
                 # 设置只读属性（Windows API）
