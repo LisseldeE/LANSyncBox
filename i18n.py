@@ -35,18 +35,21 @@ class I18n:
             "room_code": "房间号",
             "room_code_hint": "6位数字房间号",
             "regenerate_room_code": "重新生成",
+            "customize_room_code": "自定义",
+            "customize_room_code_title": "自定义房间号",
             "fixed_room_code": "固定房间号",
             "fixed_room_code_hint": "启用后固定房间号，不自动刷新",
             "password": "密码",
             "password_hint": "可选，留空则无需密码",
             "sync_folder": "缓存文件夹",
             "check_availability": "检测可用性",
+            "checking_availability": "正在检测可用性...",
             "room_code_available": "房间号可用",
             "room_code_unavailable": "房间号已被占用",
             "create": "创建",
             "cancel": "取消",
             "close": "关闭",
-            
+
             # 加入房间对话框
             "join_room_title": "加入房间",
             "room_code_required": "请输入房间号",
@@ -67,7 +70,15 @@ class I18n:
             "ready_waiting": "就绪，等待输入...",
             "version_mismatch": "版本不一致（本机 {local} / 主机 {remote}），请升级后连接",
             "version_match": "版本一致，可连接",
-            
+
+            # 发现房间板块
+            "discover_rooms": "发现房间",
+            "discover_rooms_hint": "扫描局域网内的房间",
+            "scanning_rooms": "正在扫描...",
+            "no_rooms_found": "未发现房间",
+            "rooms_found_count": "发现 {count} 个房间",
+            "refresh_scan": "刷新",
+
             # 同步界面
             "host_mode": "主机端",
             "client_mode": "连接端",
@@ -105,6 +116,7 @@ class I18n:
             "copy": "复制",
             "cut": "剪切",
             "paste": "粘贴",
+            "save_to": "保存至",
             "delete": "删除",
             "rename": "重命名",
             "new_folder": "新建文件夹",
@@ -215,18 +227,21 @@ class I18n:
             "room_code": "Room Code",
             "room_code_hint": "6-digit room code",
             "regenerate_room_code": "Regenerate",
+            "customize_room_code": "Customize",
+            "customize_room_code_title": "Customize Room Code",
             "fixed_room_code": "Fixed Room Code",
             "fixed_room_code_hint": "When enabled, the room code is fixed and will not auto-refresh",
             "password": "Password",
             "password_hint": "Optional, leave empty for no password",
             "sync_folder": "Cache Folder",
             "check_availability": "Check Availability",
+            "checking_availability": "Checking availability...",
             "room_code_available": "Room code available",
             "room_code_unavailable": "Room code already in use",
             "create": "Create",
             "cancel": "Cancel",
             "close": "Close",
-            
+
             # Join room dialog
             "join_room_title": "Join Room",
             "room_code_required": "Please enter room code",
@@ -247,7 +262,15 @@ class I18n:
             "ready_waiting": "Ready, waiting for input...",
             "version_mismatch": "Version mismatch (local {local} / host {remote}), please upgrade before connecting",
             "version_match": "Version matches, ready to connect",
-            
+
+            # Discover rooms section
+            "discover_rooms": "Discover Rooms",
+            "discover_rooms_hint": "Scan for rooms in local network",
+            "scanning_rooms": "Scanning...",
+            "no_rooms_found": "No rooms found",
+            "rooms_found_count": "Found {count} rooms",
+            "refresh_scan": "Refresh",
+
             # Sync window
             "host_mode": "Host",
             "client_mode": "Client",
@@ -285,6 +308,7 @@ class I18n:
             "copy": "Copy",
             "cut": "Cut",
             "paste": "Paste",
+            "save_to": "Save To",
             "delete": "Delete",
             "rename": "Rename",
             "new_folder": "New Folder",

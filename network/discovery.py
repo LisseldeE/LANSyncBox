@@ -35,7 +35,7 @@ class RoomDiscovery(QObject):
         """
         发现指定房间
         Args:
-            room_code: 房间号
+            room_code: 房间号（空字符串表示扫描所有房间）
             timeout: 超时时间（秒）
         Returns:
             是否启动发现成功
@@ -43,32 +43,32 @@ class RoomDiscovery(QObject):
         try:
             timeout = timeout or self.DISCOVERY_TIMEOUT
             self.discovered_rooms.clear()
-            
+
             # 创建UDP socket
             self.socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
             self.socket.setsockopt(socket.SOL_SOCKET, socket.SO_BROADCAST, 1)
             self.socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
             self.socket.bind(('0.0.0.0', 0))  # 使用随机端口
             self.socket.settimeout(0.5)
-            
+
             self.running = True
-            
+
             # 启动接收线程
             receive_thread = threading.Thread(target=self._receive_loop, daemon=True)
             receive_thread.start()
-            
-            # 发送发现请求
+
+            # 发送发现请求（room_code 为空表示扫描所有房间）
             discovery_msg = json.dumps({
                 'type': 'discovery_request',
-                'room_code': room_code
+                'room_code': room_code or ''  # 空字符串表示扫描所有
             }).encode('utf-8')
-            
+
             # 发送到广播地址
             self.socket.sendto(discovery_msg, ('<broadcast>', self.DISCOVERY_PORT))
-            
+
             # 发送到本机地址（支持同一台机器双开）
             self.socket.sendto(discovery_msg, ('127.0.0.1', self.DISCOVERY_PORT))
-            
+
             # 获取本机IP并发送
             try:
                 local_ip = self._get_local_ip()
@@ -76,16 +76,26 @@ class RoomDiscovery(QObject):
                     self.socket.sendto(discovery_msg, (local_ip, self.DISCOVERY_PORT))
             except Exception:
                 pass
-            
+
             # 设置超时结束
             timer = threading.Timer(timeout, self._finish_discovery)
             timer.start()
-            
+
             return True
-            
+
         except Exception as e:
             self.error_occurred.emit(f"启动发现失败: {e}")
             return False
+
+    def discover_all_rooms(self, timeout: int = None) -> bool:
+        """
+        扫描局域网内所有房间
+        Args:
+            timeout: 超时时间（秒）
+        Returns:
+            是否启动扫描成功
+        """
+        return self.discover_room('', timeout)  # 空房间号表示扫描所有
     
     def _get_local_ip(self) -> str:
         """获取本机IP地址"""
@@ -239,23 +249,25 @@ class RoomResponder(QObject):
             try:
                 data, addr = self.socket.recvfrom(1024)
                 request = json.loads(data.decode('utf-8'))
-                
+
                 if request.get('type') == 'discovery_request':
                     # 检查是否匹配房间号
-                    target_room = request.get('room_code')
+                    # target_room 为空表示扫描所有房间，需要响应
+                    target_room = request.get('room_code', '')
                     if target_room and target_room != self.room_code:
+                        # 指定了房间号但不匹配，跳过
                         continue
-                    
-                    # 发送响应（携带版本号供客户端核对）
+
+                    # target_room 为空或匹配时，发送响应（携带版本号供客户端核对）
                     response = json.dumps({
                         'type': 'discovery_response',
                         'room_code': self.room_code,
                         'port': self.port,
                         'version': Config.APP_VERSION
                     }).encode('utf-8')
-                    
+
                     self.socket.sendto(response, addr)
-                    
+
             except socket.timeout:
                 continue
             except Exception:

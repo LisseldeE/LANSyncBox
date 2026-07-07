@@ -25,19 +25,19 @@ class AboutDialog(QDialog):
         # 明确设置窗口标志，确保包含关闭按钮
         flags = Qt.Dialog | Qt.WindowCloseButtonHint
         self.setWindowFlags(flags)
-        self.setFixedSize(400, 320)
+        self.setFixedSize(400, 260)  # 更紧凑的高度
         self._init_ui()
 
     def _init_ui(self):
         layout = QVBoxLayout()
-        layout.setSpacing(8)
-        layout.setContentsMargins(25, 20, 25, 20)
+        layout.setSpacing(6)  # 更紧凑的间距
+        layout.setContentsMargins(20, 15, 20, 15)  # 更紧凑的边距
 
         # 标题
         title_label = QLabel(Config.APP_NAME)
         title_label.setStyleSheet("""
             QLabel {
-                font-size: 24px;
+                font-size: 22px;
                 font-weight: bold;
                 color: #339af0;
             }
@@ -47,20 +47,20 @@ class AboutDialog(QDialog):
 
         # 版本信息
         version_label = QLabel(f"{I18n.tr('about_version_label')} {Config.DISPLAY_VERSION}")
-        version_label.setStyleSheet("font-size: 13px; color: #495057;")
+        version_label.setStyleSheet("font-size: 12px; color: #495057;")
         version_label.setAlignment(Qt.AlignCenter)
         layout.addWidget(version_label)
 
         # 描述
         desc_label = QLabel(I18n.tr('about_description'))
-        desc_label.setStyleSheet("font-size: 12px; color: #868e96;")
+        desc_label.setStyleSheet("font-size: 11px; color: #868e96;")
         desc_label.setAlignment(Qt.AlignCenter)
         desc_label.setWordWrap(True)
         layout.addWidget(desc_label)
 
         # 作者信息
         author_label = QLabel(f"{I18n.tr('about_author')}: {Config.APP_AUTHOR}")
-        author_label.setStyleSheet("font-size: 12px; color: #495057;")
+        author_label.setStyleSheet("font-size: 11px; color: #495057;")
         author_label.setAlignment(Qt.AlignCenter)
         layout.addWidget(author_label)
 
@@ -68,7 +68,7 @@ class AboutDialog(QDialog):
         github_label = QLabel(f"GitHub: {Config.GITHUB_REPO}")
         github_label.setStyleSheet("""
             QLabel {
-                font-size: 12px;
+                font-size: 11px;
                 color: #339af0;
             }
             QLabel:hover {
@@ -85,7 +85,7 @@ class AboutDialog(QDialog):
         email_label = QLabel(f"Email: {Config.APP_EMAIL}")
         email_label.setStyleSheet("""
             QLabel {
-                font-size: 12px;
+                font-size: 11px;
                 color: #495057;
             }
             QLabel:hover {
@@ -109,7 +109,7 @@ class AboutDialog(QDialog):
             check_update_btn.clicked.connect(self._check_update)
             btn_layout.addWidget(check_update_btn)
 
-            btn_layout.addSpacing(10)
+            btn_layout.addSpacing(8)  # 更紧凑的按钮间距
 
         # 关闭按钮
         close_btn = AnimatedButton(I18n.tr('close'))

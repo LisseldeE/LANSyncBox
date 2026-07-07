@@ -4,10 +4,10 @@
 from PySide6.QtWidgets import (
     QDialog, QVBoxLayout, QHBoxLayout, QLabel,
     QLineEdit, QPushButton, QFrame, QMessageBox, QWidget,
-    QGraphicsOpacityEffect, QApplication
+    QGraphicsOpacityEffect, QApplication, QListWidget, QListWidgetItem
 )
 from PySide6.QtCore import Qt, Signal, QTimer, QPropertyAnimation, QByteArray, QEventLoop
-from PySide6.QtGui import QFont, QValidator, QKeyEvent
+from PySide6.QtGui import QFont, QValidator, QKeyEvent, QShowEvent
 
 from i18n import I18n
 from config import Config
@@ -173,7 +173,7 @@ class RoomCodeInput(QWidget):
 
 class JoinRoomDialog(QDialog):
     """加入房间对话框"""
-    
+
     def __init__(self, parent=None):
         super().__init__(parent)
         self.room_code = ""
@@ -187,7 +187,19 @@ class JoinRoomDialog(QDialog):
         self._is_checking = False  # 是否正在检测中
         self._is_verifying = False  # 是否正在验证密码
         self._verified_client = None  # 预验证成功的 Client 实例（传递给 SyncWindow 复用）
+        self._is_scanning = False  # 是否正在扫描所有房间
+        self._scan_discovery = None  # 扫描发现服务
+        self._discovered_rooms_list = []  # 扫描发现的房间列表
+        self._first_show = True  # 是否首次显示
         self.init_ui()
+
+    def showEvent(self, event: QShowEvent):
+        """对话框显示事件 - 首次显示时自动扫描房间"""
+        super().showEvent(event)
+        if self._first_show:
+            self._first_show = False
+            # 延迟启动扫描（等待对话框完全显示）
+            QTimer.singleShot(100, self._start_scan_all_rooms)
     
     def init_ui(self):
         """初始化界面"""
@@ -230,43 +242,97 @@ class JoinRoomDialog(QDialog):
         self.password_edit.setPlaceholderText(I18n.tr('password_hint'))
         self.password_edit.setEchoMode(QLineEdit.Password)
         password_layout.addWidget(self.password_edit)
-        
+
         self.password_widget.setVisible(False)  # 默认隐藏
         layout.addWidget(self.password_widget)
-        
+
         # 主机地址输入（可选）
         host_layout = QVBoxLayout()
         host_label = QLabel(I18n.tr('host_address_optional'))
         host_layout.addWidget(host_label)
-        
+
         self.host_edit = QLineEdit()
         self.host_edit.setPlaceholderText(I18n.tr('host_address_hint'))
         host_layout.addWidget(self.host_edit)
-        
+
         layout.addLayout(host_layout)
-        
+
+        # 分隔线
+        line2 = QFrame()
+        line2.setFrameShape(QFrame.HLine)
+        line2.setFrameShadow(QFrame.Sunken)
+        layout.addWidget(line2)
+
+        # 发现房间板块
+        discover_layout = QVBoxLayout()
+
+        # 标题和刷新按钮
+        discover_header = QHBoxLayout()
+        discover_label = QLabel(I18n.tr('discover_rooms'))
+        discover_label.setStyleSheet("font-weight: bold;")
+        discover_header.addWidget(discover_label)
+
+        self.scan_btn = AnimatedButton(I18n.tr('refresh_scan'))
+        self.scan_btn.setFixedWidth(80)
+        self.scan_btn.clicked.connect(self._start_scan_all_rooms)
+        self.scan_btn.setStyleSheet(BUTTON_STYLES['outline'])
+        discover_header.addStretch()
+        discover_header.addWidget(self.scan_btn)
+        discover_layout.addLayout(discover_header)
+
+        # 扫描状态标签
+        self.scan_status_label = QLabel(I18n.tr('discover_rooms_hint'))
+        self.scan_status_label.setStyleSheet("color: #868e96; font-size: 12px;")
+        discover_layout.addWidget(self.scan_status_label)
+
+        # 发现的房间列表
+        self.rooms_list_widget = QListWidget()
+        self.rooms_list_widget.setMaximumHeight(150)
+        self.rooms_list_widget.setStyleSheet("""
+            QListWidget {
+                border: 1px solid palette(mid);
+                border-radius: 4px;
+                background-color: palette(base);
+            }
+            QListWidget::item {
+                padding: 8px;
+                border-bottom: 1px solid palette(mid);
+            }
+            QListWidget::item:selected {
+                background-color: #339af0;
+                color: white;
+            }
+            QListWidget::item:hover {
+                background-color: palette(window);
+            }
+        """)
+        self.rooms_list_widget.itemClicked.connect(self._on_room_item_clicked)
+        discover_layout.addWidget(self.rooms_list_widget)
+
+        layout.addLayout(discover_layout)
+
         # 弹性空间
         layout.addStretch()
-        
+
         # 按钮
         button_layout = QHBoxLayout()
         button_layout.setSpacing(10)
-        
+
         self.connect_btn = AnimatedButton(I18n.tr('connect'))
         self.connect_btn.setFixedWidth(100)
         self.connect_btn.clicked.connect(self.on_connect)
         self.connect_btn.setDefault(True)
         self.connect_btn.setStyleSheet(BUTTON_STYLES['primary'])
-        
+
         self.cancel_btn = AnimatedButton(I18n.tr('cancel'))
         self.cancel_btn.setFixedWidth(100)
         self.cancel_btn.clicked.connect(self.reject)
         self.cancel_btn.setStyleSheet(BUTTON_STYLES['secondary'])
-        
+
         button_layout.addStretch()
         button_layout.addWidget(self.connect_btn)
         button_layout.addWidget(self.cancel_btn)
-        
+
         layout.addLayout(button_layout)
     
     def _on_code_completed(self):
@@ -549,3 +615,100 @@ class JoinRoomDialog(QDialog):
     def get_discovered_host(self) -> str:
         """获取发现的主机地址"""
         return self.discovered_host
+
+    # ========== 发现房间板块相关方法 ==========
+
+    def _start_scan_all_rooms(self):
+        """开始扫描局域网内所有房间"""
+        if self._is_scanning:
+            return
+
+        self._is_scanning = True
+        self.scan_btn.setEnabled(False)
+        self.rooms_list_widget.clear()
+        self._discovered_rooms_list.clear()
+        self.scan_status_label.setText(I18n.tr('scanning_rooms'))
+        self.scan_status_label.setStyleSheet("color: #339af0; font-size: 12px;")
+
+        # 创建扫描发现服务
+        self._scan_discovery = RoomDiscovery(self)
+        self._scan_discovery.room_found.connect(self._on_scan_room_found)
+        self._scan_discovery.discovery_finished.connect(self._on_scan_finished)
+        self._scan_discovery.error_occurred.connect(self._on_scan_error)
+
+        # 开始扫描所有房间（超时3秒）
+        self._scan_discovery.discover_all_rooms(timeout=3)
+
+    def _on_scan_room_found(self, host_ip: str, room_code: str, port: int, version: str = ""):
+        """扫描发现单个房间"""
+        # 过滤 127.0.0.1 地址（只保留真实 IP）
+        if host_ip == '127.0.0.1':
+            return
+
+        # 检查是否已存在（避免重复）
+        for room in self._discovered_rooms_list:
+            if room['ip'] == host_ip:
+                return
+
+        # 添加到列表
+        room_info = {
+            'ip': host_ip,
+            'room_code': room_code,
+            'port': port,
+            'version': version
+        }
+        self._discovered_rooms_list.append(room_info)
+
+        # 添加到列表控件
+        item_text = f"{room_code} ({host_ip})"
+        item = QListWidgetItem(item_text)
+        item.setData(Qt.UserRole, room_info)
+        self.rooms_list_widget.addItem(item)
+
+        # 更新状态
+        count = len(self._discovered_rooms_list)
+        self.scan_status_label.setText(I18n.tr('rooms_found_count', count=count))
+        self.scan_status_label.setStyleSheet("color: #51cf66; font-size: 12px;")
+
+    def _on_scan_finished(self, rooms: list):
+        """扫描完成"""
+        self._is_scanning = False
+        self.scan_btn.setEnabled(True)
+
+        if not self._discovered_rooms_list:
+            self.scan_status_label.setText(I18n.tr('no_rooms_found'))
+            self.scan_status_label.setStyleSheet("color: #868e96; font-size: 12px;")
+
+        # 清理扫描服务
+        if self._scan_discovery:
+            self._scan_discovery.stop_discovery()
+            self._scan_discovery = None
+
+    def _on_scan_error(self, error: str):
+        """扫描错误"""
+        self._is_scanning = False
+        self.scan_btn.setEnabled(True)
+        self.scan_status_label.setText(error)
+        self.scan_status_label.setStyleSheet("color: #ff6b6b; font-size: 12px;")
+
+        # 清理扫描服务
+        if self._scan_discovery:
+            self._scan_discovery.stop_discovery()
+            self._scan_discovery = None
+
+    def _on_room_item_clicked(self, item: QListWidgetItem):
+        """点击发现的房间项，自动填充房间号"""
+        room_info = item.data(Qt.UserRole)
+        if room_info:
+            # 填充房间号到输入框
+            self.room_code_input.set_room_code(room_info['room_code'])
+            # 记录主机信息（连接时使用）
+            self.discovered_host = room_info['ip']
+            self.host_port = room_info['port']
+            # 清空手动输入的主机地址（使用扫描发现的）
+            self.host_edit.clear()
+            # 更新状态
+            self._show_status(I18n.tr('room_found', ip=room_info['ip']), color='#51cf66')
+            self._room_checked = True
+            # 显示密码输入框
+            self._show_password_input()

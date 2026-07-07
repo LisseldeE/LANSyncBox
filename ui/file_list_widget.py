@@ -13,9 +13,10 @@ from datetime import datetime
 from PySide6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QTableWidget, 
     QTableWidgetItem, QHeaderView, QMenu, QMessageBox, 
-    QFileDialog, QAbstractItemView, QLabel, QPushButton, QLineEdit
+    QFileDialog, QAbstractItemView, QLabel, QPushButton, QLineEdit,
+    QRubberBand
 )
-from PySide6.QtCore import Qt, Signal, QMimeData, QUrl, QPoint, QThread, QMetaObject, Q_ARG
+from PySide6.QtCore import Qt, Signal, QMimeData, QUrl, QPoint, QThread, QMetaObject, Q_ARG, QRect, QItemSelection, QItemSelectionModel
 from PySide6.QtGui import QAction, QIcon, QDrag, QDropEvent, QDragEnterEvent, QDragMoveEvent, QCursor
 from PySide6.QtWidgets import QApplication
 
@@ -25,7 +26,7 @@ from ui.widgets import BUTTON_STYLES
 
 
 class DragableTableWidget(QTableWidget):
-    """支持拖拽的表格控件"""
+    """支持拖拽和框选的表格控件"""
 
     files_dragged = Signal(list, str, bool)  # 文件拖拽信号（文件列表，目标路径，是否内部拖拽）
     empty_area_double_clicked = Signal()  # 空白区域双击信号（用于触发添加文件）
@@ -45,6 +46,14 @@ class DragableTableWidget(QTableWidget):
         self._mouse_press_pos = None
         self._mouse_press_item = None
         self._is_dragging = False
+        self._is_rubber_band_selecting = False  # 是否正在框选
+        
+        # 框选橡皮筋（设置在 viewport 上）
+        self._rubber_band = QRubberBand(QRubberBand.Rectangle, self.viewport())
+        self._rubber_band_origin = None  # 框选起点（viewport 坐标）
+        
+        # 框选时的初始选中状态（用于 Ctrl+框选）
+        self._initial_selected_rows = set()
     
     def mousePressEvent(self, event):
         """鼠标按下事件"""
@@ -52,6 +61,22 @@ class DragableTableWidget(QTableWidget):
             self._mouse_press_pos = event.pos()
             self._mouse_press_item = self.itemAt(event.pos())
             self._is_dragging = False
+            self._is_rubber_band_selecting = False
+            
+            # 记录当前选中状态（用于 Ctrl+框选时保留原有选择）
+            self._initial_selected_rows = set()
+            for row in range(self.rowCount()):
+                if self.selectionModel().isRowSelected(row, self.rootIndex()):
+                    self._initial_selected_rows.add(row)
+            
+            # 如果按下在空白区域，开始框选
+            if self._mouse_press_item is None:
+                # 清除原有选择（除非按住 Ctrl）
+                if not (event.modifiers() & Qt.ControlModifier):
+                    self.clearSelection()
+                self._start_rubber_band(event.pos())
+                return
+        
         super().mousePressEvent(event)
     
     def mouseMoveEvent(self, event):
@@ -60,24 +85,109 @@ class DragableTableWidget(QTableWidget):
             # 计算移动距离
             distance = (event.pos() - self._mouse_press_pos).manhattanLength()
             
-            # 如果移动距离超过阈值，且鼠标在选中的项目上，则开始拖拽
-            if distance > 10 and not self._is_dragging:
+            # 如果移动距离超过阈值
+            if distance > 10 and not self._is_dragging and not self._is_rubber_band_selecting:
                 # 检查鼠标按下时是否在选中的项目上
                 if self._mouse_press_item and self._mouse_press_item.isSelected():
-                    self._is_dragging = True
                     # 开始拖拽
+                    self._is_dragging = True
                     self._start_drag()
                     return
+                else:
+                    # 开始框选（按下在未选中项目上）
+                    self._start_rubber_band(self._mouse_press_pos)
+            
+            # 如果正在框选，更新选择框
+            if self._is_rubber_band_selecting:
+                self._update_rubber_band(event.pos())
+                return
         
-        # 否则调用父类的鼠标移动事件（支持框选）
+        # 否则调用父类的鼠标移动事件
         super().mouseMoveEvent(event)
     
     def mouseReleaseEvent(self, event):
         """鼠标释放事件"""
+        # 如果正在框选，完成框选
+        if self._is_rubber_band_selecting:
+            self._finish_rubber_band()
+        
         self._mouse_press_pos = None
         self._mouse_press_item = None
         self._is_dragging = False
+        self._is_rubber_band_selecting = False
+        self._initial_selected_rows = set()
+        
         super().mouseReleaseEvent(event)
+    
+    def _start_rubber_band(self, pos):
+        """开始框选
+
+        Args:
+            pos: viewport 坐标系的鼠标位置（event.pos() 在 QTableWidget 中已经是 viewport 坐标）
+        """
+        self._is_rubber_band_selecting = True
+        self._rubber_band_origin = pos
+        self._rubber_band.setGeometry(QRect(pos, pos))
+        self._rubber_band.show()
+    
+    def _update_rubber_band(self, pos):
+        """更新框选区域
+
+        Args:
+            pos: viewport 坐标系的鼠标位置
+        """
+        if self._rubber_band_origin:
+            rect = QRect(self._rubber_band_origin, pos).normalized()
+            self._rubber_band.setGeometry(rect)
+            self._select_rows_in_rubber_band(rect)
+    
+    def _finish_rubber_band(self):
+        """完成框选"""
+        self._rubber_band.hide()
+        self._rubber_band_origin = None
+    
+    def _select_rows_in_rubber_band(self, rect):
+        """选择框选区域内的行
+
+        Args:
+            rect: viewport 坐标系的框选区域
+        """
+        selected_rows = set()
+        
+        for row in range(self.rowCount()):
+            # rowViewportPosition 返回 viewport 坐标系的 y 坐标
+            row_y = self.rowViewportPosition(row)
+            row_height = self.rowHeight(row)
+            
+            # 构建行的 rect（viewport 坐标系）
+            row_rect = QRect(0, row_y, self.viewport().width(), row_height)
+            
+            # 如果框选区域与该行有交集，则选中该行
+            if rect.intersects(row_rect):
+                selected_rows.add(row)
+        
+        # 应用选择（考虑 Ctrl 键）
+        modifiers = QApplication.keyboardModifiers()
+        
+        # 使用 QItemSelection 一次性选择多行
+        selection = QItemSelection()
+        
+        # 如果按住 Ctrl，先添加原有选择的行
+        if modifiers & Qt.ControlModifier:
+            for row in self._initial_selected_rows:
+                if row not in selected_rows:  # 避免重复
+                    index = self.model().index(row, 0)
+                    selection.select(index, index)
+        
+        # 添加框选的行
+        for row in selected_rows:
+            top_left = self.model().index(row, 0)
+            bottom_right = self.model().index(row, self.columnCount() - 1)
+            selection.select(top_left, bottom_right)
+        
+        # 清除所有选择，然后应用新的选择
+        self.selectionModel().clearSelection()
+        self.selectionModel().select(selection, QItemSelectionModel.Select | QItemSelectionModel.Rows)
 
     def mouseDoubleClickEvent(self, event):
         """鼠标双击事件
@@ -179,36 +289,38 @@ class DragableTableWidget(QTableWidget):
 
 class FileCopyWorker(QThread):
     """文件复制工作线程"""
-    
+
     # 信号
     progress_updated = Signal(int, int, int)  # 当前文件索引, 当前进度, 总进度
     file_started = Signal(str)  # 开始复制文件
     file_finished = Signal(str)  # 文件复制完成
     all_finished = Signal()  # 所有文件复制完成
     error_occurred = Signal(str)  # 发生错误
-    
+    cancelled = Signal()  # 复制被取消
+
     def __init__(self, file_paths: List[str], dest_path: Path):
         super().__init__()
         self.file_paths = file_paths
         self.dest_path = dest_path
         self._is_cancelled = False
-    
+        self._partial_files: List[Path] = []  # 记录部分复制的文件
+
     def run(self):
         """执行文件复制"""
         try:
             for idx, src_path in enumerate(self.file_paths):
                 if self._is_cancelled:
                     break
-                
+
                 src = Path(src_path)
                 if not src.exists():
                     continue
-                
+
                 dst = self.dest_path / src.name
-                
+
                 # 发送开始信号
                 self.file_started.emit(src.name)
-                
+
                 try:
                     if src.is_dir():
                         # 复制文件夹（如果目标存在，先删除再复制）
@@ -218,50 +330,74 @@ class FileCopyWorker(QThread):
                         shutil.copytree(src, dst)
                     else:
                         # 复制文件（分块复制以显示进度）
-                        self._copy_file_with_progress(src, dst, idx)
-                    
-                    # 发送完成信号
+                        success = self._copy_file_with_progress(src, dst, idx)
+                        if not success:
+                            # 取消了复制，删除部分文件
+                            if dst.exists():
+                                try:
+                                    dst.unlink()
+                                except Exception:
+                                    pass
+                            # 发送取消信号并退出
+                            self.cancelled.emit()
+                            return
+
+                    # 发送完成信号（仅在未取消时）
                     self.file_finished.emit(str(dst))
-                    
+
                 except Exception as e:
+                    # 发生错误，清理部分文件
+                    if dst.exists():
+                        try:
+                            dst.unlink()
+                        except Exception:
+                            pass
                     self.error_occurred.emit(f"复制 {src.name} 失败: {str(e)}")
-            
-            # 发送完成信号
-            self.all_finished.emit()
-            
+
+            # 发送完成信号（仅在未取消时）
+            if not self._is_cancelled:
+                self.all_finished.emit()
+
         except Exception as e:
             self.error_occurred.emit(f"复制过程出错: {str(e)}")
-    
-    def _copy_file_with_progress(self, src: Path, dst: Path, file_idx: int):
-        """分块复制文件并更新进度"""
+
+    def _copy_file_with_progress(self, src: Path, dst: Path, file_idx: int) -> bool:
+        """分块复制文件并更新进度，返回是否成功完成"""
         file_size = src.stat().st_size
         chunk_size = 1024 * 1024  # 1MB
         copied = 0
         last_progress = -1
-        
-        with open(src, 'rb') as f_src, open(dst, 'wb') as f_dst:
-            while copied < file_size:
-                if self._is_cancelled:
-                    break
-                
-                chunk = f_src.read(chunk_size)
-                if not chunk:
-                    break
-                
-                f_dst.write(chunk)
-                copied += len(chunk)
-                
-                # 计算进度百分比
-                progress = int(copied / file_size * 100)
-                
-                # 只在进度变化超过1%时更新
-                if progress != last_progress:
-                    self.progress_updated.emit(file_idx, progress, 0)
-                    last_progress = progress
-        
-        # 复制元数据
-        shutil.copystat(src, dst)
-    
+
+        try:
+            with open(src, 'rb') as f_src, open(dst, 'wb') as f_dst:
+                while copied < file_size:
+                    if self._is_cancelled:
+                        # 取消复制，返回 False
+                        return False
+
+                    chunk = f_src.read(chunk_size)
+                    if not chunk:
+                        break
+
+                    f_dst.write(chunk)
+                    copied += len(chunk)
+
+                    # 计算进度百分比
+                    progress = int(copied / file_size * 100)
+
+                    # 只在进度变化超过1%时更新
+                    if progress != last_progress:
+                        self.progress_updated.emit(file_idx, progress, 0)
+                        last_progress = progress
+
+            # 复制元数据（仅在成功完成时）
+            shutil.copystat(src, dst)
+            return True
+
+        except Exception as e:
+            # 发生错误，返回 False
+            return False
+
     def cancel(self):
         """取消复制"""
         self._is_cancelled = True
@@ -569,27 +705,30 @@ class FileListWidget(QWidget):
         """显示右键菜单"""
         menu = QMenu(self)
 
-        # 添加文件
+        # 是否有选中的文件（用于控制菜单项的启用状态）
+        has_selection = len(self.get_selected_files()) > 0
+
+        # 添加文件（选中文件时禁用）
         add_file_action = QAction(I18n.tr('drag_add'), self)
         add_file_action.triggered.connect(self.on_add_files)
+        add_file_action.setEnabled(not has_selection)
         menu.addAction(add_file_action)
 
-        # 添加文件夹
+        # 添加文件夹（选中文件时禁用）
         add_folder_action = QAction(I18n.tr('add_folder'), self)
         add_folder_action.triggered.connect(self.on_add_folder)
+        add_folder_action.setEnabled(not has_selection)
         menu.addAction(add_folder_action)
 
         menu.addSeparator()
 
-        # 新建文件夹
+        # 新建文件夹（选中文件时禁用）
         new_folder_action = QAction(I18n.tr('new_folder'), self)
         new_folder_action.triggered.connect(self.on_new_folder)
+        new_folder_action.setEnabled(not has_selection)
         menu.addAction(new_folder_action)
 
         menu.addSeparator()
-
-        # 是否有选中的文件（用于控制复制/剪切/删除/重命名的启用状态）
-        has_selection = len(self.get_selected_files()) > 0
 
         # 复制
         copy_action = QAction(I18n.tr('copy'), self)
@@ -608,6 +747,14 @@ class FileListWidget(QWidget):
         paste_action.triggered.connect(self.paste_files)
         paste_action.setEnabled(len(self.clipboard_files) > 0)
         menu.addAction(paste_action)
+
+        menu.addSeparator()
+
+        # 保存至
+        save_to_action = QAction(I18n.tr('save_to'), self)
+        save_to_action.triggered.connect(self.save_to)
+        save_to_action.setEnabled(has_selection)
+        menu.addAction(save_to_action)
 
         menu.addSeparator()
 
@@ -646,16 +793,18 @@ class FileListWidget(QWidget):
         self.clipboard_is_cut = True
     
     def paste_files(self):
-        """粘贴文件"""
+        """粘贴文件（使用进度对话框避免界面卡死）"""
         if not self.clipboard_files:
             return
-        
+
+        # 收集需要粘贴的文件（先处理文件存在确认）
+        files_to_paste = []
         for src_file in self.clipboard_files:
             if not src_file.exists():
                 continue
-            
+
             dst_file = self.current_path / src_file.name
-            
+
             # 检查文件是否存在
             if dst_file.exists():
                 # 创建自定义消息框
@@ -663,56 +812,106 @@ class FileListWidget(QWidget):
                 msg_box.setWindowTitle(I18n.tr('confirm_replace'))
                 msg_box.setText(I18n.tr('confirm_replace_msg'))
                 msg_box.setIcon(QMessageBox.Question)
-                
+
                 # 添加自定义按钮
                 yes_btn = msg_box.addButton(I18n.tr('yes'), QMessageBox.YesRole)
                 no_btn = msg_box.addButton(I18n.tr('no'), QMessageBox.NoRole)
-                
+
                 # 应用全局按钮样式
                 yes_btn.setStyleSheet(BUTTON_STYLES['primary'])
                 no_btn.setStyleSheet(BUTTON_STYLES['secondary'])
-                
+
                 msg_box.setDefaultButton(no_btn)
                 msg_box.exec()
-                
+
                 if msg_box.clickedButton() == no_btn:
                     continue
-            
-            try:
-                if self.clipboard_is_cut:
-                    # 移动文件
-                    src_file.rename(dst_file)
-                    # 只有本地操作才触发同步信号
-                    if not self.is_syncing(str(src_file)):
-                        self.file_renamed.emit(str(src_file), str(dst_file))
-                else:
-                    # 复制文件
-                    import shutil
-                    if src_file.is_dir():
-                        shutil.copytree(src_file, dst_file)
-                    else:
-                        shutil.copy2(src_file, dst_file)
-                    # 只有本地操作才触发同步信号
-                    if not self.is_syncing(str(dst_file)):
-                        self.file_added.emit(str(dst_file))
-            except Exception as e:
-                # 创建自定义错误框
-                msg_box = QMessageBox(self)
-                msg_box.setWindowTitle("错误")
-                msg_box.setText(f"粘贴失败: {str(e)}")
-                msg_box.setIcon(QMessageBox.Critical)
-                
-                # 添加自定义按钮
-                ok_btn = msg_box.addButton(I18n.tr('ok'), QMessageBox.AcceptRole)
-                ok_btn.setStyleSheet(BUTTON_STYLES['primary'])
-                
-                msg_box.exec()
-        
+
+            files_to_paste.append(src_file)
+
+        if not files_to_paste:
+            return
+
+        # 创建进度对话框
+        from ui.progress_dialog import CopyProgressDialog
+        progress_dialog = CopyProgressDialog(self)
+        progress_dialog.setWindowTitle(I18n.tr('paste') if not self.clipboard_is_cut else I18n.tr('cut'))
+        progress_dialog.show()
+
+        # 创建工作线程
+        self._paste_worker = FileCopyWorker([str(f) for f in files_to_paste], self.current_path)
+
+        # 连接信号
+        self._paste_worker.file_started.connect(
+            lambda name: progress_dialog.set_filename(name)
+        )
+        self._paste_worker.progress_updated.connect(
+            lambda idx, progress, total: progress_dialog.set_progress(progress)
+        )
+        self._paste_worker.file_finished.connect(
+            lambda path: self._on_paste_file_finished(path)
+        )
+        self._paste_worker.all_finished.connect(
+            lambda: self._on_paste_finished(progress_dialog)
+        )
+        self._paste_worker.error_occurred.connect(
+            lambda msg: self._show_error(msg)
+        )
+        self._paste_worker.cancelled.connect(
+            lambda: self._on_paste_cancelled(progress_dialog)
+        )
+        progress_dialog.cancelled.connect(
+            lambda: self._paste_worker.cancel()
+        )
+
+        # 启动工作线程
+        self._paste_worker.start()
+
+    def _on_paste_file_finished(self, file_path: str):
+        """粘贴文件完成回调"""
+        # 只有本地操作才触发同步信号
+        if not self.is_syncing(file_path):
+            path = Path(file_path)
+            if path.is_dir():
+                self.file_added.emit(file_path)
+                self._emit_folder_files(path)
+            else:
+                self.file_added.emit(file_path)
+
+        # 如果是剪切操作，删除源文件
+        if self.clipboard_is_cut:
+            # 找到对应的源文件
+            for src_file in self.clipboard_files:
+                if src_file.name == Path(file_path).name:
+                    try:
+                        if src_file.exists():
+                            if src_file.is_dir():
+                                from sync.file_manager import safe_rmtree
+                                safe_rmtree(src_file)
+                            else:
+                                src_file.unlink()
+                    except Exception as e:
+                        print(f"删除源文件失败: {e}")
+                    break
+
+    def _on_paste_cancelled(self, dialog):
+        """粘贴被取消回调"""
+        dialog.allow_close()
+        dialog.close()
         # 清空剪贴板（如果是剪切）
         if self.clipboard_is_cut:
             self.clipboard_files = []
             self.clipboard_is_cut = False
-        
+        self.load_files()
+
+    def _on_paste_finished(self, dialog):
+        """所有文件粘贴完成回调"""
+        dialog.allow_close()
+        dialog.close()
+        # 清空剪贴板（如果是剪切）
+        if self.clipboard_is_cut:
+            self.clipboard_files = []
+            self.clipboard_is_cut = False
         self.load_files()
     
     def delete_files(self):
@@ -1070,6 +1269,102 @@ class FileListWidget(QWidget):
         
         return True
     
+    def save_to(self):
+        """保存文件到指定位置（将选中的文件复制到外部目录）"""
+        files = self.get_selected_files()
+        if not files:
+            return
+        
+        # 弹出文件夹选择对话框
+        dest_folder = QFileDialog.getExistingDirectory(
+            self,
+            I18n.tr('save_to'),
+            self._get_dialog_start_dir()
+        )
+        
+        if not dest_folder:
+            return
+        
+        # 记忆本次选择的目录
+        self._last_dialog_dir = dest_folder
+        
+        dest_path = Path(dest_folder)
+        
+        # 检查是否有文件已存在
+        existing_files = []
+        for src_file in files:
+            dst = dest_path / src_file.name
+            if dst.exists():
+                existing_files.append(src_file.name)
+        
+        # 如果有文件已存在，显示确认对话框
+        if existing_files:
+            file_list = "\n".join(existing_files[:5])
+            if len(existing_files) > 5:
+                file_list += f"\n... 还有 {len(existing_files) - 5} 个文件"
+            
+            msg_box = QMessageBox(self)
+            msg_box.setWindowTitle(I18n.tr('confirm_replace'))
+            msg_box.setText(f"以下文件已存在，是否替换？\n\n{file_list}")
+            msg_box.setIcon(QMessageBox.Question)
+            
+            yes_btn = msg_box.addButton(I18n.tr('yes'), QMessageBox.YesRole)
+            no_btn = msg_box.addButton(I18n.tr('no'), QMessageBox.NoRole)
+            cancel_btn = msg_box.addButton(I18n.tr('cancel'), QMessageBox.RejectRole)
+            
+            yes_btn.setStyleSheet(BUTTON_STYLES['primary'])
+            no_btn.setStyleSheet(BUTTON_STYLES['secondary'])
+            cancel_btn.setStyleSheet(BUTTON_STYLES['secondary'])
+            
+            msg_box.setDefaultButton(no_btn)
+            msg_box.exec()
+            
+            clicked_btn = msg_box.clickedButton()
+            
+            if clicked_btn == cancel_btn:
+                return
+            elif clicked_btn == no_btn:
+                files = [f for f in files if f.name not in existing_files]
+                if not files:
+                    return
+        
+        # 使用进度对话框复制文件
+        from ui.progress_dialog import CopyProgressDialog
+        
+        progress_dialog = CopyProgressDialog(self)
+        progress_dialog.setWindowTitle(I18n.tr('save_to'))
+        progress_dialog.show()
+        
+        # 创建工作线程
+        self._copy_worker = FileCopyWorker([str(f) for f in files], dest_path)
+        
+        # 连接信号
+        self._copy_worker.file_started.connect(
+            lambda name: progress_dialog.set_filename(name)
+        )
+        self._copy_worker.progress_updated.connect(
+            lambda idx, progress, total: progress_dialog.set_progress(progress)
+        )
+        self._copy_worker.file_finished.connect(
+            lambda path: None  # 保存至外部不需要触发同步信号
+        )
+        self._copy_worker.all_finished.connect(
+            lambda: self._on_save_to_finished(progress_dialog)
+        )
+        self._copy_worker.error_occurred.connect(
+            lambda msg: self._show_error(msg)
+        )
+        progress_dialog.cancelled.connect(
+            lambda: self._copy_worker.cancel()
+        )
+        
+        self._copy_worker.start()
+    
+    def _on_save_to_finished(self, dialog):
+        """保存至完成回调"""
+        dialog.allow_close()
+        dialog.close()
+    
     # ========== 拖拽功能 ==========
     
     def _handle_files_dragged(self, files: List[str], target_path: str, is_internal: bool):
@@ -1257,13 +1552,16 @@ class FileListWidget(QWidget):
         self._copy_worker.error_occurred.connect(
             lambda msg: self._show_error(msg)
         )
+        self._copy_worker.cancelled.connect(
+            lambda: self._on_copy_cancelled(progress_dialog)
+        )
         progress_dialog.cancelled.connect(
             lambda: self._copy_worker.cancel()
         )
-        
+
         # 启动工作线程
         self._copy_worker.start()
-    
+
     def _on_file_copied(self, file_path: str):
         """文件复制完成回调"""
         # 立即发射信号，不等待对话框关闭
@@ -1279,7 +1577,7 @@ class FileListWidget(QWidget):
             else:
                 # 如果是文件，直接发射信号
                 self.file_added.emit(file_path)
-    
+
     def _emit_folder_files(self, folder_path: Path):
         """递归发射文件夹内所有文件的信号"""
         try:
@@ -1289,7 +1587,15 @@ class FileListWidget(QWidget):
                     self.file_added.emit(str(item))
         except Exception as e:
             print(f"发射文件夹文件信号失败: {e}")
-    
+
+    def _on_copy_cancelled(self, dialog):
+        """复制被取消回调"""
+        # 关闭对话框
+        dialog.allow_close()
+        dialog.close()
+        # 刷新文件列表（取消时部分文件已被清理）
+        self.load_files()
+
     def _on_copy_finished(self, dialog):
         """所有文件复制完成回调"""
         # 立即关闭对话框，网络同步会在后台进行

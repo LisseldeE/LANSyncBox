@@ -2,7 +2,7 @@
 
 ## Project Introduction
 
-LANSyncBox is a lightweight LAN real-time file synchronization tool that enables multi-user file sharing. Connect within the same local network to share and sync files - no public network connection required. Built with the new Qt6 architecture, supports large file streaming transfers, optimized multi-connection sync logic, providing a smooth user experience.
+LANSyncBox is a simple and efficient LAN real-time file synchronization tool that enables multi-user file sharing. Connect within the same local network to share and sync files - no public network connection required. Built with the new Qt6 architecture, supports large file streaming transfers, optimized multi-connection sync logic, providing a smooth user experience.
 
 ## Project Information
 
@@ -40,15 +40,12 @@ LANSyncBox is a lightweight LAN real-time file synchronization tool that enables
 - Auto-retransmit for failed clients: Skips and retransmits entire file when a client fails during broadcast, ensuring final sync
 
 ### Multi-client Sync
-- Host monitors all changes in sync folder
-- Changes synced to all connected clients in real-time
-- Receives files from clients, forwards based on "hide flag"
+- Host file list changes synced to all connected clients in real-time
 - Support for folder sync, automatically recursively sync all files in folder
 - Real-time transfer progress display with progress bar visualization
 
 ### Client Features
 - File changes uploaded to host (not directly to other clients)
-- "Hide files from others" toggle support
 - Real-time sync status display
 - Auto incremental sync after reconnection
 - Real-time progress display with file transfer progress bar
@@ -65,18 +62,11 @@ LANSyncBox is a lightweight LAN real-time file synchronization tool that enables
 
 ### Cache Management
 - Manage sync cache, clear local cache files
-- Independent cache path management to reduce system disk usage
 
 ### Multi-language Support
 - Chinese/English interface switching
 - Real-time language switching without restart
 - Multi-language environment adaptation
-
-### System Tray
-- Minimized windows auto-hide to system tray
-- Tray menu shows current room code
-- Double-click tray icon to restore window
-- Click "Exit" to close all syncs and quit
 
 ### UI Optimization
 - New Qt6 architecture for smoother interface
@@ -95,7 +85,7 @@ LANSyncBox is a lightweight LAN real-time file synchronization tool that enables
 ### Client (Join Connection)
 
 1. Click "Join Connection" button
-2. Enter room code
+2. Enter or select room code
 3. If password required, enter directly in join dialog for pre-verification
 4. Verification failures are displayed directly in the join dialog, allowing immediate retry with corrected info
 5. Click connect - automatic full sync from host
@@ -104,7 +94,7 @@ LANSyncBox is a lightweight LAN real-time file synchronization tool that enables
 
 ### General Principle
 
-File conflicts are handled by the system file manager. Sync ensures consistency across all endpoints. Uses cache files and list operations to handle sync content, ensuring stable and reliable synchronization.
+The core goal of sync is to keep file lists consistent across all endpoints. File changes are recorded via operation list, combined with cache file handling for transfers, ensuring stable and reliable synchronization. Conflict handling: latest modification time wins.
 
 ### Host Side
 
@@ -138,37 +128,16 @@ File conflicts are handled by the system file manager. Sync ensures consistency 
 ## Change Log
 
 ### 2026.6.29 R6
-**#01**
-- Adapted Microsoft Store version number display
-- Optimized room joining experience with direct in-dialog verification feedback
-- Fixed sync interface accidental exit without confirmation
-- Added double-click empty area and right-click menu options for adding files/folders and creating new folders
-- Fixed right-click menu item logic anomalies
-- Fixed read-only file deletion failure issue
+**#05**
+- Added "Save To" quick option
+- Added file list rubber band selection
+- Optimized right-click menu item logic
+- Added auto-scan for available rooms when joining
+- Added custom room code feature
+- Fixed leftover partial files when cancelling large file copy
+- Fixed interface freeze during in-list copy operations
 
-**#02**
-- Fixed about dialog window close button unresponsive issue
-- Added cache usage size display
-- Updated to support new version number comparison and verification
-- Removed sync status from sync interface, added IP display
-
-**#02.1**
-- Adapted to MSIX environment, migrated cache path to AppData
-
-**#03**
-- Fixed create room dialog window flickering issue
-- Optimized file creation and reading logic
-- Optimized and unified some logic content
-
-**#04**
-- Fixed MSIX environment virtualized path error
-- Optimized file preview handling logic
-- Optimized UI display effects
-
-**#04.1**
-- Fixed the occasional issue where the original virtual path was used
-
-See: https://github.com/LisseldeE/LANSyncBox/blob/main/%E6%9B%B4%E6%96%B0%E6%97%A5%E5%BF%97.log
+See: https://github.com/LisseldeE/LANSyncBox/blob/main/updata.log
 
 ## Tech Stack
 
@@ -180,7 +149,7 @@ See: https://github.com/LisseldeE/LANSyncBox/blob/main/%E6%9B%B4%E6%96%B0%E6%97%
 
 ### System Requirements
 - Python 3.6 or higher
-- Windows / macOS / Linux
+- Windows 10 or higher
 
 ### Install Dependencies
 ```bash
@@ -194,7 +163,11 @@ python LANSyncBox.py
 
 ## Open Source License
 
-This project uses the MIT open source license, see [LICENSE](LICENSE) file for details.
+This project uses the MIT open source license, see [LICENSE](https://github.com/LisseldeE/LANSyncBox/blob/main/LICENSE) file for details.
+
+## Privacy Policy
+
+This project does not collect any user data, see [Privacy Policy](https://github.com/LisseldeE/LANSyncBox/blob/main/privacy_policy.md) file for details.
 
 ## Contact & Feedback
 
