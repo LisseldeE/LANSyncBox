@@ -137,7 +137,7 @@ LANSyncBox 是一款简洁高效的局域网文件实时同步工具，实现多
 - 修复复制大文件取消时残留部分文件的问题
 - 修复列表内复制操作导致的界面卡死问题
 
-详见 [更新日志](https://github.com/LisseldeE/LANSyncBox/blob/main/updata.log)
+详见 [更新日志](https://github.com/LisseldeE/LANSyncBox/blob/main/update.log)
 
 ## 技术栈
 

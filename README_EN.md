@@ -137,7 +137,7 @@ The core goal of sync is to keep file lists consistent across all endpoints. Fil
 - Fixed leftover partial files when cancelling large file copy
 - Fixed interface freeze during in-list copy operations
 
-See: https://github.com/LisseldeE/LANSyncBox/blob/main/updata.log
+See: https://github.com/LisseldeE/LANSyncBox/blob/main/update.log
 
 ## Tech Stack
 
