@@ -128,16 +128,14 @@ The core goal of sync is to keep file lists consistent across all endpoints. Fil
 ## Change Log
 
 ### 2026.6.29 R6
-**#05**
-- Added "Save To" quick option
-- Added file list rubber band selection
-- Optimized right-click menu item logic
-- Added auto-scan for available rooms when joining
-- Added custom room code feature
-- Fixed leftover partial files when cancelling large file copy
-- Fixed interface freeze during in-list copy operations
 
-See: https://github.com/LisseldeE/LANSyncBox/blob/main/update.log
+**#06 Release v6.6.0.0**
+- Optimized join room operation experience
+- Updated About dialog content
+- Added room code availability check when creating room
+- Optimized availability check logic
+
+see [Changelog](https://github.com/LisseldeE/LANSyncBox/blob/main/CHANGELOG.md)
 
 ## Tech Stack
 

@@ -7,7 +7,7 @@ from PySide6.QtWidgets import (
     QGraphicsOpacityEffect, QApplication, QListWidget, QListWidgetItem
 )
 from PySide6.QtCore import Qt, Signal, QTimer, QPropertyAnimation, QByteArray, QEventLoop
-from PySide6.QtGui import QFont, QValidator, QKeyEvent, QShowEvent
+from PySide6.QtGui import QFont, QValidator, QKeyEvent, QShowEvent, QColor, QPalette
 
 from i18n import I18n
 from config import Config
@@ -54,9 +54,10 @@ class DigitLineEdit(QLineEdit):
 
 class RoomCodeInput(QWidget):
     """房间号输入组件 - 6个格子输入6个数字"""
-    
+
     code_completed = Signal()  # 输入完成信号
-    
+    code_changed = Signal()  # 输入变化信号（用于实时匹配检测）
+
     def __init__(self, parent=None):
         super().__init__(parent)
         self.digit_edits = []
@@ -140,20 +141,36 @@ class RoomCodeInput(QWidget):
         if text and index < 5:
             # 输入了数字，跳转到下一个
             self.digit_edits[index + 1].setFocus()
-        
+
+        # 发射输入变化信号（实时匹配检测）
+        self.code_changed.emit()
+
         # 检查是否输入完成（只在从未完成变为完成时发送信号）
         is_complete = self.is_complete()
         if is_complete and not self._last_complete_state:
             self.code_completed.emit()
         self._last_complete_state = is_complete
     
-    def set_room_code(self, code: str):
-        """设置房间号"""
+    def set_room_code(self, code: str, trigger_check: bool = True):
+        """设置房间号
+        
+        Args:
+            code: 房间号（6位数字）
+            trigger_check: 是否触发检测（通过列表点击时为False，手动输入时为True）
+        """
         code = code.zfill(6)
+        # 阻塞信号，避免触发6次 code_changed
+        self.blockSignals(True)
         for i, digit in enumerate(code[:6]):
             self.digit_edits[i].setText(digit)
+        self.blockSignals(False)
         # 更新完成状态
         self._last_complete_state = self.is_complete()
+        # 手动触发一次 code_changed（更新列表项样式）
+        self.code_changed.emit()
+        # 如果输入完整且需要检测，触发 code_completed
+        if self._last_complete_state and trigger_check:
+            self.code_completed.emit()
     
     def get_room_code(self) -> str:
         """获取房间号"""
@@ -220,6 +237,8 @@ class JoinRoomDialog(QDialog):
         self.room_code_input = RoomCodeInput()
         # 连接输入完成信号，自动检测房间
         self.room_code_input.code_completed.connect(self._on_code_completed)
+        # 连接输入变化信号，实时匹配列表项
+        self.room_code_input.code_changed.connect(self._update_matching_room_style)
         room_code_layout.addWidget(self.room_code_input)
         
         # 状态标签（显示扫描状态）
@@ -293,6 +312,7 @@ class JoinRoomDialog(QDialog):
                 border: 1px solid palette(mid);
                 border-radius: 4px;
                 background-color: palette(base);
+                outline: none;
             }
             QListWidget::item {
                 padding: 8px;
@@ -301,9 +321,12 @@ class JoinRoomDialog(QDialog):
             QListWidget::item:selected {
                 background-color: #339af0;
                 color: white;
+                border: none;
             }
-            QListWidget::item:hover {
-                background-color: palette(window);
+            QListWidget::item:hover:!disabled {
+                background-color: #339af0;
+                color: white;
+                border: none;
             }
         """)
         self.rooms_list_widget.itemClicked.connect(self._on_room_item_clicked)
@@ -382,8 +405,8 @@ class JoinRoomDialog(QDialog):
         # 保存房间号
         self._pending_room_code = room_code
         
-        # 开始发现
-        self.discovery.discover_room(room_code, timeout=3)
+        # 开始发现（1.5秒超时）
+        self.discovery.discover_room(room_code, timeout=1.5)
     
     def _show_status(self, text: str, color: str = '#868e96'):
         """显示状态标签"""
@@ -636,8 +659,8 @@ class JoinRoomDialog(QDialog):
         self._scan_discovery.discovery_finished.connect(self._on_scan_finished)
         self._scan_discovery.error_occurred.connect(self._on_scan_error)
 
-        # 开始扫描所有房间（超时3秒）
-        self._scan_discovery.discover_all_rooms(timeout=3)
+        # 开始扫描所有房间（超时2秒）
+        self._scan_discovery.discover_all_rooms(timeout=2)
 
     def _on_scan_room_found(self, host_ip: str, room_code: str, port: int, version: str = ""):
         """扫描发现单个房间"""
@@ -699,12 +722,19 @@ class JoinRoomDialog(QDialog):
     def _on_room_item_clicked(self, item: QListWidgetItem):
         """点击发现的房间项，自动填充房间号"""
         room_info = item.data(Qt.UserRole)
+
+        # 检查该项是否被禁用（匹配当前输入框）
         if room_info:
-            # 填充房间号到输入框
-            self.room_code_input.set_room_code(room_info['room_code'])
+            current_code = self.room_code_input.get_room_code()
+            if room_info['room_code'] == current_code:
+                return  # 匹配项不可点击，直接返回
+
+            # 填充房间号到输入框（不触发检测，避免重复刷新）
+            self.room_code_input.set_room_code(room_info['room_code'], trigger_check=False)
             # 记录主机信息（连接时使用）
             self.discovered_host = room_info['ip']
             self.host_port = room_info['port']
+            self.host_address = room_info['ip']  # 同时设置 host_address，确保连接时使用正确地址
             # 清空手动输入的主机地址（使用扫描发现的）
             self.host_edit.clear()
             # 更新状态
@@ -712,3 +742,32 @@ class JoinRoomDialog(QDialog):
             self._room_checked = True
             # 显示密码输入框
             self._show_password_input()
+
+    def _update_matching_room_style(self):
+        """更新列表项样式：匹配当前输入的房间号时灰色不可点击"""
+        current_code = self.room_code_input.get_room_code()
+
+        # 遍历所有列表项
+        for i in range(self.rooms_list_widget.count()):
+            item = self.rooms_list_widget.item(i)
+            room_info = item.data(Qt.UserRole)
+
+            if room_info:
+                # 检查是否匹配
+                if room_info['room_code'] == current_code:
+                    # 匹配项：灰色、不可点击、无悬浮效果
+                    item.setForeground(QColor('#868e96'))
+                    # 禁用交互：移除选中、启用标志
+                    flags = item.flags()
+                    flags &= ~Qt.ItemIsSelectable
+                    flags &= ~Qt.ItemIsEnabled
+                    item.setFlags(flags)
+                else:
+                    # 正常项：恢复默认颜色、可点击
+                    palette = QApplication.palette()
+                    item.setForeground(palette.color(QPalette.Text))
+                    # 恢复交互：添加选中、启用标志
+                    flags = item.flags()
+                    flags |= Qt.ItemIsSelectable
+                    flags |= Qt.ItemIsEnabled
+                    item.setFlags(flags)

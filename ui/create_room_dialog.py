@@ -83,6 +83,8 @@ class CreateRoomDialog(QDialog):
         self.password = ""
         self._config_loaded = False  # 标记配置是否已加载（避免重复加载）
         self._regenerate_btn_connected_to_customize = False  # 按钮是否连接到自定义函数
+        self._is_checking = False  # 是否正在检测房间号可用性
+        self._discovery = None  # 房间发现服务
         self.init_ui()
     
     def init_ui(self):
@@ -103,7 +105,13 @@ class CreateRoomDialog(QDialog):
         # 房间号显示组件（6个格子）
         self.room_code_display = RoomCodeDisplay()
         room_code_layout.addWidget(self.room_code_display)
-        
+
+        # 状态标签（显示检测状态）
+        self.status_label = QLabel(I18n.tr('checking_availability'))
+        self.status_label.setStyleSheet("color: #339af0; font-size: 12px;")
+        self.status_label.setWordWrap(True)
+        room_code_layout.addWidget(self.status_label)
+
         # 固定房间号勾选框
         self.fixed_room_code_checkbox = QCheckBox(I18n.tr('fixed_room_code'))
         self.fixed_room_code_checkbox.setToolTip(I18n.tr('fixed_room_code_hint'))
@@ -112,7 +120,7 @@ class CreateRoomDialog(QDialog):
 
         # 先生成随机房间号（默认状态，避免阻塞渲染）
         self.generate_room_code()
-        
+
         # 重新生成按钮
         regenerate_btn_layout = QHBoxLayout()
         regenerate_btn_layout.addStretch()
@@ -176,6 +184,7 @@ class CreateRoomDialog(QDialog):
         self.create_btn.clicked.connect(self.on_create)
         self.create_btn.setDefault(True)
         self.create_btn.setStyleSheet(BUTTON_STYLES['primary'])
+        self.create_btn.setEnabled(False)  # 默认禁用，等待可用性检测完成
         
         self.cancel_btn = AnimatedButton(I18n.tr('cancel'))
         self.cancel_btn.setFixedWidth(100)
@@ -189,9 +198,11 @@ class CreateRoomDialog(QDialog):
         layout.addLayout(button_layout)
     
     def generate_room_code(self):
-        """生成随机房间号"""
+        """生成随机房间号并开始可用性检测"""
         room_code = str(random.randint(Config.ROOM_CODE_MIN, Config.ROOM_CODE_MAX))
         self.room_code_display.set_room_code(room_code)
+        # 开始检测可用性
+        self._start_availability_check()
     
     def on_fixed_room_code_toggled(self, state: int):
         """固定房间号勾选框状态变化"""
@@ -251,15 +262,21 @@ class CreateRoomDialog(QDialog):
                 self.room_code_display.set_room_code(new_code)
                 # 保存到配置
                 UserConfig.set_fixed_room_code(new_code)
+                # 自定义对话框已完成验证，直接启用创建按钮
+                self.create_btn.setEnabled(True)
+                self.status_label.setText(I18n.tr('room_code_available'))
+                self.status_label.setStyleSheet("color: #51cf66; font-size: 12px;")
 
     def showEvent(self, event: QShowEvent):
-        """对话框显示事件：延迟加载配置（避免阻塞渲染）"""
+        """对话框显示事件：延迟加载配置并开始可用性检测"""
         super().showEvent(event)
 
         # 只在首次显示时加载配置（避免重复加载）
         if not self._config_loaded:
             self._config_loaded = True
             self._load_config()
+            # 加载完成后，开始检测当前房间号可用性
+            self._start_availability_check()
 
     def _load_config(self):
         """加载配置并更新UI状态"""
@@ -309,6 +326,86 @@ class CreateRoomDialog(QDialog):
     def get_password(self) -> str:
         """获取密码"""
         return self.password
+
+    def _start_availability_check(self):
+        """开始检测房间号可用性（异步）"""
+        # 如果按钮还未创建，直接返回（在 showEvent 中会再次调用）
+        if not hasattr(self, 'create_btn') or self.create_btn is None:
+            return
+
+        # 如果正在检测，先停止之前的检测
+        if self._is_checking and self._discovery:
+            self._discovery.stop_discovery()
+
+        self._is_checking = True
+        self.create_btn.setEnabled(False)  # 检测期间禁用创建按钮
+        self.status_label.setText(I18n.tr('checking_availability'))
+        self.status_label.setStyleSheet("color: #339af0; font-size: 12px;")
+
+        # 获取当前房间号
+        current_code = self.room_code_display.get_room_code()
+        if not current_code or len(current_code) != 6:
+            self._is_checking = False
+            self.create_btn.setEnabled(True)
+            self.status_label.setText(I18n.tr('room_code_available'))
+            self.status_label.setStyleSheet("color: #51cf66; font-size: 12px;")
+            return
+
+        # 创建房间发现服务检测是否已有主机使用该房间号
+        self._discovery = RoomDiscovery(self)
+        self._discovery.room_found.connect(self._on_room_found_check)
+        self._discovery.discovery_finished.connect(self._on_check_finished)
+        self._discovery.error_occurred.connect(self._on_check_error)
+
+        # 开始发现（1秒超时）
+        self._discovery.discover_room(current_code, timeout=1)
+
+    def _on_room_found_check(self, host_ip: str, room_code: str, port: int, version: str = ""):
+        """发现房间（说明房间号已被占用）"""
+        self._is_checking = False
+        self.create_btn.setEnabled(False)  # 房间号不可用，禁用创建按钮
+        self.status_label.setText(I18n.tr('room_code_exists'))
+        self.status_label.setStyleSheet("color: #ff6b6b; font-size: 12px;")
+
+        # 停止检测
+        if self._discovery:
+            self._discovery.stop_discovery()
+            self._discovery = None
+
+    def _on_check_finished(self, rooms: list):
+        """检测完成"""
+        # 如果已经被 _on_room_found_check 处理过，直接返回
+        if not self._is_checking:
+            return
+
+        self._is_checking = False
+
+        if not rooms:
+            # 没有发现房间，说明房间号可用
+            self.create_btn.setEnabled(True)  # 启用创建按钮
+            self.status_label.setText(I18n.tr('room_code_available'))
+            self.status_label.setStyleSheet("color: #51cf66; font-size: 12px;")
+        else:
+            # 发现了房间（说明已被占用）
+            self.create_btn.setEnabled(False)
+            self.status_label.setText(I18n.tr('room_code_exists'))
+            self.status_label.setStyleSheet("color: #ff6b6b; font-size: 12px;")
+
+        # 清理
+        if self._discovery:
+            self._discovery = None
+
+    def _on_check_error(self, error: str):
+        """检测错误"""
+        self._is_checking = False
+        # 网络错误时，允许创建（可能是本地网络问题）
+        self.create_btn.setEnabled(True)
+        self.status_label.setText(I18n.tr('room_code_available'))
+        self.status_label.setStyleSheet("color: #51cf66; font-size: 12px;")
+
+        # 清理
+        if self._discovery:
+            self._discovery = None
 
 
 
@@ -403,8 +500,8 @@ class CustomizeRoomCodeDialog(QDialog):
         self._discovery.discovery_finished.connect(self._on_check_finished)
         self._discovery.error_occurred.connect(self._on_check_error)
 
-        # 开始发现（2秒超时）
-        self._discovery.discover_room(self.room_code, timeout=2)
+        # 开始发现（1秒超时）
+        self._discovery.discover_room(self.room_code, timeout=1)
 
     def _on_room_found_check(self, host_ip: str, room_code: str, port: int, version: str = ""):
         """发现房间（说明房间号已被占用）"""
@@ -420,6 +517,10 @@ class CustomizeRoomCodeDialog(QDialog):
 
     def _on_check_finished(self, rooms: list):
         """检测完成"""
+        # 如果已经被 _on_room_found_check 处理过，直接返回
+        if not self._is_checking:
+            return
+
         self._is_checking = False
 
         if not rooms:

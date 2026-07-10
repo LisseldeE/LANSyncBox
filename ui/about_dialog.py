@@ -58,15 +58,9 @@ class AboutDialog(QDialog):
         desc_label.setWordWrap(True)
         layout.addWidget(desc_label)
 
-        # 作者信息
+        # 作者信息（蓝色可点击）
         author_label = QLabel(f"{I18n.tr('about_author')}: {Config.APP_AUTHOR}")
-        author_label.setStyleSheet("font-size: 11px; color: #495057;")
-        author_label.setAlignment(Qt.AlignCenter)
-        layout.addWidget(author_label)
-
-        # GitHub链接
-        github_label = QLabel(f"GitHub: {Config.GITHUB_REPO}")
-        github_label.setStyleSheet("""
+        author_label.setStyleSheet("""
             QLabel {
                 font-size: 11px;
                 color: #339af0;
@@ -74,6 +68,22 @@ class AboutDialog(QDialog):
             QLabel:hover {
                 color: #228be6;
                 text-decoration: underline;
+            }
+        """)
+        author_label.setAlignment(Qt.AlignCenter)
+        author_label.setCursor(Qt.PointingHandCursor)
+        author_label.mousePressEvent = lambda event: self._open_author_link()
+        layout.addWidget(author_label)
+
+        # GitHub链接（灰色悬浮变蓝）
+        github_label = QLabel(f"GitHub: {Config.GITHUB_REPO}")
+        github_label.setStyleSheet("""
+            QLabel {
+                font-size: 11px;
+                color: #495057;
+            }
+            QLabel:hover {
+                color: #339af0;
             }
         """)
         github_label.setAlignment(Qt.AlignCenter)
@@ -122,6 +132,10 @@ class AboutDialog(QDialog):
         layout.addLayout(btn_layout)
 
         self.setLayout(layout)
+
+    def _open_author_link(self):
+        """打开作者链接"""
+        QDesktopServices.openUrl(QUrl("https://lisseldee.github.io"))
 
     def _open_github(self):
         """打开 GitHub 链接"""

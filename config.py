@@ -12,8 +12,8 @@ class Config:
 
     # 应用信息
     APP_NAME = "LANSyncBox"
-    APP_VERSION = "R6.5"             # 内部版本号（开源直装版显示 + 检查更新比较用）
-    STORE_VERSION = "6.5.0.0"      # 微软商店版本号（四段式，符合 MSIX 打包要求）
+    APP_VERSION = "R6.6"             # 内部版本号（开源直装版显示 + 检查更新比较用）
+    STORE_VERSION = "6.6.0.0"      # 微软商店版本号（四段式，符合 MSIX 打包要求）
     APP_AUTHOR = "Lisselde_E"
     APP_EMAIL = "Lisselde.E@outlook.com"
 
