@@ -8,7 +8,6 @@ LANSyncBox is a simple and efficient LAN real-time file synchronization tool tha
 
 - **Project Name**: LANSyncBox
 - **Project Author**: Lisselde_E
-- **Contact Email**: Lisselde.E@outlook.com
 - **Project Repository**: https://github.com/LisseldeE/LANSyncBox
 
 ## Download
@@ -167,11 +166,8 @@ This project uses the MIT open source license, see [LICENSE](https://github.com/
 
 This project does not collect any user data, see [Privacy Policy](https://github.com/LisseldeE/LANSyncBox/blob/main/privacy_policy.md) file for details.
 
-## Contact & Feedback
+## Feedback
 
 **This application is under development, if you have any questions or new ideas, feel free to contact me!**
-
-- 📧 Email: Lisselde.E@outlook.com
-- 🐙 GitHub: https://github.com/LisseldeE/LANSyncBox
 
 Issues and Pull Requests are welcome!

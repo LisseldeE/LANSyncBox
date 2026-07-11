@@ -13,7 +13,7 @@ from PySide6.QtGui import QDesktopServices
 
 from i18n import I18n
 from config import Config
-from ui.widgets import AnimatedButton, BUTTON_STYLES
+from ui.widgets import AnimatedButton, BUTTON_STYLES, ClickableLabel
 
 
 class AboutDialog(QDialog):
@@ -58,21 +58,18 @@ class AboutDialog(QDialog):
         desc_label.setWordWrap(True)
         layout.addWidget(desc_label)
 
-        # 作者信息（蓝色可点击）
+        # 作者信息（灰色悬浮变蓝，不可点击）
         author_label = QLabel(f"{I18n.tr('about_author')}: {Config.APP_AUTHOR}")
         author_label.setStyleSheet("""
             QLabel {
                 font-size: 11px;
-                color: #339af0;
+                color: #495057;
             }
             QLabel:hover {
-                color: #228be6;
-                text-decoration: underline;
+                color: #339af0;
             }
         """)
         author_label.setAlignment(Qt.AlignCenter)
-        author_label.setCursor(Qt.PointingHandCursor)
-        author_label.mousePressEvent = lambda event: self._open_author_link()
         layout.addWidget(author_label)
 
         # GitHub链接（灰色悬浮变蓝）
@@ -88,24 +85,37 @@ class AboutDialog(QDialog):
         """)
         github_label.setAlignment(Qt.AlignCenter)
         github_label.setCursor(Qt.PointingHandCursor)
-        github_label.mousePressEvent = lambda event: self._open_github()
+        github_label.mousePressEvent = lambda event: self._open_github(event)
         layout.addWidget(github_label)
 
-        # 邮箱
-        email_label = QLabel(f"Email: {Config.APP_EMAIL}")
-        email_label.setStyleSheet("""
-            QLabel {
-                font-size: 11px;
-                color: #495057;
-            }
-            QLabel:hover {
-                color: #339af0;
-            }
-        """)
-        email_label.setAlignment(Qt.AlignCenter)
-        email_label.setCursor(Qt.PointingHandCursor)
-        email_label.mousePressEvent = lambda event: self._copy_email()
-        layout.addWidget(email_label)
+        # 问题反馈和查看详情链接（蓝色，悬浮加下划线）
+        link_layout = QHBoxLayout()
+        link_layout.addStretch()
+
+        # 问题反馈链接
+        feedback_label = ClickableLabel(
+            I18n.tr('about_feedback'),
+            normal_color="#339af0",
+            hover_color="#228be6",
+            underline_on_hover=True
+        )
+        feedback_label.set_click_callback(self._open_issues)
+        link_layout.addWidget(feedback_label)
+
+        link_layout.addSpacing(20)  # 两个链接之间间距
+
+        # 查看详情链接
+        details_label = ClickableLabel(
+            I18n.tr('about_details'),
+            normal_color="#339af0",
+            hover_color="#228be6",
+            underline_on_hover=True
+        )
+        details_label.set_click_callback(self._open_details)
+        link_layout.addWidget(details_label)
+
+        link_layout.addStretch()
+        layout.addLayout(link_layout)
 
         # 按钮区域
         btn_layout = QHBoxLayout()
@@ -133,19 +143,17 @@ class AboutDialog(QDialog):
 
         self.setLayout(layout)
 
-    def _open_author_link(self):
-        """打开作者链接"""
-        QDesktopServices.openUrl(QUrl("https://lisseldee.github.io"))
-
-    def _open_github(self):
+    def _open_github(self, event):
         """打开 GitHub 链接"""
         QDesktopServices.openUrl(QUrl(f"https://github.com/{Config.GITHUB_REPO}"))
 
-    def _copy_email(self):
-        """复制邮箱到剪贴板"""
-        clipboard = QApplication.clipboard()
-        clipboard.setText(Config.APP_EMAIL)
-        QMessageBox.information(self, I18n.tr('about_info'), I18n.tr('about_email_copied'))
+    def _open_issues(self, event):
+        """打开 GitHub Issues 页面（问题反馈）"""
+        QDesktopServices.openUrl(QUrl(f"https://github.com/{Config.GITHUB_REPO}/issues"))
+
+    def _open_details(self, event):
+        """打开作者主页链接（查看详情）"""
+        QDesktopServices.openUrl(QUrl(Config.APP_AUTHOR_LINK))
 
     def _check_update(self):
         """检查更新（根据语言选择 API 源）"""

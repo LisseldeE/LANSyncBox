@@ -8,7 +8,6 @@ LANSyncBox 是一款简洁高效的局域网文件实时同步工具，实现多
 
 - **项目名称**: LANSyncBox
 - **项目作者**: Lisselde_E
-- **联系邮箱**: Lisselde.E@outlook.com
 - **项目仓库**: https://github.com/LisseldeE/LANSyncBox
 
 ## 下载
@@ -167,11 +166,8 @@ python LANSyncBox.py
 
 本项目不收集任何用户数据，详见 [隐私政策](https://github.com/LisseldeE/LANSyncBox/blob/main/privacy_policy.md) 文件。
 
-## 联系与反馈
+## 反馈
 
 **开发中应用，如有问题或新的创意欢迎和我联系！**
-
-- 📧 邮箱: Lisselde.E@outlook.com
-- 🐙 GitHub: https://github.com/LisseldeE/LANSyncBox
 
 欢迎提交 Issue 和 Pull Request！
