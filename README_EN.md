@@ -4,10 +4,16 @@
 
 LANSyncBox is a simple and efficient LAN real-time file synchronization tool that enables multi-user file sharing. Connect within the same local network to share and sync files - no public network connection required. Built with the new Qt6 architecture, supports large file streaming transfers, optimized multi-connection sync logic, providing a smooth user experience.
 
+## Project Screenshots
+| Main Interface | Sync Interface |
+| :---: | :---: |
+| ![Main Interface](https://lisseldee.github.io/images/webp/1-1.webp) | ![Sync Interface](https://lisseldee.github.io/images/webp/1-2.webp) |
+
 ## Project Information
 
 - **Project Name**: LANSyncBox
 - **Project Author**: Lisselde_E
+- **Project Homepage**: https://lisseldee.github.io
 - **Project Repository**: https://github.com/LisseldeE/LANSyncBox
 
 ## Download

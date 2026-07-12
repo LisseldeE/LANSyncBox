@@ -4,10 +4,16 @@
 
 LANSyncBox 是一款简洁高效的局域网文件实时同步工具，实现多人隔空文件共享。在同一局域网内即可实现文件共享与同步，无需公网连接。采用全新QT6架构，支持大文件流式传输，优化多连接同步逻辑，提供流畅的用户体验。
 
+## 项目截图
+| 主界面 | 同步界面 |
+| :---: | :---: |
+| ![主界面](https://lisseldee.github.io/images/webp/1-1.webp) | ![同步界面](https://lisseldee.github.io/images/webp/1-2.webp) |
+
 ## 项目信息
 
 - **项目名称**: LANSyncBox
 - **项目作者**: Lisselde_E
+- **项目主页**: https://lisseldee.github.io
 - **项目仓库**: https://github.com/LisseldeE/LANSyncBox
 
 ## 下载
