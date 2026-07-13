@@ -13,9 +13,9 @@ class Config:
     # 应用信息
     APP_NAME = "LANSyncBox"
     APP_VERSION = "R6.6"             # 内部版本号（开源直装版显示 + 检查更新比较用）
-    STORE_VERSION = "6.6.1.0"      # 微软商店版本号（四段式，符合 MSIX 打包要求）
+    STORE_VERSION = "6.6.2.0"      # 微软商店版本号（四段式，符合 MSIX 打包要求）
     APP_AUTHOR = "Lisselde_E"
-    APP_AUTHOR_LINK = "https://lisseldee.github.io"  # 作者主页链接
+    APP_AUTHOR_LINK = "https://lisseldee.github.io/#1"  # 作者主页链接
 
     # 功能开关
     # 检查更新按钮：True=显示（开源直装版），False=隐藏（微软商店版本）
