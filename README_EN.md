@@ -13,7 +13,7 @@ LANSyncBox is a simple and efficient LAN real-time file synchronization tool tha
 
 - **Project Name**: LANSyncBox
 - **Project Author**: Lisselde_E
-- **Project Homepage**: https://lisseldee.github.io
+- **Project Homepage**: https://lisseldee.github.io/#1
 - **Project Repository**: https://github.com/LisseldeE/LANSyncBox
 
 ## Download
