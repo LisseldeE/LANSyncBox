@@ -9,7 +9,7 @@
 
 from PySide6.QtWidgets import QWidget, QVBoxLayout
 from PySide6.QtCore import QTimer, Qt, QPropertyAnimation, Property, QEasingCurve, QRectF
-from PySide6.QtGui import QPainter, QColor, QLinearGradient, QPainterPath, QPen
+from PySide6.QtGui import QPainter, QColor, QLinearGradient, QPainterPath, QPalette
 from enum import Enum
 import math
 
@@ -40,10 +40,6 @@ class ScannerWidget(QWidget):
         # 扫描光束位置 (0-100)
         self._scan_position = 0
 
-        # 边框颜色（更柔和的灰色，适配深浅色模式）
-        self.border_color = QColor("#e8e8e8")  # 更浅的灰色
-        self.accent_blue = QColor("#3b82f6")
-
         # 动画模式：True = 循环来回，False = 单向
         self._is_intermediate_mode = False
 
@@ -59,6 +55,25 @@ class ScannerWidget(QWidget):
 
         # 状态呼吸动画值 (0-1)
         self._status_breath = 0.0
+
+    def get_background_color(self):
+        """根据当前主题获取背景色"""
+        # 获取窗口背景色判断深色/浅色模式
+        palette = self.palette()
+        bg_color = palette.color(QPalette.Window)
+
+        # 计算亮度
+        luminance = (bg_color.red() * 0.299 + bg_color.green() * 0.587 + bg_color.blue() * 0.114)
+
+        # 深色模式：使用稍深于界面的颜色
+        if luminance < 128:
+            # 使用稍深的颜色，但不要深到纯黑
+            darker_color = bg_color.darker(120)  # 比背景色深20%，避免过黑
+            return darker_color
+        # 浅色模式：使用更明显的浅灰色
+        else:
+            # 使用稍深一点的灰色，确保在浅色背景下可见
+            return QColor("#e0e0e0")
 
     def set_status_color(self, status: StatusColor):
         """设置状态颜色"""
@@ -124,14 +139,9 @@ class ScannerWidget(QWidget):
         path.lineTo(0, height)  # 左下角
         path.closeSubpath()
 
-        # 绘制柔和的灰色边框（不填充背景）
-        border_color = QColor(self.border_color)
-        border_color.setAlpha(120)  # 添加透明度，使其更柔和
-        pen = QPen(border_color, 1)
-        pen.setCosmetic(True)  # 确保线条宽度不受变换影响
-        painter.setPen(pen)
-        painter.setBrush(Qt.NoBrush)  # 不填充
-        painter.drawPath(path)
+        # 绘制背景色（根据主题动态调整）
+        bg_color = self.get_background_color()
+        painter.fillPath(path, bg_color)
 
         # 设置裁剪路径（确保填充不超出平行四边形）
         painter.setClipPath(path)
