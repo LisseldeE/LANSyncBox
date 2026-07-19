@@ -14,6 +14,7 @@ from config import Config
 from network.discovery import RoomDiscovery
 from network.client import SyncClient
 from ui.widgets import AnimatedButton, BUTTON_STYLES, fade_widget
+from ui.loading_animation import PageLoader, LoaderState
 
 
 class DigitValidator(QValidator):
@@ -208,6 +209,7 @@ class JoinRoomDialog(QDialog):
         self._scan_discovery = None  # 扫描发现服务
         self._discovered_rooms_list = []  # 扫描发现的房间列表
         self._first_show = True  # 是否首次显示
+        self._loader = None  # 加载动画组件
         self.init_ui()
 
     def showEvent(self, event: QShowEvent):
@@ -352,7 +354,21 @@ class JoinRoomDialog(QDialog):
         self.cancel_btn.clicked.connect(self.reject)
         self.cancel_btn.setStyleSheet(BUTTON_STYLES['secondary'])
 
+        # 加载动画容器（固定尺寸，避免界面跳动）
+        loader_container = QWidget()
+        loader_container.setFixedSize(90, 36)
+        loader_layout = QHBoxLayout(loader_container)
+        loader_layout.setContentsMargins(0, 0, 0, 0)
+
+        # 加载动画（状态二：中间状态）
+        self._loader = PageLoader()
+        self._loader.set_state(LoaderState.INTERMEDIATE)
+        loader_layout.addWidget(self._loader)
+        self._loader.hide()  # 初始隐藏
+
         button_layout.addStretch()
+        button_layout.addWidget(loader_container, 0, Qt.AlignHCenter)  # 水平居中
+        button_layout.addStretch()  # 右侧弹性空间，让按钮靠右
         button_layout.addWidget(self.connect_btn)
         button_layout.addWidget(self.cancel_btn)
 
@@ -653,6 +669,10 @@ class JoinRoomDialog(QDialog):
         self.scan_status_label.setText(I18n.tr('scanning_rooms'))
         self.scan_status_label.setStyleSheet("color: #339af0; font-size: 12px;")
 
+        # 显示加载动画
+        if self._loader:
+            self._loader.show()
+
         # 创建扫描发现服务
         self._scan_discovery = RoomDiscovery(self)
         self._scan_discovery.room_found.connect(self._on_scan_room_found)
@@ -698,6 +718,10 @@ class JoinRoomDialog(QDialog):
         self._is_scanning = False
         self.scan_btn.setEnabled(True)
 
+        # 隐藏加载动画
+        if self._loader:
+            self._loader.hide()
+
         if not self._discovered_rooms_list:
             self.scan_status_label.setText(I18n.tr('no_rooms_found'))
             self.scan_status_label.setStyleSheet("color: #868e96; font-size: 12px;")
@@ -711,6 +735,11 @@ class JoinRoomDialog(QDialog):
         """扫描错误"""
         self._is_scanning = False
         self.scan_btn.setEnabled(True)
+
+        # 隐藏加载动画
+        if self._loader:
+            self._loader.hide()
+
         self.scan_status_label.setText(error)
         self.scan_status_label.setStyleSheet("color: #ff6b6b; font-size: 12px;")
 

@@ -134,11 +134,11 @@ The core goal of sync is to keep file lists consistent across all endpoints. Fil
 
 ### 2026.6.29 R6
 
-**#06 Release v6.6.0.0**
-- Optimized join room operation experience
-- Updated About dialog content
-- Added room code availability check when creating room
-- Optimized availability check logic
+**#07**
+- Optimized UI display effects
+- Optimized display effects of certain controls on the sync interface
+- Fixed file corruption issue during concurrent transfers
+- Fixed program crash issue when disconnecting during transfer
 
 see [Changelog](https://github.com/LisseldeE/LANSyncBox/blob/main/CHANGELOG.md)
 

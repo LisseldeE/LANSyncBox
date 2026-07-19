@@ -48,9 +48,9 @@ class SyncClient(QObject):
         self.authenticated = False
         self.receiver = MessageReceiver()
         self.sync_folder = Config.get_room_folder(room_code)
-        self.receiving_file = None
-        self.receiving_file_handle = None  # 大文件句柄
-        
+        self.receiving_files = {}  # 大文件接收状态：{filename: {handle, file_size, mtime, received_size, temp_path}}
+        self._receiving_lock = threading.Lock()  # 保护 receiving_files 的线程锁
+
         # 创建传输队列，控制并发传输数量
         self.transfer_queue = TransferQueue(max_concurrent=3)
     
@@ -104,23 +104,27 @@ class SyncClient(QObject):
         """断开连接"""
         self.running = False
         self.authenticated = False
-        
+
         # 清理大文件接收状态：关闭句柄、删除临时文件
-        if self.receiving_file_handle:
-            try:
-                self.receiving_file_handle.close()
-            except Exception:
-                pass
-            self.receiving_file_handle = None
-        if self.receiving_file:
-            temp_path = self.receiving_file.get('temp_path')
+        # 先在锁内收集所有需要清理的条目，然后在锁外执行 IO 操作
+        with self._receiving_lock:
+            items_to_cleanup = list(self.receiving_files.items())
+            self.receiving_files.clear()
+
+        for filename, rf in items_to_cleanup:
+            handle = rf.get('handle')
+            if handle:
+                try:
+                    handle.close()
+                except Exception:
+                    pass
+            temp_path = rf.get('temp_path')
             if temp_path and os.path.exists(temp_path):
                 try:
                     os.remove(temp_path)
                 except Exception:
                     pass
-            self.receiving_file = None
-        
+
         if self.socket:
             try:
                 self.socket.close()
@@ -174,59 +178,75 @@ class SyncClient(QObject):
                 self.log_message.emit(f"拒绝非法路径: {e}")
                 return
             temp_file_path = file_path + '.tmp'  # 临时文件
-            
+
             os.makedirs(os.path.dirname(file_path), exist_ok=True)
-            
+
             # 创建临时文件句柄，准备流式写入
             try:
                 file_handle = open(temp_file_path, 'wb')
-                self.receiving_file = {
-                    'filename': filename,
-                    'file_size': file_size,
-                    'mtime': mtime,
-                    'received_size': 0,
-                    'temp_path': temp_file_path  # 记录临时文件路径
-                }
-                self.receiving_file_handle = file_handle
+                # 锁内只做字典操作
+                with self._receiving_lock:
+                    self.receiving_files[filename] = {
+                        'file_size': file_size,
+                        'mtime': mtime,
+                        'received_size': 0,
+                        'temp_path': temp_file_path,
+                        'handle': file_handle
+                    }
                 self.log_message.emit(f"开始接收大文件: {filename} ({self._format_size(file_size)})")
-                
+
                 # 发射开始接收信号
                 self.file_receive_start.emit(filename)
             except Exception as e:
                 self.log_message.emit(f"创建文件失败: {e}")
-        
+
         elif msg_type == MessageType.FILE_DATA:
             # 大文件数据块 - 流式写入
-            if self.receiving_file and self.receiving_file_handle:
+            # 锁内获取引用，锁外执行 IO
+            with self._receiving_lock:
+                rf = self.receiving_files.get(filename)
+                if rf and rf.get('handle'):
+                    handle = rf['handle']
+                else:
+                    handle = None
+
+            if handle:
                 chunk_index, chunk_data = content
                 try:
                     # 用 chunk_index 定位写入，避免乱序/重复/丢失导致文件损坏
                     offset = chunk_index * self.CHUNK_SIZE
-                    self.receiving_file_handle.seek(offset)
-                    self.receiving_file_handle.write(chunk_data)
-                    self.receiving_file['received_size'] += len(chunk_data)
+                    handle.seek(offset)
+                    handle.write(chunk_data)
+                    with self._receiving_lock:
+                        rf['received_size'] += len(chunk_data)
+                        received_kb = rf['received_size'] // 1024
+                        total_kb = rf['file_size'] // 1024
 
                     # 发送进度信号（转换为KB避免溢出）
-                    rf = self.receiving_file
-                    received_kb = rf['received_size'] // 1024
-                    total_kb = rf['file_size'] // 1024
                     self.file_receive_progress.emit(
-                        rf['filename'],
+                        filename,
                         received_kb,
                         total_kb
                     )
                 except Exception as e:
                     self.log_message.emit(f"写入数据块失败: {e}")
-        
+
         elif msg_type == MessageType.FILE_END:
             # 大文件传输结束 - 重命名临时文件为正式文件
-            if self.receiving_file and self.receiving_file_handle:
-                rf = self.receiving_file
-                file_handle = self.receiving_file_handle
+            # 锁内获取引用并删除条目，锁外执行 IO
+            with self._receiving_lock:
+                rf = self.receiving_files.get(filename)
+                if rf and rf.get('handle'):
+                    handle = rf['handle']
+                    del self.receiving_files[filename]
+                else:
+                    handle = None
+                    rf = None
 
+            if rf and handle:
                 # 关闭文件句柄
                 try:
-                    file_handle.close()
+                    handle.close()
                 except Exception:
                     pass
 
@@ -235,50 +255,42 @@ class SyncClient(QObject):
                 actual_size = os.path.getsize(temp_file_path) if os.path.exists(temp_file_path) else 0
                 if actual_size != rf['file_size']:
                     self.log_message.emit(
-                        f"大文件接收不完整: {rf['filename']} "
+                        f"大文件接收不完整: {filename} "
                         f"(实际 {actual_size}/期望 {rf['file_size']})，丢弃"
                     )
                     if os.path.exists(temp_file_path):
                         os.remove(temp_file_path)
-                    self.receiving_file = None
-                    self.receiving_file_handle = None
                     return
 
                 # 重命名临时文件为正式文件
                 try:
-                    final_file_path = self._safe_join(rf['filename'])
+                    final_file_path = self._safe_join(filename)
                 except ValueError as e:
                     self.log_message.emit(f"拒绝非法路径: {e}")
                     if os.path.exists(temp_file_path):
                         os.remove(temp_file_path)
-                    self.receiving_file = None
-                    self.receiving_file_handle = None
                     return
-                
+
                 try:
                     # 如果正式文件已存在，先删除
                     if os.path.exists(final_file_path):
                         os.remove(final_file_path)
-                    
+
                     # 重命名临时文件
                     os.rename(temp_file_path, final_file_path)
-                    
+
                     # 设置修改时间
                     os.utime(final_file_path, (rf['mtime'], rf['mtime']))
-                    
+
                     # 通知接收完成
-                    self.log_message.emit(f"大文件接收完成: {rf['filename']}")
-                    self.file_received.emit(rf['filename'])
-                    
+                    self.log_message.emit(f"大文件接收完成: {filename}")
+                    self.file_received.emit(filename)
+
                 except Exception as e:
                     self.log_message.emit(f"重命名文件失败: {e}")
                     # 删除临时文件
                     if os.path.exists(temp_file_path):
                         os.remove(temp_file_path)
-                
-                # 清理状态
-                self.receiving_file = None
-                self.receiving_file_handle = None
         
         elif msg_type == MessageType.DELETE:
             self._handle_delete(filename)
@@ -597,29 +609,32 @@ class SyncClient(QObject):
     def _handle_file_cancel(self, filename: str):
         """处理文件传输取消"""
         try:
-            # 如果正在接收该文件，停止接收
-            if self.receiving_file:
-                if self.receiving_file['filename'] == filename:
-                    # 关闭文件句柄
-                    if self.receiving_file_handle:
-                        try:
-                            self.receiving_file_handle.close()
-                        except Exception:
-                            pass
-                    
-                    # 删除临时文件
-                    temp_file_path = self.receiving_file['temp_path']
-                    if os.path.exists(temp_file_path):
-                        os.remove(temp_file_path)
-                    
-                    # 清理状态
-                    self.receiving_file = None
-                    self.receiving_file_handle = None
+            # 锁内获取引用并删除条目，锁外执行 IO
+            with self._receiving_lock:
+                rf = self.receiving_files.get(filename)
+                if rf:
+                    handle = rf.get('handle')
+                    del self.receiving_files[filename]
+                else:
+                    handle = None
 
-                    # 通知 UI 清理接收进度条
-                    self.file_receive_cancelled.emit(filename)
-                    self.log_message.emit(f"取消接收文件: {filename}")
-            
+            if rf:
+                # 关闭文件句柄
+                if handle:
+                    try:
+                        handle.close()
+                    except Exception:
+                        pass
+
+                # 删除临时文件
+                temp_file_path = rf.get('temp_path')
+                if temp_file_path and os.path.exists(temp_file_path):
+                    os.remove(temp_file_path)
+
+                # 通知 UI 清理接收进度条
+                self.file_receive_cancelled.emit(filename)
+                self.log_message.emit(f"取消接收文件: {filename}")
+
         except Exception as e:
             self.log_message.emit(f"取消文件传输失败: {e}")
     

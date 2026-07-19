@@ -158,7 +158,8 @@ class SyncWindow(QMainWindow):
         
         self.records_table.setAlternatingRowColors(True)
         self.records_table.setEditTriggers(QTableWidget.NoEditTriggers)
-        self.records_table.setSelectionBehavior(QTableWidget.SelectRows)
+        self.records_table.setSelectionMode(QTableWidget.NoSelection)  # 无选择模式
+        self.records_table.setFocusPolicy(Qt.NoFocus)  # 无焦点策略
         self.records_table.verticalHeader().setVisible(False)
         self.records_table.setShowGrid(False)
         self.records_table.verticalHeader().setDefaultSectionSize(25)
@@ -170,6 +171,9 @@ class SyncWindow(QMainWindow):
             QTableWidget::item {
                 padding: 2px;
                 border-bottom: 1px solid #e9ecef;
+            }
+            QTableWidget::item:selected {
+                background: transparent;
             }
             QHeaderView::section {
                 font-weight: bold;

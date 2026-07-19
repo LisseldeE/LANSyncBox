@@ -17,6 +17,7 @@ from config import Config, UserConfig
 from ui.widgets import AnimatedButton, BUTTON_STYLES
 from ui.join_room_dialog import RoomCodeInput
 from network.discovery import RoomDiscovery
+from ui.loading_animation import PageLoader, LoaderState
 
 
 class RoomCodeDisplay(QWidget):
@@ -85,6 +86,7 @@ class CreateRoomDialog(QDialog):
         self._regenerate_btn_connected_to_customize = False  # 按钮是否连接到自定义函数
         self._is_checking = False  # 是否正在检测房间号可用性
         self._discovery = None  # 房间发现服务
+        self._loader = None  # 加载动画组件
         self.init_ui()
     
     def init_ui(self):
@@ -178,20 +180,34 @@ class CreateRoomDialog(QDialog):
         # 按钮
         button_layout = QHBoxLayout()
         button_layout.setSpacing(10)
-        
+
         self.create_btn = AnimatedButton(I18n.tr('create'))
         self.create_btn.setFixedWidth(100)
         self.create_btn.clicked.connect(self.on_create)
         self.create_btn.setDefault(True)
         self.create_btn.setStyleSheet(BUTTON_STYLES['primary'])
         self.create_btn.setEnabled(False)  # 默认禁用，等待可用性检测完成
-        
+
         self.cancel_btn = AnimatedButton(I18n.tr('cancel'))
         self.cancel_btn.setFixedWidth(100)
         self.cancel_btn.clicked.connect(self.reject)
         self.cancel_btn.setStyleSheet(BUTTON_STYLES['secondary'])
-        
+
+        # 加载动画容器（固定尺寸，避免界面跳动）
+        loader_container = QWidget()
+        loader_container.setFixedSize(90, 36)
+        loader_layout = QHBoxLayout(loader_container)
+        loader_layout.setContentsMargins(0, 0, 0, 0)
+
+        # 加载动画（状态二：中间状态）
+        self._loader = PageLoader()
+        self._loader.set_state(LoaderState.INTERMEDIATE)
+        loader_layout.addWidget(self._loader)
+        self._loader.hide()  # 初始隐藏
+
         button_layout.addStretch()
+        button_layout.addWidget(loader_container, 0, Qt.AlignHCenter)  # 水平居中
+        button_layout.addStretch()  # 右侧弹性空间，让按钮靠右
         button_layout.addWidget(self.create_btn)
         button_layout.addWidget(self.cancel_btn)
         
@@ -342,6 +358,10 @@ class CreateRoomDialog(QDialog):
         self.status_label.setText(I18n.tr('checking_availability'))
         self.status_label.setStyleSheet("color: #339af0; font-size: 12px;")
 
+        # 显示加载动画
+        if self._loader:
+            self._loader.show()
+
         # 获取当前房间号
         current_code = self.room_code_display.get_room_code()
         if not current_code or len(current_code) != 6:
@@ -349,6 +369,9 @@ class CreateRoomDialog(QDialog):
             self.create_btn.setEnabled(True)
             self.status_label.setText(I18n.tr('room_code_available'))
             self.status_label.setStyleSheet("color: #51cf66; font-size: 12px;")
+            # 隐藏加载动画
+            if self._loader:
+                self._loader.hide()
             return
 
         # 创建房间发现服务检测是否已有主机使用该房间号
@@ -367,6 +390,10 @@ class CreateRoomDialog(QDialog):
         self.status_label.setText(I18n.tr('room_code_exists'))
         self.status_label.setStyleSheet("color: #ff6b6b; font-size: 12px;")
 
+        # 隐藏加载动画
+        if self._loader:
+            self._loader.hide()
+
         # 停止检测
         if self._discovery:
             self._discovery.stop_discovery()
@@ -379,6 +406,10 @@ class CreateRoomDialog(QDialog):
             return
 
         self._is_checking = False
+
+        # 隐藏加载动画
+        if self._loader:
+            self._loader.hide()
 
         if not rooms:
             # 没有发现房间，说明房间号可用
@@ -398,6 +429,11 @@ class CreateRoomDialog(QDialog):
     def _on_check_error(self, error: str):
         """检测错误"""
         self._is_checking = False
+
+        # 隐藏加载动画
+        if self._loader:
+            self._loader.hide()
+
         # 网络错误时，允许创建（可能是本地网络问题）
         self.create_btn.setEnabled(True)
         self.status_label.setText(I18n.tr('room_code_available'))
