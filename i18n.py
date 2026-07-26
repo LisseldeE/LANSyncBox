@@ -88,16 +88,16 @@ class I18n:
             "disconnect": "断开连接",
             "leave_room": "离开房间",
             "transfer_log": "传输日志",
+            "export_log": "导出日志",
             
             # 文件列表
             "file_name": "文件名",
-            "file_size": "大小",
+            "file_size": "统计",
             "file_modified": "修改时间",
-            "file_status": "状态",
             "drag_files_hint": "拖拽文件以操作",
             "folder": "文件夹",
             "file": "文件",
-            
+            "items": "项",
             # 文件状态
             "status_synced": "已同步",
             "status_connected": "已连接",
@@ -283,16 +283,16 @@ class I18n:
             "disconnect": "Disconnect",
             "leave_room": "Leave Room",
             "transfer_log": "Transfer Log",
+            "export_log": "Export Log",
             
             # File list
             "file_name": "Name",
-            "file_size": "Size",
+            "file_size": "Statistics",
             "file_modified": "Modified",
-            "file_status": "Status",
             "drag_files_hint": "Drag files to operate",
             "folder": "Folder",
             "file": "File",
-            
+            "items": "items",
             # File status
             "status_synced": "Synced",
             "status_connected": "Connected",

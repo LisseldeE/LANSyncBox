@@ -5,8 +5,10 @@ output/
 标记文件/
 SyncFolder/
 old/
+dist/
 
 *.exe
+*.bat
 
 1.txt
 config.json

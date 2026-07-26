@@ -23,7 +23,7 @@ class SyncClient(QObject):
     error_occurred = Signal(str)      # 错误
     auth_failed = Signal(str)         # 验证失败
     file_received = Signal(str)       # 收到文件
-    file_receive_start = Signal(str)  # 开始接收文件
+    file_receive_start = Signal(str, int)  # 开始接收文件 (filename, file_size)
     file_receive_progress = Signal(str, int, int)  # 文件接收进度 (filename, current, total)
     file_receive_cancelled = Signal(str)  # 文件接收被取消
     file_deleted = Signal(str)        # 文件已删除
@@ -34,8 +34,6 @@ class SyncClient(QObject):
     log_message = Signal(str)         # 日志消息
     file_list_received = Signal(list) # 收到文件列表
     
-    # 大文件阈值（1MB）
-    LARGE_FILE_THRESHOLD = 1024 * 1024
     # 数据块大小（64KB）
     CHUNK_SIZE = 64 * 1024
     
@@ -87,7 +85,7 @@ class SyncClient(QObject):
             self.running = True
             
             # 发送验证请求
-            auth_msg = Protocol.create_auth_request(self.room_code, self.password)
+            auth_msg = Protocol.create_auth_request(Config.APP_VERSION, self.room_code, self.password)
             self.socket.sendall(auth_msg)
             
             # 启动接收线程
@@ -165,11 +163,7 @@ class SyncClient(QObject):
         
         if msg_type == MessageType.AUTH_RESP:
             self._handle_auth_response(content)
-        
-        elif msg_type == MessageType.FILE:
-            # 小文件一次性传输
-            self._receive_file(filename, content, mtime)
-        
+
         elif msg_type == MessageType.FILE_BEGIN:
             # 大文件传输开始 - 使用临时文件
             try:
@@ -193,10 +187,9 @@ class SyncClient(QObject):
                         'temp_path': temp_file_path,
                         'handle': file_handle
                     }
-                self.log_message.emit(f"开始接收大文件: {filename} ({self._format_size(file_size)})")
 
-                # 发射开始接收信号
-                self.file_receive_start.emit(filename)
+                # 发射开始接收信号（传递文件大小）
+                self.file_receive_start.emit(filename, file_size)
             except Exception as e:
                 self.log_message.emit(f"创建文件失败: {e}")
 
@@ -283,7 +276,6 @@ class SyncClient(QObject):
                     os.utime(final_file_path, (rf['mtime'], rf['mtime']))
 
                     # 通知接收完成
-                    self.log_message.emit(f"大文件接收完成: {filename}")
                     self.file_received.emit(filename)
 
                 except Exception as e:
@@ -312,6 +304,10 @@ class SyncClient(QObject):
         elif msg_type == MessageType.FILE_CANCEL:
             # 文件传输取消
             self._handle_file_cancel(filename)
+
+        elif msg_type == MessageType.FILE_NOTIFY:
+            # 文件通知（静默，通知有新文件可用）
+            self._handle_file_notify(filename, file_size, mtime)
     
     def _handle_auth_response(self, content: bytes):
         """处理验证响应"""
@@ -334,28 +330,7 @@ class SyncClient(QObject):
             self.log_message.emit(f"验证响应解析错误: {e}")
             self.auth_failed.emit(f"验证响应解析错误: {e}")
             self.disconnect()
-    
-    def _receive_file(self, filename: str, content: bytes, mtime: float):
-        """接收文件"""
-        # 发送开始接收信号（用于标记同步）
-        self.file_receive_start.emit(filename)
-        
-        # 保存到本地（校验路径安全性）
-        try:
-            file_path = self._safe_join(filename)
-        except ValueError as e:
-            self.log_message.emit(f"拒绝非法路径: {e}")
-            return
-        os.makedirs(os.path.dirname(file_path), exist_ok=True)
-        
-        with open(file_path, 'wb') as f:
-            f.write(content)
-        
-        os.utime(file_path, (mtime, mtime))
-        
-        self.log_message.emit(f"收到文件: {filename}")
-        self.file_received.emit(filename)
-    
+
     def _handle_delete(self, filename: str):
         """处理删除指令"""
         try:
@@ -455,8 +430,8 @@ class SyncClient(QObject):
             self.log_message.emit(f"发送文件失败: {e}")
     
     def _send_file_to_server(self, filename: str, file_path: str, stop_event: threading.Event = None):
-        """发送文件给主机端
-        
+        """发送文件给主机端（流式传输）
+
         Args:
             filename: 文件名（相对路径）
             file_path: 文件绝对路径
@@ -465,35 +440,12 @@ class SyncClient(QObject):
         try:
             file_size = os.path.getsize(file_path)
             mtime = os.path.getmtime(file_path)
-            
-            self.log_message.emit(f"发送文件给主机端: {filename} ({self._format_size(file_size)})")
-            
-            # 选择传输方式
-            if file_size > self.LARGE_FILE_THRESHOLD:
-                # 大文件：流式分块传输
-                self._send_large_file_to_server(filename, file_path, file_size, mtime, stop_event)
-            else:
-                # 小文件：一次性传输
-                # 检查是否需要停止
-                if stop_event and stop_event.is_set():
-                    return
-                
-                with open(file_path, 'rb') as f:
-                    content = f.read()
-                message = Protocol.pack_message(
-                    MessageType.FILE, filename, file_size, False, content, mtime
-                )
-                if not self._send_with_cancel(self.socket, message, stop_event):
-                    # 被取消或连接异常，通知接收端清理
-                    try:
-                        self.socket.sendall(Protocol.create_file_cancel(filename))
-                    except Exception:
-                        pass
-                    self.log_message.emit(f"取消发送文件: {filename}")
-                    return
-            
-            self.log_message.emit(f"文件发送完成: {filename}")
-            
+
+            # 统一使用流式分块传输
+            self._send_large_file_to_server(filename, file_path, file_size, mtime, stop_event)
+
+            # UI层通过进度条显示完成状态，无需额外日志
+
         except Exception as e:
             self.log_message.emit(f"发送文件失败: {e}")
     
@@ -601,7 +553,7 @@ class SyncClient(QObject):
                 self.log_message.emit(f"取消发送文件: {filename}")
                 return
 
-            self.log_message.emit(f"大文件发送完成: {filename}")
+            pass  # UI层通过进度条显示完成状态，无需额外日志
             
         except Exception as e:
             self.log_message.emit(f"发送大文件失败: {e}")
@@ -637,6 +589,67 @@ class SyncClient(QObject):
 
         except Exception as e:
             self.log_message.emit(f"取消文件传输失败: {e}")
+
+    def _handle_file_notify(self, filename: str, file_size: int, mtime: float):
+        """处理文件通知（静默，通知有新文件可用）
+
+        Args:
+            filename: 文件名（相对路径）
+            file_size: 文件大小（字节）
+            mtime: 修改时间
+        """
+        try:
+            # 检查文件是否存在
+            try:
+                file_path = self._safe_join(filename)
+            except ValueError as e:
+                self.log_message.emit(f"拒绝非法路径: {e}")
+                return
+
+            need_request = False
+
+            if not os.path.exists(file_path):
+                # 文件不存在，需要请求
+                need_request = True
+            else:
+                # 文件存在，比较大小和修改时间
+                local_size = os.path.getsize(file_path)
+                local_mtime = os.path.getmtime(file_path)
+
+                # 检查文件大小是否不同
+                size_different = local_size != file_size
+
+                # 检查修改时间是否不同（允许2秒误差，兼容不同文件系统时间精度）
+                mtime_different = abs(local_mtime - mtime) > 2.0
+
+                # 如果大小或修改时间不同，需要请求
+                if size_different or mtime_different:
+                    need_request = True
+
+            if need_request:
+                # 发送 FILE_REQUEST_FORWARD 请求
+                self._request_file_forward(filename)
+            # else: 文件已存在且相同，静默跳过
+
+        except Exception as e:
+            self.log_message.emit(f"处理文件通知失败: {e}")
+
+    def _request_file_forward(self, filename: str):
+        """请求转发文件
+
+        Args:
+            filename: 文件名（相对路径）
+        """
+        try:
+            if not self.authenticated:
+                return
+
+            # 发送 FILE_REQUEST_FORWARD 消息
+            request_msg = Protocol.pack_message(MessageType.FILE_REQUEST_FORWARD, filename)
+            self.socket.sendall(request_msg)
+
+        except Exception as e:
+            self.log_message.emit(f"请求转发文件失败: {e}")
     
     # ========== 发送方法 ==========
     
@@ -644,9 +657,9 @@ class SyncClient(QObject):
         """
         发送文件给服务器（连接端本地添加文件时调用）
         这是连接端添加文件时的同步入口
-        
+
         使用流式传输，避免大文件占用过多内存
-        
+
         Args:
             filepath: 文件绝对路径
             stop_event: 停止标志（可选，用于取消传输）
@@ -654,34 +667,25 @@ class SyncClient(QObject):
         if not self.authenticated:
             self.log_message.emit("未连接，无法发送文件")
             return
-        
+
         try:
             # 检查是否需要停止
             if stop_event and stop_event.is_set():
                 return
-            
+
             # 检查是否是文件夹
             if os.path.isdir(filepath):
                 # 发送创建目录
                 self.send_dir_create(filepath)
                 return
-            
+
             file_size = os.path.getsize(filepath)
             mtime = os.path.getmtime(filepath)
             rel_path = os.path.relpath(filepath, self.sync_folder).replace('\\', '/')
-            
-            self.log_message.emit(f"发送文件: {rel_path} ({self._format_size(file_size)})")
-            
-            # 选择传输方式
-            if file_size > self.LARGE_FILE_THRESHOLD:
-                # 大文件：流式分块传输
-                self._send_large_file_streaming(rel_path, filepath, file_size, mtime, stop_event)
-            else:
-                # 小文件：一次性传输
-                with open(filepath, 'rb') as f:
-                    content = f.read()
-                self._send_file(rel_path, content, mtime, stop_event)
-            
+
+            # 统一使用流式分块传输
+            self._send_large_file_streaming(rel_path, filepath, file_size, mtime, stop_event)
+
         except Exception as e:
             self.log_message.emit(f"发送文件失败: {e}")
     
@@ -762,7 +766,7 @@ class SyncClient(QObject):
         
         # 发射发送完成信号
         self.file_sent.emit(filename)
-        self.log_message.emit(f"大文件发送完成: {filename}")
+        pass  # UI层通过进度条显示完成状态，无需额外日志
     
     def _format_size(self, size: int) -> str:
         """格式化文件大小"""
@@ -773,70 +777,56 @@ class SyncClient(QObject):
         return f"{size:.1f} PB"
     
     def _send_file(self, filename: str, content: bytes, mtime: float, stop_event: threading.Event = None):
-        """发送文件（内部方法）"""
+        """发送文件（内部方法，流式传输）"""
         file_size = len(content)
-        
-        # 选择传输方式
-        if file_size > self.LARGE_FILE_THRESHOLD:
-            # 大文件分块传输
-            message = Protocol.pack_message(
-                MessageType.FILE_BEGIN, filename, file_size, False, b'', mtime
-            )
-            if not self._send_with_cancel(self.socket, message, stop_event):
-                try:
-                    self.socket.sendall(Protocol.create_file_cancel(filename))
-                except Exception:
-                    pass
-                self.log_message.emit(f"取消发送文件: {filename}")
-                return
-            
-            # 发送数据块
-            sent_size = 0
-            for i in range(0, file_size, self.CHUNK_SIZE):
-                if stop_event and stop_event.is_set():
-                    try:
-                        self.socket.sendall(Protocol.create_file_cancel(filename))
-                    except Exception:
-                        pass
-                    self.log_message.emit(f"取消发送文件: {filename}")
-                    return
-                chunk = content[i:i + self.CHUNK_SIZE]
-                chunk_msg = Protocol.create_file_data_message(filename, i // self.CHUNK_SIZE, chunk)
-                if not self._send_with_cancel(self.socket, chunk_msg, stop_event):
-                    try:
-                        self.socket.sendall(Protocol.create_file_cancel(filename))
-                    except Exception:
-                        pass
-                    self.log_message.emit(f"取消发送文件: {filename}")
-                    return
-                sent_size += len(chunk)
 
-                # 发射发送进度信号（转换为KB避免溢出）
-                sent_kb = sent_size // 1024
-                total_kb = file_size // 1024
-                self.file_send_progress.emit(filename, sent_kb, total_kb)
-            
-            # 发送结束标记
-            end_msg = Protocol.create_file_end_message(filename, file_size, mtime)
-            if not self._send_with_cancel(self.socket, end_msg, stop_event):
+        # 统一使用流式分块传输
+        message = Protocol.pack_message(
+            MessageType.FILE_BEGIN, filename, file_size, False, b'', mtime
+        )
+        if not self._send_with_cancel(self.socket, message, stop_event):
+            try:
+                self.socket.sendall(Protocol.create_file_cancel(filename))
+            except Exception:
+                pass
+            self.log_message.emit(f"取消发送文件: {filename}")
+            return
+
+        # 发送数据块
+        sent_size = 0
+        for i in range(0, file_size, self.CHUNK_SIZE):
+            if stop_event and stop_event.is_set():
                 try:
                     self.socket.sendall(Protocol.create_file_cancel(filename))
                 except Exception:
                     pass
                 self.log_message.emit(f"取消发送文件: {filename}")
                 return
-        else:
-            # 小文件一次性传输
-            message = Protocol.pack_message(
-                MessageType.FILE, filename, file_size, False, content, mtime
-            )
-            if not self._send_with_cancel(self.socket, message, stop_event):
+            chunk = content[i:i + self.CHUNK_SIZE]
+            chunk_msg = Protocol.create_file_data_message(filename, i // self.CHUNK_SIZE, chunk)
+            if not self._send_with_cancel(self.socket, chunk_msg, stop_event):
                 try:
                     self.socket.sendall(Protocol.create_file_cancel(filename))
                 except Exception:
                     pass
                 self.log_message.emit(f"取消发送文件: {filename}")
                 return
+            sent_size += len(chunk)
+
+            # 发射发送进度信号（转换为KB避免溢出）
+            sent_kb = sent_size // 1024
+            total_kb = file_size // 1024
+            self.file_send_progress.emit(filename, sent_kb, total_kb)
+
+        # 发送结束标记
+        end_msg = Protocol.create_file_end_message(filename, file_size, mtime)
+        if not self._send_with_cancel(self.socket, end_msg, stop_event):
+            try:
+                self.socket.sendall(Protocol.create_file_cancel(filename))
+            except Exception:
+                pass
+            self.log_message.emit(f"取消发送文件: {filename}")
+            return
     
     def send_delete(self, filepath: str):
         """发送删除指令"""

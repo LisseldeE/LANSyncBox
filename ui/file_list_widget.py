@@ -526,23 +526,21 @@ class FileListWidget(QWidget):
         
         # 文件列表表格
         self.table = DragableTableWidget()
-        self.table.setColumnCount(4)
+        self.table.setColumnCount(3)
         self.table.setHorizontalHeaderLabels([
             I18n.tr('file_name'),
             I18n.tr('file_size'),
-            I18n.tr('file_modified'),
-            I18n.tr('file_status')
+            I18n.tr('file_modified')
         ])
-        
+
         # 禁用编辑（避免双击时进入编辑模式）
         self.table.setEditTriggers(QAbstractItemView.NoEditTriggers)
-        
+
         # 设置表头
         header = self.table.horizontalHeader()
         header.setSectionResizeMode(0, QHeaderView.Stretch)
         header.setSectionResizeMode(1, QHeaderView.ResizeToContents)
         header.setSectionResizeMode(2, QHeaderView.ResizeToContents)
-        header.setSectionResizeMode(3, QHeaderView.ResizeToContents)
         
         # 连接拖拽信号
         self.table.files_dragged.connect(self._handle_files_dragged)
@@ -557,29 +555,41 @@ class FileListWidget(QWidget):
         self.table.customContextMenuRequested.connect(self.show_context_menu)
         
         layout.addWidget(self.table)
-        
-        # 拖拽提示
-        drag_hint = QLabel(I18n.tr('drag_files_hint'))
-        drag_hint.setAlignment(Qt.AlignCenter)
-        drag_hint.setStyleSheet("color: #868e96; font-size: 12px; padding: 5px;")
-        layout.addWidget(drag_hint)
-        
+
+        # 拖拽提示悬浮层（透明，不影响表格操作）
+        self.drag_hint_label = QLabel(I18n.tr('drag_files_hint'))
+        self.drag_hint_label.setAlignment(Qt.AlignCenter)
+        self.drag_hint_label.setStyleSheet("color: #868e96; font-size: 14px; background: transparent;")
+        self.drag_hint_label.setAttribute(Qt.WA_TransparentForMouseEvents)  # 不接收鼠标事件
+        self.drag_hint_label.setParent(self.table)  # 设置父控件为表格
+        self.drag_hint_label.hide()  # 默认隐藏
+
         # 更新路径显示
         self.update_path_display()
     
     def load_files(self):
         """加载文件列表"""
         self.table.setRowCount(0)
-        
+
         if not self.current_path.exists():
+            self.drag_hint_label.hide()
             return
-        
+
         # 获取文件列表
         items = list(self.current_path.iterdir())
-        
+
         # 排序：文件夹在前，然后按名称排序
         items.sort(key=lambda x: (not x.is_dir(), x.name.lower()))
-        
+
+        # 根据文件列表显示/隐藏拖拽提示
+        if not items:
+            # 延迟显示悬浮提示（确保表格已渲染）
+            from PySide6.QtCore import QTimer
+            QTimer.singleShot(100, self._show_drag_hint)
+        else:
+            # 隐藏悬浮提示
+            self.drag_hint_label.hide()
+
         # 添加文件到表格
         for item in items:
             row = self.table.rowCount()
@@ -593,9 +603,14 @@ class FileListWidget(QWidget):
                 name_item.setIcon(QIcon.fromTheme("text-x-generic"))
             self.table.setItem(row, 0, name_item)
             
-            # 文件大小
+            # 文件大小/项目数量
             if item.is_dir():
-                size_text = "<DIR>"
+                # 显示文件夹内的项目数量
+                try:
+                    count = len(list(item.iterdir()))
+                    size_text = f"{count} {I18n.tr('items')}"
+                except:
+                    size_text = "-"
             else:
                 size = item.stat().st_size
                 size_text = self.format_size(size)
@@ -608,15 +623,41 @@ class FileListWidget(QWidget):
             mtime_text = mtime.strftime("%Y-%m-%d %H:%M:%S")
             mtime_item = QTableWidgetItem(mtime_text)
             self.table.setItem(row, 2, mtime_item)
-            
-            # 同步状态
-            status_item = QTableWidgetItem(I18n.tr('status_synced'))
-            status_item.setForeground(Qt.green)
-            self.table.setItem(row, 3, status_item)
-            
+
             # 保存路径信息
             name_item.setData(Qt.UserRole, str(item))
-    
+
+    def _show_drag_hint(self):
+        """显示拖拽提示悬浮层"""
+        if not self.table.isVisible():
+            self.drag_hint_label.hide()
+            return
+
+        # 居中显示在表格中央
+        table_rect = self.table.rect()
+        if table_rect.width() == 0 or table_rect.height() == 0:
+            # 表格大小为0，稍后再试
+            from PySide6.QtCore import QTimer
+            QTimer.singleShot(100, self._show_drag_hint)
+            return
+
+        hint_size = self.drag_hint_label.sizeHint()
+
+        # 计算居中位置
+        x = (table_rect.width() - hint_size.width()) // 2
+        y = (table_rect.height() - hint_size.height()) // 2
+
+        # 确保标签有合适的大小
+        self.drag_hint_label.setGeometry(x, y, hint_size.width(), hint_size.height())
+        self.drag_hint_label.show()
+        self.drag_hint_label.raise_()  # 确保在最上层
+
+    def resizeEvent(self, event):
+        """窗口大小改变时重新定位悬浮提示"""
+        super().resizeEvent(event)
+        if self.drag_hint_label.isVisible():
+            self._show_drag_hint()
+
     def format_size(self, size: int) -> str:
         """格式化文件大小"""
         for unit in ['B', 'KB', 'MB', 'GB', 'TB']:

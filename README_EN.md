@@ -134,11 +134,8 @@ The core goal of sync is to keep file lists consistent across all endpoints. Fil
 
 ### 2026.6.29 R6
 
-**#07**
-- Optimized UI display effects
-- Optimized display effects of certain controls on the sync interface
-- Fixed file corruption issue during concurrent transfers
-- Fixed program crash issue when disconnecting during transfer
+**#08**
+- Major optimization updates
 
 see [Changelog](https://github.com/LisseldeE/LANSyncBox/blob/main/CHANGELOG.md)
 

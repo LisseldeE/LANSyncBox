@@ -11,7 +11,7 @@ from typing import Tuple, Optional
 
 class MessageType:
     """消息类型"""
-    FILE = 0x01           # 文件传输（小文件一次性）
+    FILE = 0x01           # 文件传输（已废弃，保留向后兼容）
     DELETE = 0x02         # 删除指令
     AUTH_REQ = 0x03       # 验证请求
     AUTH_RESP = 0x04      # 验证响应
@@ -19,11 +19,13 @@ class MessageType:
     FILE_LIST_RESP = 0x09 # 响应文件列表（JSON格式）
     FILE_REQUEST = 0x0A   # 请求特定文件
     HEARTBEAT = 0x07      # 心跳
-    FILE_BEGIN = 0x0C     # 大文件传输开始
-    FILE_DATA = 0x0D      # 大文件数据块
-    FILE_END = 0x0E       # 大文件传输结束
+    FILE_BEGIN = 0x0C     # 文件传输开始（流式）
+    FILE_DATA = 0x0D      # 文件数据块
+    FILE_END = 0x0E       # 文件传输结束
     DIR_CREATE = 0x0B     # 目录创建
     FILE_CANCEL = 0x0F    # 取消文件传输
+    FILE_NOTIFY = 0x10    # 文件通知（静默，通知连接端有新文件）
+    FILE_REQUEST_FORWARD = 0x11  # 请求转发文件
 
 
 class Protocol:
@@ -112,11 +114,11 @@ class Protocol:
         return Protocol.pack_message(0x05, '', len(content), False, content)  # 0x05 = RENAME
     
     @staticmethod
-    def create_auth_request(room_code: str, password: str = '') -> bytes:
-        """创建验证请求"""
+    def create_auth_request(version: str, room_code: str, password: str = '') -> bytes:
+        """创建验证请求（包含版本号）"""
         import hashlib
         password_hash = hashlib.sha256(password.encode()).hexdigest() if password else ''
-        content = f"{room_code}:{password_hash}".encode('utf-8')
+        content = f"{version}:{room_code}:{password_hash}".encode('utf-8')
         return Protocol.pack_message(MessageType.AUTH_REQ, '', len(content), False, content)
     
     @staticmethod
@@ -193,18 +195,19 @@ class MessageReceiver:
         """检查是否有完整的消息"""
         if len(self.buffer) < Protocol.HEADER_SIZE:
             return False
-        
+
         try:
             msg_type, filename_len, file_size, _, _ = Protocol.unpack_header(self.buffer)
-            
-            # FILE_BEGIN、FILE_END、FILE_LIST_REQ、FILE_REQUEST、FILE_CANCEL 消息没有 content
-            if msg_type in [MessageType.FILE_BEGIN, MessageType.FILE_END, 
-                           MessageType.FILE_LIST_REQ, MessageType.FILE_REQUEST, 
-                           MessageType.FILE_CANCEL]:
+
+            # 这些消息类型没有 content（即使 file_size 参数不为 0）
+            if msg_type in [MessageType.FILE_BEGIN, MessageType.FILE_END,
+                           MessageType.FILE_LIST_REQ, MessageType.FILE_REQUEST,
+                           MessageType.FILE_CANCEL, MessageType.FILE_NOTIFY,
+                           MessageType.FILE_REQUEST_FORWARD]:
                 content_size = 0
             else:
                 content_size = file_size
-            
+
             required_size = Protocol.HEADER_SIZE + filename_len + content_size
             return len(self.buffer) >= required_size
         except Exception:
@@ -214,38 +217,39 @@ class MessageReceiver:
         """获取一条完整消息"""
         if not self.has_complete_message():
             return None
-        
+
         # 解析头部
         msg_type, filename_len, file_size, mtime, hide_flag = Protocol.unpack_header(self.buffer)
-        
+
         # 根据消息类型判断 content 大小
-        if msg_type in [MessageType.FILE_BEGIN, MessageType.FILE_END, 
-                       MessageType.FILE_LIST_REQ, MessageType.FILE_REQUEST, 
-                       MessageType.FILE_CANCEL]:
+        if msg_type in [MessageType.FILE_BEGIN, MessageType.FILE_END,
+                       MessageType.FILE_LIST_REQ, MessageType.FILE_REQUEST,
+                       MessageType.FILE_CANCEL, MessageType.FILE_NOTIFY,
+                       MessageType.FILE_REQUEST_FORWARD]:
             content_size = 0
         else:
             content_size = file_size
-        
+
         # 提取文件名和内容
         filename = self.buffer[Protocol.HEADER_SIZE:Protocol.HEADER_SIZE + filename_len].decode('utf-8')
         content_start = Protocol.HEADER_SIZE + filename_len
         content_end = content_start + content_size
         content = self.buffer[content_start:content_end]
-        
+
         # 移除已处理的数据
         self.buffer = self.buffer[content_end:]
-        
+
         # 对于FILE_DATA消息，解析块索引
         if msg_type == MessageType.FILE_DATA:
             chunk_index = struct.unpack('!I', content[:4])[0]
             chunk_data = content[4:]
             return msg_type, filename, file_size, mtime, hide_flag, (chunk_index, chunk_data)
-        
+
         # 对于FILE_LIST_RESP消息，解析JSON
         if msg_type == MessageType.FILE_LIST_RESP:
             file_list = json.loads(content.decode('utf-8'))
             return msg_type, filename, file_size, mtime, hide_flag, file_list
-        
+
         return msg_type, filename, file_size, mtime, hide_flag, content
     
     def clear(self):

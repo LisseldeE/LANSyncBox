@@ -126,20 +126,46 @@ class SyncWindow(QMainWindow):
         disconnect_btn.clicked.connect(self.on_disconnect)
         disconnect_btn.setStyleSheet(BUTTON_STYLES['danger'])
         info_layout.addWidget(disconnect_btn)
-        
+
         left_layout.addWidget(info_frame)
-        
-        # 左侧下方：同步记录表格
+
+        # 左侧下方：同步记录表格（使用 stretch=1 自动扩展）
         log_frame = QFrame()
         log_frame.setFrameShape(QFrame.StyledPanel)
         log_layout = QVBoxLayout(log_frame)
         log_layout.setContentsMargins(10, 10, 10, 10)
         log_layout.setSpacing(5)
-        
-        # 日志标题
+
+        # 日志标题和导出按钮（水平布局）
+        log_header_layout = QHBoxLayout()
+        log_header_layout.setSpacing(10)
+
         log_title = QLabel(I18n.tr('transfer_log'))
         log_title.setStyleSheet("font-weight: bold;")
-        log_layout.addWidget(log_title)
+        log_header_layout.addWidget(log_title)
+
+        log_header_layout.addStretch()
+
+        # 导出日志按钮
+        export_btn = QPushButton(I18n.tr('export_log'))
+        export_btn.setFlat(True)
+        export_btn.setCursor(Qt.PointingHandCursor)
+        export_btn.setStyleSheet("""
+            QPushButton {
+                font-size: 12px;
+                color: #495057;
+                border: none;
+                padding: 0px;
+                background: transparent;
+            }
+            QPushButton:hover {
+                color: #228be6;
+            }
+        """)
+        export_btn.clicked.connect(self._export_log)
+        log_header_layout.addWidget(export_btn)
+
+        log_layout.addLayout(log_header_layout)
         
         # 同步记录表格
         self.records_table = QTableWidget()
@@ -153,8 +179,9 @@ class SyncWindow(QMainWindow):
         header = self.records_table.horizontalHeader()
         header.setSectionResizeMode(0, QHeaderView.Fixed)
         header.setSectionResizeMode(1, QHeaderView.Stretch)
-        
+
         self.records_table.setColumnWidth(0, 60)
+        self.records_table.setColumnWidth(1, 400)  # 信息列宽度，确保进度文本不被截断
         
         self.records_table.setAlternatingRowColors(True)
         self.records_table.setEditTriggers(QTableWidget.NoEditTriggers)
@@ -182,11 +209,11 @@ class SyncWindow(QMainWindow):
                 border-bottom: 1px solid #dee2e6;
             }
         """)
-        
         log_layout.addWidget(self.records_table)
-        
-        left_layout.addWidget(log_frame)
-        
+
+        # 添加 log_frame 到左侧布局，使用 stretch=1 自动扩展
+        left_layout.addWidget(log_frame, 1)
+
         splitter.addWidget(left_widget)
         
         # 右侧：文件列表
@@ -262,16 +289,24 @@ class SyncWindow(QMainWindow):
             # 主机端发送文件的进度信号
             self.server.file_send_progress.connect(self.on_file_send_progress)
             self.server.file_sent.connect(self.on_file_sent)
-            
-            if self.server.start():
-                self._add_record(f"端口: {self.server.port}", "启动", "")
-                
-                # 启动房间响应服务（传递实际使用的端口）
-                self.responder = RoomResponder(self)
-                if self.responder.start(self.room_code, self.server.port):
-                    pass
+            # 主机端转发文件的进度信号（包含目标IP）
+            self.server.file_forward_progress.connect(self.on_file_forward_progress)
+
+            # 先启动房间响应服务（占用发现端口）
+            self.responder = RoomResponder(self)
+            if not self.responder.start(self.room_code):
+                self._add_record("启动发现服务失败", "错误", "")
+                return
+            self._add_record(f"发现服务 端口: {self.responder.discovery_port}", "启动", "")
+
+            # 然后启动服务器（避开已占用的发现端口）
+            if self.server.start(exclude_port=self.responder.discovery_port):
+                self._add_record(f"服务器 端口: {self.server.port}", "启动", "")
+                # 更新发现服务的同步端口
+                self.responder.port = self.server.port
             else:
                 self._add_record("启动失败", "错误", "")
+                self.responder.stop()
         else:
             # 客户端：连接到服务器
             if self._existing_client is not None:
@@ -524,25 +559,50 @@ class SyncWindow(QMainWindow):
         except Exception:
             pass
     
-    def on_file_receive_start(self, filename: str):
+    def on_file_receive_start(self, filename: str, file_size: int):
         """开始接收远程文件（线程安全）"""
         # 使用 QMetaObject.invokeMethod 确保在主线程执行
         QMetaObject.invokeMethod(self, "_do_file_receive_start", Qt.QueuedConnection,
-                                 Q_ARG(str, filename))
+                                 Q_ARG(str, filename), Q_ARG(int, file_size))
     
-    @Slot(str)
-    def _do_file_receive_start(self, filename: str):
-        """实际执行：开始接收远程文件"""
+    @Slot(str, int)
+    def _do_file_receive_start(self, filename: str, file_size: int):
+        """实际执行：开始接收远程文件
+
+        Args:
+            filename: 文件名（相对路径）
+            file_size: 文件大小（字节）
+        """
         # 标记文件正在同步，避免循环同步
         file_path = str(self.room_folder / filename)
         self.file_list.mark_syncing(file_path)
 
         # 清除取消标记，让新接收能添加新进度条
         self._cancelled_transfers.discard(filename)
-        self._transfer_rows.pop(filename, None)
 
-        # 在表格中添加进度条
-        self._add_transfer_progress(filename, 0, 0)
+        # 所有文件都显示进度条（统一逻辑）
+        # 如果已有同名进度行（可能是发送进度残留），重置为接收进度行
+        if filename in self._transfer_rows:
+            transfer_info = self._transfer_rows[filename]
+            row = transfer_info['row']
+            # 更新操作列为"接收"
+            action_item = self.records_table.item(row, 0)
+            if action_item:
+                action_item.setText("接收")
+            # 重置信息列为"接收 文件名"
+            from pathlib import Path
+            display_name = Path(filename).name
+            if len(display_name) > 25:
+                display_name = display_name[:22] + "..."
+            info_item = self.records_table.item(row, 1)
+            if info_item:
+                info_item.setText(f"接收 {display_name}")
+            # 更新传输信息
+            transfer_info['action'] = '接收'
+            transfer_info['target_ip'] = ''
+        else:
+            # 在表格中添加进度行（接收）
+            self._add_transfer_progress(filename, 0, 0, "接收")
     
     def on_file_receive_progress(self, filename: str, current: int, total: int):
         """文件接收进度（线程安全）"""
@@ -635,13 +695,20 @@ class SyncWindow(QMainWindow):
     
     @Slot(str, int, int)
     def _do_file_send_progress(self, filename: str, current: int, total: int):
-        """实际执行：更新主机端发送进度"""
+        """实际执行：更新发送进度
+
+        Args:
+            filename: 文件名（相对路径）
+            current: 当前已发送的KB数
+            total: 总KB数
+        """
         # 忽略已取消传输的残留进度信号
         if filename in self._cancelled_transfers:
             return
-        # 如果是第一次，添加进度条
+
+        # 所有文件都显示进度条（统一逻辑）
         if filename not in self._transfer_rows:
-            self._add_transfer_progress(filename, current, total)
+            self._add_transfer_progress(filename, current, total, "发送")
         else:
             # 更新进度
             self._update_transfer_progress(filename, current, total)
@@ -654,15 +721,47 @@ class SyncWindow(QMainWindow):
     
     @Slot(str)
     def _do_file_sent(self, filename: str):
-        """实际执行：主机端发送文件完成"""
-        # 完成进度条
-        self._finish_transfer_progress(filename)
+        """实际执行：发送文件完成"""
+        # 完成进度条（发送）
+        self._finish_transfer_progress(filename, "发送")
         # 只有当没有其他文件正在同步时，才更新状态为"已连接"
         if not self._transfer_rows:
             if self.is_host:
                 self._update_clients_count()
             else:
                 self.status_label.setText(f'<span style="color: green;">{I18n.tr("status_connected")}</span>')
+
+    def on_file_forward_progress(self, target_ip: str, filename: str, current: int, total: int):
+        """主机端转发文件进度（线程安全）"""
+        # 使用 QMetaObject.invokeMethod 确保在主线程执行
+        QMetaObject.invokeMethod(self, "_do_file_forward_progress", Qt.QueuedConnection,
+                                 Q_ARG(str, target_ip), Q_ARG(str, filename), Q_ARG(int, current), Q_ARG(int, total))
+
+    @Slot(str, str, int, int)
+    def _do_file_forward_progress(self, target_ip: str, filename: str, current: int, total: int):
+        """实际执行：更新转发进度
+
+        Args:
+            target_ip: 目标IP地址
+            filename: 文件名（相对路径）
+            current: 当前已发送的KB数
+            total: 总KB数
+        """
+        # 忽略已取消传输的残留进度信号
+        # 使用复合键 client_id:filename 来判断是否已取消
+        # 但这里只有 target_ip，所以需要构建复合键（但这可能不准确）
+        # 暂时使用 filename 判断
+        if filename in self._cancelled_transfers:
+            return
+
+        # 所有文件都显示进度条（统一逻辑）
+        # 使用复合键来区分不同目标的转发
+        transfer_key = f"{target_ip}:{filename}"
+        if transfer_key not in self._transfer_rows:
+            self._add_transfer_progress(filename, current, total, "发送", target_ip)
+        else:
+            # 更新进度
+            self._update_transfer_progress(filename, current, total, target_ip)
     
     def on_remote_file_renamed(self, old_name: str, new_name: str):
         """远程文件已重命名（线程安全）"""
@@ -744,33 +843,91 @@ class SyncWindow(QMainWindow):
         # 限制记录数量
         while self.records_table.rowCount() > 100:
             self.records_table.removeRow(0)
-    
-    def _add_transfer_progress(self, filename: str, current: int, total: int):
-        """添加传输进度条"""
+
+    def _export_log(self):
+        """导出传输日志到文件"""
+        from datetime import datetime
+        from PySide6.QtWidgets import QFileDialog
+
+        # 生成默认文件名：日志[当前日期和时间].txt
+        now = datetime.now()
+        default_name = f"日志[{now.strftime('%Y-%m-%d %H-%M-%S')}].txt"
+
+        # 弹出保存对话框
+        file_path, _ = QFileDialog.getSaveFileName(
+            self,
+            I18n.tr('export_log'),
+            default_name,
+            "文本文件 (*.txt);;所有文件 (*)"
+        )
+
+        if not file_path:
+            return  # 用户取消
+
+        try:
+            # 收集表格内容
+            lines = []
+            for row in range(self.records_table.rowCount()):
+                action_item = self.records_table.item(row, 0)
+                info_item = self.records_table.item(row, 1)
+
+                action = action_item.text() if action_item else ""
+                info = info_item.text() if info_item else ""
+
+                # 格式化为一行
+                lines.append(f"{action}\t{info}")
+
+            # 写入文件
+            with open(file_path, 'w', encoding='utf-8') as f:
+                f.write('\n'.join(lines))
+
+            self._add_record("", "导出", f"日志已导出: {file_path}")
+
+        except Exception as e:
+            from PySide6.QtWidgets import QMessageBox
+            QMessageBox.warning(self, I18n.tr('export_log'), f"导出失败: {e}")
+
+    def _add_transfer_progress(self, filename: str, current: int, total: int, action: str = "接收", target_ip: str = ""):
+        """添加传输进度行（使用进度条控件）
+
+        Args:
+            filename: 文件名（相对路径）
+            current: 当前进度（KB）
+            total: 总大小（KB）
+            action: 操作类型（"发送" / "接收"）
+            target_ip: 目标IP（可选，用于转发时显示）
+        """
         from pathlib import Path
-        
+
         # 截断文件名
         display_name = Path(filename).name
         if len(display_name) > 25:
             display_name = display_name[:22] + "..."
-        
+
+        # 构建显示文本（开始状态）
+        if target_ip:
+            display_text = f"发送至 {target_ip} {display_name}"
+        else:
+            display_text = f"{action} {display_name}"
+
         # 添加新行
         row_count = self.records_table.rowCount()
         self.records_table.insertRow(row_count)
-        
+
         # 操作
-        action_item = QTableWidgetItem("接收")
+        action_item = QTableWidgetItem(action)
         action_item.setTextAlignment(Qt.AlignCenter)
         self.records_table.setItem(row_count, 0, action_item)
-        
-        # 进度条（放在第二列）
+
+        # 创建进度条控件
         progress_bar = QProgressBar()
-        progress_bar.setMinimum(0)
-        progress_bar.setMaximum(100)
+        progress_bar.setRange(0, 100)
         progress_bar.setValue(0)
-        progress_bar.setTextVisible(True)
-        progress_bar.setFormat(f"{display_name} - 0%")
-        progress_bar.setAlignment(Qt.AlignLeft | Qt.AlignVCenter)
+        progress_bar.setTextVisible(True)  # 显示百分比文本
+        progress_bar.setFormat(f"{display_text} - %p%")  # 显示"文件名 - 百分比%"
+        progress_bar.setAlignment(Qt.AlignLeft | Qt.AlignVCenter)  # 文本左对齐
+        
+        # 设置进度条样式（绿色填充，背景透明）
         progress_bar.setStyleSheet("""
             QProgressBar {
                 border: none;
@@ -781,38 +938,64 @@ class SyncWindow(QMainWindow):
                 background-color: #51cf66;
             }
         """)
+
+        # 设置进度条到表格的第二列
         self.records_table.setCellWidget(row_count, 1, progress_bar)
-        
-        # 记录行号
-        self._transfer_rows[filename] = row_count
-        
+
+        # 调整行高以适应进度条
+        self.records_table.setRowHeight(row_count, 25)
+
+        # 构建复合键（如果有目标IP，使用复合键；否则使用文件名）
+        transfer_key = f"{target_ip}:{filename}" if target_ip else filename
+
+        # 记录行号和传输信息（用于后续更新）
+        self._transfer_rows[transfer_key] = {
+            'row': row_count,
+            'action': action,
+            'target_ip': target_ip,
+            'filename': filename
+        }
+
         # 滚动到底部
         self.records_table.scrollToBottom()
-    
-    def _update_transfer_progress(self, filename: str, current: int, total: int):
-        """更新传输进度
+
+    def _update_transfer_progress(self, filename: str, current: int, total: int, target_ip: str = ""):
+        """更新传输进度（更新进度条控件）
 
         Args:
-            filename: 文件名
+            filename: 文件名（相对路径）
             current: 当前已传输的KB数
             total: 总KB数
+            target_ip: 目标IP（可选，用于转发时显示）
         """
+        # 构建复合键（如果有目标IP，使用复合键；否则使用文件名）
+        transfer_key = f"{target_ip}:{filename}" if target_ip else filename
+
         # 忽略已取消传输的残留进度信号
-        if filename in self._cancelled_transfers:
+        if transfer_key in self._cancelled_transfers:
             return
-        if filename in self._transfer_rows:
-            row = self._transfer_rows[filename]
+
+        if transfer_key in self._transfer_rows:
+            transfer_info = self._transfer_rows[transfer_key]
+            row = transfer_info['row']
+            action = transfer_info['action']
+
+            # 获取进度条控件
             progress_bar = self.records_table.cellWidget(row, 1)
-            if progress_bar and total > 0:
-                progress_percent = int(current / total * 100)
-                progress_bar.setValue(progress_percent)
-                
-                # 显示文件名和进度
+            if progress_bar and isinstance(progress_bar, QProgressBar):
+                # 计算进度百分比
+                progress_percent = int(current / total * 100) if total > 0 else 0
+
+                # 截断文件名
                 from pathlib import Path
                 display_name = Path(filename).name
                 if len(display_name) > 25:
                     display_name = display_name[:22] + "..."
-                
+
+                # 更新进度条的值
+                progress_bar.setValue(progress_percent)
+
+                # 更新进度条的文本格式（显示文件名 + 百分比 + 大小）
                 # current 和 total 已经是 KB 单位
                 current_mb = current / 1024
                 total_mb = total / 1024
@@ -821,24 +1004,65 @@ class SyncWindow(QMainWindow):
                 else:
                     progress_bar.setFormat(f"{display_name} - {progress_percent}% ({current}/{total}K)")
     
-    def _finish_transfer_progress(self, filename: str):
-        """完成传输进度"""
-        if filename in self._transfer_rows:
-            row = self._transfer_rows[filename]
-            
-            # 移除进度条，显示完成状态
-            from pathlib import Path
-            display_name = Path(filename).name
-            if len(display_name) > 25:
-                display_name = display_name[:22] + "..."
-            
+    def _finish_transfer_progress(self, filename: str, action: str = "接收", target_ip: str = ""):
+        """完成传输进度（移除进度条，显示完成状态）
+
+        Args:
+            filename: 文件名（相对路径）
+            action: 操作类型（"发送" / "接收"）
+            target_ip: 目标IP（可选，用于转发时显示）
+        """
+        from pathlib import Path
+        display_name = Path(filename).name
+        if len(display_name) > 25:
+            display_name = display_name[:22] + "..."
+
+        # 构建复合键（如果有目标IP，使用复合键；否则使用文件名）
+        transfer_key = f"{target_ip}:{filename}" if target_ip else filename
+
+        if transfer_key in self._transfer_rows:
+            # 已有进度行，移除进度条，更新为完成状态
+            transfer_info = self._transfer_rows[transfer_key]
+            row = transfer_info['row']
+            row_target_ip = transfer_info.get('target_ip', '')
+
+            # 移除进度条控件
             self.records_table.setCellWidget(row, 1, None)
-            status_item = QTableWidgetItem(f"{display_name} - 完成")
+
+            # 构建完成文本
+            if row_target_ip:
+                display_text = f"发送至 {row_target_ip} {display_name} - 完成"
+            else:
+                display_text = f"{display_name} - 完成"
+
+            # 更新信息列为绿色完成状态
+            status_item = QTableWidgetItem(display_text)
             status_item.setForeground(QColor("#51cf66"))
             self.records_table.setItem(row, 1, status_item)
-            
+
             # 清除记录
-            del self._transfer_rows[filename]
+            del self._transfer_rows[transfer_key]
+        else:
+            # 备用逻辑：如果没有进度行（文件传输很快），直接添加完成记录
+            row_count = self.records_table.rowCount()
+            self.records_table.insertRow(row_count)
+
+            # 操作列
+            action_item = QTableWidgetItem(action)
+            action_item.setTextAlignment(Qt.AlignCenter)
+            self.records_table.setItem(row_count, 0, action_item)
+
+            # 信息列（绿色完成状态）
+            status_item = QTableWidgetItem(f"{display_name} - 完成")
+            status_item.setForeground(QColor("#51cf66"))
+            self.records_table.setItem(row_count, 1, status_item)
+
+            # 滚动到底部
+            self.records_table.scrollToBottom()
+
+            # 限制记录数量
+            while self.records_table.rowCount() > 100:
+                self.records_table.removeRow(0)
     
     @Slot(str, str)
     def add_log(self, log_type: str, message: str):
@@ -852,20 +1076,34 @@ class SyncWindow(QMainWindow):
         # 清理发送进度条占位，避免再次发送同名文件时复用旧的进度条
         self._cancel_transfer_progress(rel_path)
 
-    def _cancel_transfer_progress(self, filename: str):
-        """取消传输进度条，标记为已取消（保留 _transfer_rows 记录，忽略残留进度信号）"""
-        if filename in self._transfer_rows:
-            row = self._transfer_rows[filename]
+    def _cancel_transfer_progress(self, filename: str, target_ip: str = ""):
+        """取消传输进度条，标记为已取消（单行动态更新）
+
+        Args:
+            filename: 文件名（相对路径）
+            target_ip: 目标IP（可选，用于转发时显示）
+        """
+        # 构建复合键（如果有目标IP，使用复合键；否则使用文件名）
+        transfer_key = f"{target_ip}:{filename}" if target_ip else filename
+
+        if transfer_key in self._transfer_rows:
+            transfer_info = self._transfer_rows[transfer_key]
+            row = transfer_info['row']
             from pathlib import Path
             display_name = Path(filename).name
             if len(display_name) > 25:
                 display_name = display_name[:22] + "..."
+
+            # 移除进度条控件（如果有）
             self.records_table.setCellWidget(row, 1, None)
+
+            # 更新信息列为橙色取消状态
             status_item = QTableWidgetItem(f"{display_name} - 已取消")
             status_item.setForeground(QColor("#ff922b"))
             self.records_table.setItem(row, 1, status_item)
-            # 不删除 _transfer_rows[filename]，残留进度信号通过 _cancelled_transfers 过滤
-            self._cancelled_transfers.add(filename)
+
+            # 不删除 _transfer_rows[transfer_key]，残留进度信号通过 _cancelled_transfers 过滤
+            self._cancelled_transfers.add(transfer_key)
     
     def on_file_added(self, file_path: str):
         """文件添加事件（本地操作）"""
