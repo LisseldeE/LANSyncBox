@@ -333,3 +333,27 @@ class UserConfig:
     def set_fixed_room_code(cls, code: str):
         """设置固定的房间号"""
         cls.set("fixed_room_code", code)
+
+    @classmethod
+    def update_reference_info(cls, exe_path: str):
+        """更新参考信息到配置文件末尾（仅在 ENABLE_CHECK_UPDATE=True 时）
+
+        Args:
+            exe_path: 程序/脚本的完整路径（由调用者提供）
+
+        参考信息包括：
+        - version: 程序实时版本号
+        - exe_path: 程序自身位置
+        - app_name: 程序名称
+        """
+        if not Config.ENABLE_CHECK_UPDATE:
+            return
+
+        data = cls.load()
+
+        # 写入参考信息
+        data["version"] = Config.APP_VERSION
+        data["exe_path"] = exe_path
+        data["app_name"] = Config.APP_NAME
+
+        cls.save()

@@ -25,13 +25,31 @@ def get_resource_path(relative_path):
 
 def main():
     """主函数"""
+    # 写入版本信息到配置文件（仅在 ENABLE_CHECK_UPDATE=True 时）
+    if Config.ENABLE_CHECK_UPDATE:
+        try:
+            # 获取当前可执行文件路径
+            if '__compiled__' in globals():
+                # Nuitka 打包：使用 containing_dir 获取真实 exe 所在目录
+                exe_path = os.path.join(__compiled__.containing_dir, Config.APP_NAME + '.exe')
+            elif getattr(sys, 'frozen', False):
+                # PyInstaller 打包：exe完整路径
+                exe_path = sys.executable
+            else:
+                # 开发环境：主脚本路径
+                exe_path = os.path.abspath(__file__)
+
+            UserConfig.update_reference_info(exe_path)
+        except Exception:
+            pass  # 静默失败，不影响程序启动
+
     # 设置AppUserModelID（必须在QApplication创建之前）
     if sys.platform == 'win32':
         try:
             ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID(Config.APP_NAME)
         except (AttributeError, OSError):
             pass
-    
+
     # 创建应用
     app = QApplication(sys.argv)
     app.setApplicationName(Config.APP_NAME)
@@ -49,7 +67,7 @@ def main():
     
     # 设置默认语言（从 config.json 加载用户偏好）
     I18n.set_language(UserConfig.get_language())
-    
+
     # 创建主窗口
     window = MainWindow()
     if os.path.exists(icon_path):

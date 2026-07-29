@@ -134,8 +134,11 @@ The core goal of sync is to keep file lists consistent across all endpoints. Fil
 
 ### 2026.6.29 R6
 
+**#08.1**
+- New: Added support for install command installation
+
 **#08**
-- Major optimization updates
+- Optimized: Refactored underlying logic to improve user experience
 
 see [Changelog](https://github.com/LisseldeE/LANSyncBox/blob/main/CHANGELOG.md)
 
