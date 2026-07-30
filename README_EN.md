@@ -13,6 +13,7 @@ LANSyncBox is a simple and efficient LAN real-time file synchronization tool tha
 
 - **Project Name**: LANSyncBox
 - **Project Author**: Lisselde_E
+- **License**: GNU General Public License v3.0
 - **Project Homepage**: https://lisseldee.github.io/#1
 - **Project Repository**: https://github.com/LisseldeE/LANSyncBox
 
@@ -134,11 +135,10 @@ The core goal of sync is to keep file lists consistent across all endpoints. Fil
 
 ### 2026.6.29 R6
 
-**#08.1**
-- New: Added support for install command installation
-
-**#08**
-- Optimized: Refactored underlying logic to improve user experience
+**#09**
+- New: Automatically clean up room cache files
+- New: Friendly display of cache usage on the main interface
+- Fix: Error in file replacement logic
 
 see [Changelog](https://github.com/LisseldeE/LANSyncBox/blob/main/CHANGELOG.md)
 

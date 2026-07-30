@@ -1,6 +1,7 @@
 """
 平行四边形扫描加载动画 - PySide6 实现
-版权所有：Lisselde_E（GitHub:https://github.com/LisseldeE）
+Copyright (c) 2026 Lisselde_E.
+Licensed under the GNU General Public License v3.0.
 
 支持两种状态：
 - 状态1（普通）：单向扫描 + 底部脉冲拖尾

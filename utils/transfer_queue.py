@@ -1,6 +1,8 @@
 """
 传输队列管理器
 限制同时传输的文件数量，避免内存占用过大
+Copyright (c) 2026 Lisselde_E.
+Licensed under the GNU General Public License v3.0.
 """
 import threading
 import queue
@@ -10,29 +12,31 @@ from collections import deque
 
 class TransferQueue:
     """传输队列管理器"""
-    
-    def __init__(self, max_concurrent: int = 3):
+
+    def __init__(self, max_concurrent: int = 5, max_queue_size: int = 50):
         """
         初始化传输队列
-        
+
         Args:
-            max_concurrent: 同时传输的最大文件数量，默认为3
+            max_concurrent: 同时传输的最大文件数量，默认为5
+            max_queue_size: 队列最大长度，默认为50，超过则丢弃最旧的任务
         """
         self.max_concurrent = max_concurrent
+        self.max_queue_size = max_queue_size
         self.queue = deque()  # 待传输队列
         self.active_count = 0  # 当前正在传输的数量
         self.lock = threading.Lock()  # 线程锁
-        
+
         # 正在传输的任务字典（文件名 -> 停止标志）
         self.active_tasks: Dict[str, threading.Event] = {}
-        
+
         # 任务ID到文件名的映射（用于取消任务）
         self.task_id_to_filename: Dict[int, str] = {}
     
     def add_task(self, task_type: str, task_func: Callable, filename: str, *args, **kwargs):
         """
         添加传输任务到队列
-        
+
         Args:
             task_type: 任务类型（file, delete, rename）
             task_func: 任务执行函数
@@ -53,7 +57,11 @@ class TransferQueue:
                     if task.get('filename') == filename:
                         # 已经在队列中，不需要重复添加
                         return
-            
+
+            # 检查队列上限，超过则丢弃最旧的任务
+            while len(self.queue) >= self.max_queue_size:
+                self.queue.popleft()
+
             # 将任务加入队列
             task = {
                 'type': task_type,
@@ -64,7 +72,7 @@ class TransferQueue:
                 'stop_event': threading.Event()  # 停止标志
             }
             self.queue.append(task)
-            
+
             # 尝试启动任务（在锁内部调用，不需要再次获取锁）
             self._try_start_task_internal()
     

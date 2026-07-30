@@ -1,6 +1,8 @@
 """
 国际化支持模块
 支持中英文切换
+Copyright (c) 2026 Lisselde_E.
+Licensed under the GNU General Public License v3.0.
 """
 from typing import Dict
 
@@ -84,11 +86,13 @@ class I18n:
             "host_mode": "主机端",
             "client_mode": "连接端",
             "room_info": "房间: {code}",
-            "sync_folder_path": "同步文件夹: {path}",
+            "sync_folder_path": "缓存文件夹: {path}",
             "disconnect": "断开连接",
             "leave_room": "离开房间",
             "transfer_log": "传输日志",
             "export_log": "导出日志",
+            "clean_cache_label": "清理缓存文件",
+            "clean_cache_tooltip": "退出当前同步房间时自动清理缓存文件",
             
             # 文件列表
             "file_name": "文件名",
@@ -167,7 +171,7 @@ class I18n:
             "log_upload": "上传",
             "log_download": "下载",
             "log_delete": "删除",
-            "log_rename": "重命名",
+            "log_change": "变更",
             "log_success": "成功",
             "log_failed": "失败",
             
@@ -279,11 +283,13 @@ class I18n:
             "host_mode": "Host",
             "client_mode": "Client",
             "room_info": "Room: {code}",
-            "sync_folder_path": "Sync folder: {path}",
+            "sync_folder_path": "Cache folder: {path}",
             "disconnect": "Disconnect",
             "leave_room": "Leave Room",
             "transfer_log": "Transfer Log",
             "export_log": "Export Log",
+            "clean_cache_label": "Clean Cache",
+            "clean_cache_tooltip": "Automatically clean cache files when leaving the current sync room",
             
             # File list
             "file_name": "Name",
@@ -362,7 +368,7 @@ class I18n:
             "log_upload": "Upload",
             "log_download": "Download",
             "log_delete": "Delete",
-            "log_rename": "Rename",
+            "log_change": "Change",
             "log_success": "Success",
             "log_failed": "Failed",
             

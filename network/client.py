@@ -1,6 +1,8 @@
 """
 同步客户端
 连接端运行，连接服务器并发送/接收文件
+Copyright (c) 2026 Lisselde_E.
+Licensed under the GNU General Public License v3.0.
 """
 import socket
 import threading
@@ -50,7 +52,7 @@ class SyncClient(QObject):
         self._receiving_lock = threading.Lock()  # 保护 receiving_files 的线程锁
 
         # 创建传输队列，控制并发传输数量
-        self.transfer_queue = TransferQueue(max_concurrent=3)
+        self.transfer_queue = TransferQueue(max_concurrent=5, max_queue_size=50)
     
     def _safe_join(self, filename: str) -> str:
         """
@@ -366,24 +368,32 @@ class SyncClient(QObject):
         self.dir_created.emit(dirname)
     
     def _handle_rename(self, content: bytes):
-        """处理重命名"""
+        """处理变更（重命名/移动）"""
         try:
             data = content.decode('utf-8').split('|')
             old_name = data[0]
             new_name = data[1]
-            
+
             old_path = self._safe_join(old_name)
             new_path = self._safe_join(new_name)
-            
+
+            # 如果目标文件已存在，先删除
+            if os.path.exists(new_path):
+                if os.path.isdir(new_path):
+                    from sync.file_manager import safe_rmtree
+                    safe_rmtree(new_path)
+                else:
+                    os.unlink(new_path)
+
             os.rename(old_path, new_path)
-            
-            self.log_message.emit(f"重命名: {old_name} -> {new_name}")
-            
-            # 发射重命名信号
+
+            self.log_message.emit(f"变更: {old_name} -> {new_name}")
+
+            # 发射变更信号
             self.file_renamed.emit(old_name, new_name)
-            
+
         except Exception as e:
-            self.log_message.emit(f"重命名失败: {e}")
+            self.log_message.emit(f"变更失败: {e}")
     
     def _handle_file_list_response(self, file_list: list):
         """处理文件列表响应
@@ -849,7 +859,7 @@ class SyncClient(QObject):
         self.log_message.emit(f"发送创建目录指令: {rel_path}")
     
     def send_rename(self, old_path: str, new_path: str):
-        """发送重命名指令"""
+        """发送变更指令"""
         if not self.authenticated:
             return
         
@@ -858,7 +868,7 @@ class SyncClient(QObject):
         
         old_rel = os.path.relpath(old_path, self.sync_folder).replace('\\', '/')
         new_rel = os.path.relpath(new_path, self.sync_folder).replace('\\', '/')
-        self.log_message.emit(f"发送重命名指令: {old_rel} -> {new_rel}")
+        self.log_message.emit(f"发送变更指令: {old_rel} -> {new_rel}")
     
     def request_file_list(self):
         """请求文件列表"""

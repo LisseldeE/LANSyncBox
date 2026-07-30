@@ -2,6 +2,8 @@
 文件列表组件
 支持拖拽、右键菜单、文件操作
 所有同步信号由 UI 操作触发，不使用文件监听
+Copyright (c) 2026 Lisselde_E.
+Licensed under the GNU General Public License v3.0.
 """
 import os
 import threading
@@ -62,13 +64,13 @@ class DragableTableWidget(QTableWidget):
             self._mouse_press_item = self.itemAt(event.pos())
             self._is_dragging = False
             self._is_rubber_band_selecting = False
-            
+
             # 记录当前选中状态（用于 Ctrl+框选时保留原有选择）
             self._initial_selected_rows = set()
             for row in range(self.rowCount()):
                 if self.selectionModel().isRowSelected(row, self.rootIndex()):
                     self._initial_selected_rows.add(row)
-            
+
             # 如果按下在空白区域，开始框选
             if self._mouse_press_item is None:
                 # 清除原有选择（除非按住 Ctrl）
@@ -76,7 +78,12 @@ class DragableTableWidget(QTableWidget):
                     self.clearSelection()
                 self._start_rubber_band(event.pos())
                 return
-        
+
+            # 如果按下在已选中的项目上，不调用父类的 mousePressEvent
+            # 这样可以保持多选状态，避免变成单选
+            if self._mouse_press_item.isSelected():
+                return
+
         super().mousePressEvent(event)
     
     def mouseMoveEvent(self, event):
@@ -838,40 +845,69 @@ class FileListWidget(QWidget):
         if not self.clipboard_files:
             return
 
-        # 收集需要粘贴的文件（先处理文件存在确认）
+        # 收集需要粘贴的文件
         files_to_paste = []
+        existing_files = []
+
         for src_file in self.clipboard_files:
             if not src_file.exists():
                 continue
 
             dst_file = self.current_path / src_file.name
 
-            # 检查文件是否存在
+            # 检查目标文件是否存在
             if dst_file.exists():
-                # 创建自定义消息框
-                msg_box = QMessageBox(self)
-                msg_box.setWindowTitle(I18n.tr('confirm_replace'))
-                msg_box.setText(I18n.tr('confirm_replace_msg'))
-                msg_box.setIcon(QMessageBox.Question)
+                existing_files.append(src_file.name)
+            else:
+                files_to_paste.append(src_file)
 
-                # 添加自定义按钮
-                yes_btn = msg_box.addButton(I18n.tr('yes'), QMessageBox.YesRole)
-                no_btn = msg_box.addButton(I18n.tr('no'), QMessageBox.NoRole)
+        # 如果有已存在的文件，一次性询问是否替换
+        if existing_files:
+            file_list = "\n".join(existing_files[:5])
+            if len(existing_files) > 5:
+                file_list += f"\n... 还有 {len(existing_files) - 5} 个文件"
 
-                # 应用全局按钮样式
-                yes_btn.setStyleSheet(BUTTON_STYLES['primary'])
-                no_btn.setStyleSheet(BUTTON_STYLES['secondary'])
+            # 创建自定义消息框
+            msg_box = QMessageBox(self)
+            msg_box.setWindowTitle(I18n.tr('confirm_replace'))
+            msg_box.setText(f"以下文件已存在，是否全部替换？\n\n{file_list}")
+            msg_box.setIcon(QMessageBox.Question)
 
-                msg_box.setDefaultButton(no_btn)
-                msg_box.exec()
+            # 添加自定义按钮
+            yes_btn = msg_box.addButton(I18n.tr('yes'), QMessageBox.YesRole)
+            no_btn = msg_box.addButton(I18n.tr('no'), QMessageBox.NoRole)
 
-                if msg_box.clickedButton() == no_btn:
-                    continue
+            # 应用全局按钮样式
+            yes_btn.setStyleSheet(BUTTON_STYLES['primary'])
+            no_btn.setStyleSheet(BUTTON_STYLES['secondary'])
 
-            files_to_paste.append(src_file)
+            msg_box.setDefaultButton(no_btn)
+            msg_box.exec()
+
+            if msg_box.clickedButton() == yes_btn:
+                # 用户同意替换，添加所有已存在的文件
+                for src_file in self.clipboard_files:
+                    if src_file.exists() and src_file.name in existing_files:
+                        files_to_paste.append(src_file)
 
         if not files_to_paste:
             return
+
+        # 剪切操作：检查是否可以在同分区内快速移动
+        if self.clipboard_is_cut:
+            # 检查所有文件是否都在同一分区
+            same_drive = True
+            for src_file in files_to_paste:
+                src_drive = os.path.splitdrive(str(src_file))[0]
+                dst_drive = os.path.splitdrive(str(self.current_path))[0]
+                if src_drive != dst_drive:
+                    same_drive = False
+                    break
+
+            # 如果都在同一分区，使用快速移动（类似拖拽移动）
+            if same_drive:
+                self._fast_move_files(files_to_paste)
+                return
 
         # 创建进度对话框
         from ui.progress_dialog import CopyProgressDialog
@@ -910,20 +946,16 @@ class FileListWidget(QWidget):
 
     def _on_paste_file_finished(self, file_path: str):
         """粘贴文件完成回调"""
-        # 只有本地操作才触发同步信号
-        if not self.is_syncing(file_path):
-            path = Path(file_path)
-            if path.is_dir():
-                self.file_added.emit(file_path)
-                self._emit_folder_files(path)
-            else:
-                self.file_added.emit(file_path)
-
-        # 如果是剪切操作，删除源文件
         if self.clipboard_is_cut:
+            # 剪切操作：发射重命名信号（本质是移动）
             # 找到对应的源文件
             for src_file in self.clipboard_files:
                 if src_file.name == Path(file_path).name:
+                    # 只有本地操作才触发同步信号
+                    if not self.is_syncing(file_path):
+                        self.file_renamed.emit(str(src_file), file_path)
+                    
+                    # 删除源文件
                     try:
                         if src_file.exists():
                             if src_file.is_dir():
@@ -934,6 +966,16 @@ class FileListWidget(QWidget):
                     except Exception as e:
                         print(f"删除源文件失败: {e}")
                     break
+        else:
+            # 复制操作：发射添加信号
+            # 只有本地操作才触发同步信号
+            if not self.is_syncing(file_path):
+                path = Path(file_path)
+                if path.is_dir():
+                    self.file_added.emit(file_path)
+                    self._emit_folder_files(path)
+                else:
+                    self.file_added.emit(file_path)
 
     def _on_paste_cancelled(self, dialog):
         """粘贴被取消回调"""
@@ -953,6 +995,53 @@ class FileListWidget(QWidget):
         if self.clipboard_is_cut:
             self.clipboard_files = []
             self.clipboard_is_cut = False
+        self.load_files()
+
+    def _fast_move_files(self, files: List[Path]):
+        """快速移动文件（同分区内使用 rename）"""
+        success_count = 0
+
+        for src_file in files:
+            if not src_file.exists():
+                continue
+
+            dst_file = self.current_path / src_file.name
+
+            # 检查是否在同一目录
+            if src_file.parent == self.current_path:
+                continue
+
+            # 检查是否移动到自己的子文件夹
+            if src_file.is_dir() and self.current_path.is_relative_to(src_file):
+                self._show_error("不能将文件夹移动到自己的子文件夹中")
+                continue
+
+            try:
+                # 如果目标文件已存在，先删除
+                if dst_file.exists():
+                    if dst_file.is_dir():
+                        from sync.file_manager import safe_rmtree
+                        safe_rmtree(dst_file)
+                    else:
+                        dst_file.unlink()
+
+                # 使用 rename 快速移动
+                src_file.rename(dst_file)
+
+                # 发射重命名信号（本质是移动）
+                if not self.is_syncing(str(dst_file)):
+                    self.file_renamed.emit(str(src_file), str(dst_file))
+
+                success_count += 1
+
+            except Exception as e:
+                self._show_error(f"移动 {src_file.name} 失败: {str(e)}")
+
+        # 清空剪贴板
+        self.clipboard_files = []
+        self.clipboard_is_cut = False
+
+        # 刷新文件列表
         self.load_files()
     
     def delete_files(self):
@@ -1432,22 +1521,26 @@ class FileListWidget(QWidget):
         """处理内部拖拽"""
         # 检查是否按住Ctrl键（复制）
         is_copy = (action == Qt.CopyAction)
-        
+
         # 确定目标目录
         if target_path:
             target_dir = Path(target_path)
         else:
             target_dir = self.current_path
-        
+
+        # 收集有效文件和已存在文件
+        valid_files = []
+        existing_files = []
+
         for src_path in files:
             src = Path(src_path)
             if not src.exists():
                 continue
-            
+
             # 检查是否在同一目录
             if src.parent == target_dir:
                 continue  # 同一目录，不操作
-            
+
             # 检查是否拖拽到自己的子文件夹
             if src.is_dir() and target_dir.is_relative_to(src):
                 # 创建自定义警告框
@@ -1455,57 +1548,89 @@ class FileListWidget(QWidget):
                 msg_box.setWindowTitle("错误")
                 msg_box.setText("不能将文件夹移动到自己的子文件夹中")
                 msg_box.setIcon(QMessageBox.Warning)
-                
+
                 # 添加自定义按钮
                 ok_btn = msg_box.addButton(I18n.tr('ok'), QMessageBox.AcceptRole)
                 ok_btn.setStyleSheet(BUTTON_STYLES['primary'])
-                
+
                 msg_box.exec()
                 continue
-            
+
             dst = target_dir / src.name
-            
+
             # 检查目标文件是否存在
             if dst.exists():
-                # 创建自定义消息框
-                msg_box = QMessageBox(self)
-                msg_box.setWindowTitle(I18n.tr('confirm_replace'))
-                msg_box.setText(f"文件 {src.name} 已存在，是否替换？")
-                msg_box.setIcon(QMessageBox.Question)
-                
-                # 添加自定义按钮
-                yes_btn = msg_box.addButton(I18n.tr('yes'), QMessageBox.YesRole)
-                no_btn = msg_box.addButton(I18n.tr('no'), QMessageBox.NoRole)
-                
-                # 应用全局按钮样式
-                yes_btn.setStyleSheet(BUTTON_STYLES['primary'])
-                no_btn.setStyleSheet(BUTTON_STYLES['secondary'])
-                
-                msg_box.setDefaultButton(no_btn)
-                msg_box.exec()
-                
-                if msg_box.clickedButton() == no_btn:
-                    continue
-            
+                existing_files.append(src.name)
+            else:
+                valid_files.append(src)
+
+        # 如果有已存在的文件，一次性询问是否替换
+        if existing_files:
+            file_list = "\n".join(existing_files[:5])
+            if len(existing_files) > 5:
+                file_list += f"\n... 还有 {len(existing_files) - 5} 个文件"
+
+            # 创建自定义消息框
+            msg_box = QMessageBox(self)
+            msg_box.setWindowTitle(I18n.tr('confirm_replace'))
+            msg_box.setText(f"以下文件已存在，是否全部替换？\n\n{file_list}")
+            msg_box.setIcon(QMessageBox.Question)
+
+            # 添加自定义按钮
+            yes_btn = msg_box.addButton(I18n.tr('yes'), QMessageBox.YesRole)
+            no_btn = msg_box.addButton(I18n.tr('no'), QMessageBox.NoRole)
+
+            # 应用全局按钮样式
+            yes_btn.setStyleSheet(BUTTON_STYLES['primary'])
+            no_btn.setStyleSheet(BUTTON_STYLES['secondary'])
+
+            msg_box.setDefaultButton(no_btn)
+            msg_box.exec()
+
+            if msg_box.clickedButton() == yes_btn:
+                # 用户同意替换，添加所有已存在的文件
+                for src_path in files:
+                    src = Path(src_path)
+                    if src.exists() and src.name in existing_files:
+                        valid_files.append(src)
+
+        # 执行文件操作
+        for src in valid_files:
+            dst = target_dir / src.name
+
             try:
                 if is_copy:
                     # 复制文件
                     if src.is_dir():
+                        # 如果目标文件夹已存在，先删除
+                        if dst.exists():
+                            from sync.file_manager import safe_rmtree
+                            safe_rmtree(dst)
                         shutil.copytree(src, dst)
                     else:
+                        # 如果目标文件已存在，先删除
+                        if dst.exists():
+                            dst.unlink()
                         shutil.copy2(src, dst)
-                    
+
                     # 触发同步信号
                     if not self.is_syncing(str(dst)):
                         self.file_added.emit(str(dst))
                 else:
                     # 移动文件
+                    # 如果目标文件已存在，先删除
+                    if dst.exists():
+                        if dst.is_dir():
+                            from sync.file_manager import safe_rmtree
+                            safe_rmtree(dst)
+                        else:
+                            dst.unlink()
                     src.rename(dst)
-                    
+
                     # 触发同步信号
                     if not self.is_syncing(str(src)):
                         self.file_renamed.emit(str(src), str(dst))
-                
+
             except Exception as e:
                 self._show_error(f"操作失败: {str(e)}")
         

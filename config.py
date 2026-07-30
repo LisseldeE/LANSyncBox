@@ -1,5 +1,7 @@
 """
 LANSyncBox 配置文件
+Copyright (c) 2026 Lisselde_E.
+Licensed under the GNU General Public License v3.0.
 """
 import os
 import sys
@@ -12,8 +14,8 @@ class Config:
 
     # 应用信息
     APP_NAME = "LANSyncBox"
-    APP_VERSION = "R6.8"
-    STORE_VERSION = "6.8.0.0"
+    APP_VERSION = "R6.9"
+    STORE_VERSION = "6.9.0.0"
     APP_AUTHOR = "Lisselde_E"
     APP_AUTHOR_LINK = "https://lisseldee.github.io/#1"  # 作者主页链接
 
@@ -254,7 +256,8 @@ class UserConfig:
         default_config = {
             "language": "zh_CN",
             "fixed_room_code_enabled": False,
-            "fixed_room_code": ""
+            "fixed_room_code": "",
+            "clean_cache_enabled": False
         }
 
         # 首次加载时尝试从旧路径迁移配置
@@ -333,6 +336,16 @@ class UserConfig:
     def set_fixed_room_code(cls, code: str):
         """设置固定的房间号"""
         cls.set("fixed_room_code", code)
+
+    @classmethod
+    def get_clean_cache_enabled(cls) -> bool:
+        """获取清理缓存开关启用状态"""
+        return bool(cls.get("clean_cache_enabled", False))
+
+    @classmethod
+    def set_clean_cache_enabled(cls, enabled: bool):
+        """设置清理缓存开关启用状态"""
+        cls.set("clean_cache_enabled", bool(enabled))
 
     @classmethod
     def update_reference_info(cls, exe_path: str):

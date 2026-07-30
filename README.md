@@ -13,6 +13,7 @@ LANSyncBox 是一款简洁高效的局域网文件实时同步工具，实现多
 
 - **项目名称**: LANSyncBox
 - **项目作者**: Lisselde_E
+- **开源协议**: GNU General Public License v3.0
 - **项目主页**: https://lisseldee.github.io/#1
 - **项目仓库**: https://github.com/LisseldeE/LANSyncBox
 
@@ -134,11 +135,10 @@ LANSyncBox 是一款简洁高效的局域网文件实时同步工具，实现多
 
 ### 2026.6.29 R6
 
-**#08.1**
-- 新增：支持Install安装程序适配
-
-**#08**
-- 优化：底层逻辑重构，提升使用体验
+**#09**
+- 新增：自动清理房间缓存文件
+- 新增：主界面缓存占用友好显示
+- 修复：文件替换逻辑存在的错误
 
 详见 [更新日志](https://github.com/LisseldeE/LANSyncBox/blob/main/CHANGELOG.md)
 

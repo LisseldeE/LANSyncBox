@@ -1,5 +1,7 @@
 """
 主窗口
+Copyright (c) 2026 Lisselde_E.
+Licensed under the GNU General Public License v3.0.
 """
 import os
 from PySide6.QtWidgets import (
@@ -97,7 +99,27 @@ class MainWindow(QMainWindow):
             return f"{int(size)} {units[unit_index]}"
         else:
             return f"{size:.2f} {units[unit_index]}"
-    
+
+    def _get_cache_color(self, size_bytes: int) -> str:
+        """
+        根据缓存大小返回对应的颜色
+
+        Args:
+            size_bytes: 缓存大小（字节）
+
+        Returns:
+            颜色字符串（十六进制）
+        """
+        # 转换为MB
+        size_mb = size_bytes / (1024 * 1024)
+
+        if size_mb < 200:
+            return "#999999"  # 灰色
+        elif size_mb < 500:
+            return "#ff922b"  # 橙黄色
+        else:
+            return "#f03e3e"  # 红色
+
     def init_ui(self):
         """初始化界面"""
         # 窗口设置
@@ -203,10 +225,12 @@ class MainWindow(QMainWindow):
         # 版本和缓存信息
         cache_size = Config.get_cache_size()
         cache_size_str = self._format_size(cache_size)
-        version_text = f"{I18n.tr('about_version', version=Config.DISPLAY_VERSION)}  |  {I18n.tr('cache_size', size=cache_size_str)}"
+        cache_color = self._get_cache_color(cache_size)
+        version_text = f"{I18n.tr('about_version', version=Config.DISPLAY_VERSION)}  |  <span style='color: {cache_color};'>{I18n.tr('cache_size', size=cache_size_str)}</span>"
         self._version_label = QLabel(version_text)
         self._version_label.setAlignment(Qt.AlignCenter)
         self._version_label.setStyleSheet("color: #999; font-size: 11px;")
+        self._version_label.setTextFormat(Qt.RichText)  # 支持HTML格式
         main_layout.addWidget(self._version_label)
     
     def on_create_room(self):
@@ -313,7 +337,8 @@ class MainWindow(QMainWindow):
                 if self._version_label:
                     cache_size = Config.get_cache_size()
                     cache_size_str = self._format_size(cache_size)
-                    version_text = f"{I18n.tr('about_version', version=Config.DISPLAY_VERSION)}  |  {I18n.tr('cache_size', size=cache_size_str)}"
+                    cache_color = self._get_cache_color(cache_size)
+                    version_text = f"{I18n.tr('about_version', version=Config.DISPLAY_VERSION)}  |  <span style='color: {cache_color};'>{I18n.tr('cache_size', size=cache_size_str)}</span>"
                     self._version_label.setText(version_text)
     
     def on_about(self):
@@ -351,7 +376,8 @@ class MainWindow(QMainWindow):
         if self._version_label:
             cache_size = Config.get_cache_size()
             cache_size_str = self._format_size(cache_size)
-            version_text = f"{I18n.tr('about_version', version=Config.DISPLAY_VERSION)}  |  {I18n.tr('cache_size', size=cache_size_str)}"
+            cache_color = self._get_cache_color(cache_size)
+            version_text = f"{I18n.tr('about_version', version=Config.DISPLAY_VERSION)}  |  <span style='color: {cache_color};'>{I18n.tr('cache_size', size=cache_size_str)}</span>"
             self._version_label.setText(version_text)
 
     def _show_and_refresh_cache(self):

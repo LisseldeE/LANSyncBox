@@ -1,9 +1,11 @@
 """
 全局UI组件
+Copyright (c) 2026 Lisselde_E.
+Licensed under the GNU General Public License v3.0.
 """
-from PySide6.QtWidgets import QPushButton, QLabel, QFrame, QGraphicsOpacityEffect
-from PySide6.QtCore import Qt, QTimer, QPropertyAnimation, QByteArray, QPoint, QEvent, Signal
-from PySide6.QtGui import QFont, QEnterEvent
+from PySide6.QtWidgets import QPushButton, QLabel, QFrame, QGraphicsOpacityEffect, QWidget
+from PySide6.QtCore import Qt, QTimer, QPropertyAnimation, QByteArray, QPoint, QEvent, Signal, Property, QRectF, QEasingCurve
+from PySide6.QtGui import QFont, QEnterEvent, QPainter, QColor, QPen, QBrush
 from functools import partial
 
 
@@ -485,3 +487,138 @@ BUTTON_STYLES = {
         }
     """
 }
+
+
+class ToggleSwitch(QWidget):
+    """
+    滑动开关组件 - 模拟手机开关样式
+    
+    特性：
+    - 支持开/关两种状态
+    - 滑动动画效果
+    - 使用全局蓝色 (#339af0)
+    - 圆形滑块在滑动条上左右滑动
+    - 可点击切换状态
+    - 发出 stateChanged 信号
+    """
+    
+    stateChanged = Signal(bool)  # 状态改变信号
+    
+    def __init__(self, parent=None, checked=False):
+        super().__init__(parent)
+
+        # 状态
+        self._checked = checked
+        self._animation_progress = 1.0 if checked else 0.0  # 动画进度（0.0-1.0）
+
+        # 动画
+        self._animation = QPropertyAnimation(self, QByteArray(b"animationProgress"), self)
+        self._animation.setDuration(250)  # 250ms动画时长，更丝滑
+        self._animation.setStartValue(0.0)
+        self._animation.setEndValue(1.0)
+        self._animation.setEasingCurve(QEasingCurve.OutCubic)  # 使用OutCubic缓动曲线，更丝滑
+
+        # 尺寸
+        self.setFixedSize(32, 18)  # 宽32px，高18px
+        self.setCursor(Qt.PointingHandCursor)
+
+        # 颜色
+        self._active_color = QColor("#339af0")  # 全局蓝色
+        self._inactive_color = QColor("#adb5bd")  # 灰色
+        self._handle_color = QColor("#ffffff")  # 白色滑块
+        
+    def sizeHint(self):
+        """推荐尺寸"""
+        return self.size()
+    
+    def minimumSizeHint(self):
+        """最小尺寸"""
+        return self.size()
+    
+    def isChecked(self):
+        """获取当前状态"""
+        return self._checked
+    
+    def setChecked(self, checked, animate=True):
+        """设置状态
+        
+        Args:
+            checked: True=开启，False=关闭
+            animate: 是否播放动画
+        """
+        if self._checked == checked:
+            return
+            
+        self._checked = checked
+        
+        if animate:
+            # 播放动画
+            self._animation.stop()
+            self._animation.setStartValue(self._animation_progress)
+            self._animation.setEndValue(1.0 if checked else 0.0)
+            self._animation.start()
+        else:
+            # 直接设置
+            self._animation_progress = 1.0 if checked else 0.0
+            self.update()
+        
+        self.stateChanged.emit(checked)
+    
+    def toggle(self):
+        """切换状态"""
+        self.setChecked(not self._checked)
+    
+    def mousePressEvent(self, event):
+        """鼠标点击 - 切换状态"""
+        if event.button() == Qt.LeftButton:
+            self.toggle()
+        super().mousePressEvent(event)
+    
+    def paintEvent(self, event):
+        """绘制开关"""
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.Antialiasing)
+        
+        # 尺寸参数
+        width = self.width()
+        height = self.height()
+        handle_size = height - 4  # 滑块直径（比高度小4px）
+        margin = 2  # 边距
+        
+        # 绘制背景滑动条（圆角矩形）
+        track_rect = QRectF(0, 0, width, height)
+        track_radius = height / 2.0
+        
+        # 背景颜色渐变（根据动画进度）
+        bg_color = self._inactive_color
+        if self._animation_progress > 0:
+            # 从灰色渐变到蓝色
+            bg_color = QColor(
+                int(self._inactive_color.red() + (self._active_color.red() - self._inactive_color.red()) * self._animation_progress),
+                int(self._inactive_color.green() + (self._active_color.green() - self._inactive_color.green()) * self._animation_progress),
+                int(self._inactive_color.blue() + (self._active_color.blue() - self._inactive_color.blue()) * self._animation_progress)
+            )
+        
+        painter.setPen(Qt.NoPen)
+        painter.setBrush(QBrush(bg_color))
+        painter.drawRoundedRect(track_rect, track_radius, track_radius)
+        
+        # 绘制滑块（圆形）
+        handle_x = margin + (width - handle_size - 2 * margin) * self._animation_progress
+        handle_y = margin
+        
+        painter.setBrush(QBrush(self._handle_color))
+        painter.setPen(QPen(QColor("#e0e0e0"), 1))  # 浅灰色边框
+        painter.drawEllipse(QRectF(handle_x, handle_y, handle_size, handle_size))
+    
+    def getAnimationProgress(self):
+        """获取动画进度（用于动画系统）"""
+        return self._animation_progress
+    
+    def setAnimationProgress(self, progress):
+        """设置动画进度（用于动画系统）"""
+        self._animation_progress = progress
+        self.update()
+    
+    # 定义动画属性
+    animationProgress = Property(float, getAnimationProgress, setAnimationProgress)

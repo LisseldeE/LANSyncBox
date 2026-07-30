@@ -1,5 +1,7 @@
 """
 同步窗口
+Copyright (c) 2026 Lisselde_E.
+Licensed under the GNU General Public License v3.0.
 """
 import threading
 import os
@@ -13,11 +15,12 @@ from PySide6.QtGui import QColor, QIcon, QPixmap
 from pathlib import Path
 
 from i18n import I18n
-from config import Config
+from config import Config, UserConfig
 from ui.file_list_widget import FileListWidget
-from ui.widgets import AnimatedButton, BUTTON_STYLES
+from ui.widgets import AnimatedButton, BUTTON_STYLES, ToggleSwitch
 from ui.about_dialog import AboutDialog
 from network.server import SyncServer
+from utils.clean_queue import get_clean_queue
 from network.client import SyncClient
 from network.discovery import RoomResponder
 from utils.transfer_queue import TransferQueue
@@ -50,8 +53,8 @@ class SyncWindow(QMainWindow):
         self._transfer_rows = {}  # 文件名 -> 行号映射
         self._cancelled_transfers = set()  # 已取消的文件名（忽略残留进度信号）
         
-        # 传输队列管理器（限制同时传输3个文件）
-        self.transfer_queue = TransferQueue(max_concurrent=3)
+        # 传输队列管理器（限制同时传输5个文件）
+        self.transfer_queue = TransferQueue(max_concurrent=5, max_queue_size=50)
 
         # 关闭确认标志（避免 on_disconnect 确认后 close() 再次弹窗）
         self._close_confirmed = False
@@ -237,37 +240,28 @@ class SyncWindow(QMainWindow):
         bottom_frame.setFixedHeight(28)
         bottom_layout = QHBoxLayout(bottom_frame)
         bottom_layout.setContentsMargins(10, 2, 10, 2)
-        
+
         # 同步文件夹路径
         folder_label = QLabel(I18n.tr('sync_folder_path', path=str(self.room_folder)))
         bottom_layout.addWidget(folder_label)
-        
+
         bottom_layout.addStretch()
-        
-        # 关于按钮（图标形式）
-        about_btn = QPushButton("i")
-        about_btn.setFixedSize(18, 18)
-        about_btn.setFlat(True)
-        about_btn.setToolTip(I18n.tr('about_title'))
-        about_btn.setCursor(Qt.PointingHandCursor)
-        about_btn.setStyleSheet("""
-            QPushButton {
-                font-size: 11px;
-                font-weight: bold;
-                color: #868e96;
-                border: 1px solid #dee2e6;
-                border-radius: 9px;
-                background: transparent;
-            }
-            QPushButton:hover {
-                color: #495057;
-                border-color: #adb5bd;
-                background: #f8f9fa;
-            }
-        """)
-        about_btn.clicked.connect(self._show_about)
-        bottom_layout.addWidget(about_btn)
-        
+
+        # 清理缓存文件开关
+        clean_cache_label = QLabel(I18n.tr('clean_cache_label'))
+        bottom_layout.addWidget(clean_cache_label)
+
+        # 开关组件
+        self.clean_cache_switch = ToggleSwitch()
+        # 从配置加载开关状态
+        clean_cache_enabled = UserConfig.get_clean_cache_enabled()
+        self.clean_cache_switch.setChecked(clean_cache_enabled, animate=False)
+        # 设置悬浮提示
+        self.clean_cache_switch.setToolTip(I18n.tr('clean_cache_tooltip'))
+        # 连接状态改变信号
+        self.clean_cache_switch.stateChanged.connect(self._on_clean_cache_changed)
+        bottom_layout.addWidget(self.clean_cache_switch)
+
         main_layout.addWidget(bottom_frame)
     
     def init_network(self):
@@ -775,7 +769,7 @@ class SyncWindow(QMainWindow):
         # 刷新文件列表
         self.file_list.refresh()
         
-        self._add_record(f"{old_name} -> {new_name}", "重命名", "")
+        self._add_record(f"{old_name} -> {new_name}", I18n.tr("log_change"), "")
         # 只有当没有其他文件正在同步时，才更新状态为"已连接"
         if not self._transfer_rows:
             if self.is_host:
@@ -1173,7 +1167,7 @@ class SyncWindow(QMainWindow):
         
         old_name = Path(old_path).name
         new_name = Path(new_path).name
-        self.add_log("重命名", f"{old_name} -> {new_name}")
+        self.add_log(I18n.tr("log_change"), f"{old_name} -> {new_name}")
         
         # 取消旧文件的传输（如果正在传输）
         old_rel_path = os.path.relpath(old_path, self.room_folder).replace('\\', '/')
@@ -1191,7 +1185,7 @@ class SyncWindow(QMainWindow):
                 elif self.client:
                     self.client.send_rename(old_path, new_path)
             except Exception as e:
-                self.add_log("错误", f"同步重命名失败: {e}")
+                self.add_log("错误", f"同步变更失败: {e}")
         
         # 将任务加入传输队列
         new_rel_path = os.path.relpath(new_path, self.room_folder).replace('\\', '/')
@@ -1248,7 +1242,12 @@ class SyncWindow(QMainWindow):
         """显示关于对话框"""
         dialog = AboutDialog(self)
         dialog.exec()
-    
+
+    def _on_clean_cache_changed(self, checked: bool):
+        """清理缓存开关状态改变"""
+        # 保存状态到配置
+        UserConfig.set_clean_cache_enabled(checked)
+
     def closeEvent(self, event):
         """窗口关闭事件"""
         # 未确认时弹出确认弹窗（点击叉号或外部触发关闭时）
@@ -1293,6 +1292,16 @@ class SyncWindow(QMainWindow):
             self.client.disconnect()
         if self.responder:
             self.responder.stop()
-        
+
+        # 清理缓存（如果开关开启）
+        if self.clean_cache_switch.isChecked():
+            try:
+                # 清理当前房间号的缓存文件夹（异步清理）
+                if self.room_folder.exists():
+                    # 使用清理队列异步清理，避免文件锁问题
+                    get_clean_queue().add_clean_task(self.room_folder)
+            except Exception:
+                pass  # 清理失败不影响关闭
+
         self.closed.emit()
         event.accept()

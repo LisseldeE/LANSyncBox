@@ -1,6 +1,8 @@
 """
 同步服务器
 主机端运行，接收连接并转发文件
+Copyright (c) 2026 Lisselde_E.
+Licensed under the GNU General Public License v3.0.
 """
 import socket
 import threading
@@ -48,7 +50,7 @@ class SyncServer(QObject):
         self._lock = threading.Lock()
         
         # 创建传输队列，控制并发传输数量
-        self.transfer_queue = TransferQueue(max_concurrent=3)
+        self.transfer_queue = TransferQueue(max_concurrent=5, max_queue_size=50)
         
         # 记录正在请求的文件（文件名 -> 客户端ID）
         self.requesting_files: Dict[str, str] = {}
@@ -72,7 +74,7 @@ class SyncServer(QObject):
                 self.server_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
                 # 不使用 SO_REUSEADDR，避免端口被占用时仍能绑定
                 self.server_socket.bind(('0.0.0.0', try_port))
-                self.server_socket.listen(10)
+                self.server_socket.listen(50)  # 支持最多50个设备同时连接，应对突发流量
                 self.server_socket.settimeout(1.0)
                 
                 self.running = True
@@ -531,27 +533,35 @@ class SyncServer(QObject):
         self._broadcast_dir_create(dirname, exclude_client=client_id)
     
     def _handle_rename(self, client_id: str, content: bytes):
-        """处理重命名"""
+        """处理变更（重命名/移动）"""
         try:
             data = content.decode('utf-8').split('|')
             old_name = data[0]
             new_name = data[1]
-            
+
             old_path = self._safe_join(old_name)
             new_path = self._safe_join(new_name)
-            
+
+            # 如果目标文件已存在，先删除
+            if os.path.exists(new_path):
+                if os.path.isdir(new_path):
+                    from sync.file_manager import safe_rmtree
+                    safe_rmtree(new_path)
+                else:
+                    os.unlink(new_path)
+
             os.rename(old_path, new_path)
-            
-            self.log_message.emit(f"重命名: {old_name} -> {new_name}")
-            
-            # 发射重命名信号
+
+            self.log_message.emit(f"变更: {old_name} -> {new_name}")
+
+            # 发射变更信号
             self.file_renamed.emit(old_name, new_name)
-            
+
             # 转发给其他客户端
             self._broadcast_rename(old_name, new_name, exclude_client=client_id)
-            
+
         except Exception as e:
-            self.log_message.emit(f"重命名失败: {e}")
+            self.log_message.emit(f"变更失败: {e}")
     
     def _handle_file_list_request(self, client_id: str):
         """处理文件列表请求"""
@@ -1429,7 +1439,7 @@ class SyncServer(QObject):
         old_rel = os.path.relpath(old_path, self.sync_folder).replace('\\', '/')
         new_rel = os.path.relpath(new_path, self.sync_folder).replace('\\', '/')
         self._broadcast_rename(old_rel, new_rel)
-        self.log_message.emit(f"广播重命名: {old_rel} -> {new_rel}")
+        self.log_message.emit(f"广播变更: {old_rel} -> {new_rel}")
     
     def _broadcast_rename(self, old_name: str, new_name: str, exclude_client: str = None):
         """广播重命名（内部方法）"""
