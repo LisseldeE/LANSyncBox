@@ -167,7 +167,7 @@ python LANSyncBox.py
 
 ## 开源声明
 
-本项目采用 MIT 开源协议，详见 [LICENSE](https://github.com/LisseldeE/LANSyncBox/blob/main/LICENSE) 文件。
+本项目采用 GNU General Public License v3.0 开源协议，详见 [LICENSE](https://github.com/LisseldeE/LANSyncBox/blob/main/LICENSE) 文件。
 
 ## 隐私政策
 

@@ -167,7 +167,7 @@ python LANSyncBox.py
 
 ## Open Source License
 
-This project uses the MIT open source license, see [LICENSE](https://github.com/LisseldeE/LANSyncBox/blob/main/LICENSE) file for details.
+This project uses the GNU General Public License v3.0, see [LICENSE](https://github.com/LisseldeE/LANSyncBox/blob/main/LICENSE) file for details.
 
 ## Privacy Policy
 
