@@ -56,6 +56,9 @@ class DragableTableWidget(QTableWidget):
         
         # 框选时的初始选中状态（用于 Ctrl+框选）
         self._initial_selected_rows = set()
+        
+        # 记录按下时项目是否已被选中（用于 mouseMoveEvent 的正确判断）
+        self._was_press_on_selected = False
     
     def mousePressEvent(self, event):
         """鼠标按下事件"""
@@ -70,6 +73,10 @@ class DragableTableWidget(QTableWidget):
             for row in range(self.rowCount()):
                 if self.selectionModel().isRowSelected(row, self.rootIndex()):
                     self._initial_selected_rows.add(row)
+
+            # 记录按下时项目是否已被选中（在 super().mousePressEvent 改变选中状态之前）
+            # 后续 mouseMoveEvent 中使用此记录而非实时查询，避免 super 调用改变选中后的误判
+            self._was_press_on_selected = self._mouse_press_item is not None and self._mouse_press_item.isSelected()
 
             # 如果按下在空白区域，开始框选
             if self._mouse_press_item is None:
@@ -94,22 +101,28 @@ class DragableTableWidget(QTableWidget):
             
             # 如果移动距离超过阈值
             if distance > 10 and not self._is_dragging and not self._is_rubber_band_selecting:
-                # 检查鼠标按下时是否在选中的项目上
-                if self._mouse_press_item and self._mouse_press_item.isSelected():
+                # 使用按下时记录的选中状态，而非实时查询
+                # 避免 super().mousePressEvent 改变选中状态后导致误判（点击未选中项后拖拽应框选而非拖拽）
+                if self._mouse_press_item and self._was_press_on_selected:
                     # 开始拖拽
                     self._is_dragging = True
                     self._start_drag()
                     return
                 else:
-                    # 开始框选（按下在未选中项目上）
+                    # 开始框选（按下在未选中项目上或空白区域）
                     self._start_rubber_band(self._mouse_press_pos)
             
             # 如果正在框选，更新选择框
             if self._is_rubber_band_selecting:
                 self._update_rubber_band(event.pos())
                 return
+            
+            # 左键按下且有 press_pos 记录时，不调用父类 mouseMoveEvent
+            # 避免 Qt 默认的 ExtendedSelection 拖拽选择行为（从当前项到鼠标位置选范围）
+            # 提前污染选中状态，导致后续自定义拖拽/框选拿到错误的选中数据
+            return
         
-        # 否则调用父类的鼠标移动事件
+        # 否则调用父类的鼠标移动事件（非左键或未有 press 记录的情况）
         super().mouseMoveEvent(event)
     
     def mouseReleaseEvent(self, event):
@@ -123,6 +136,7 @@ class DragableTableWidget(QTableWidget):
         self._is_dragging = False
         self._is_rubber_band_selecting = False
         self._initial_selected_rows = set()
+        self._was_press_on_selected = False
         
         super().mouseReleaseEvent(event)
     

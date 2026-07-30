@@ -1048,6 +1048,9 @@ class SyncWindow(QMainWindow):
         # 构建复合键（如果有目标IP，使用复合键；否则使用文件名）
         transfer_key = f"{target_ip}:{filename}" if target_ip else filename
 
+        # 清理取消标记（传输完成，不再需要抑制残留信号）
+        self._cancelled_transfers.discard(transfer_key)
+
         if transfer_key in self._transfer_rows:
             # 已有进度行，移除进度条，更新为完成状态
             transfer_info = self._transfer_rows[transfer_key]

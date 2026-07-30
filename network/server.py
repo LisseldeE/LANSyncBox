@@ -741,14 +741,24 @@ class SyncServer(QObject):
             except ValueError as e:
                 self.log_message.emit(f"拒绝非法路径: {e}")
                 return
-            
+
             if not os.path.exists(file_path):
                 self.log_message.emit(f"文件不存在，无法发送: {filename}")
                 return
-            
-            # 发送文件给请求的客户端
-            self._send_file_to_client(client_id, filename, file_path)
-            
+
+            # 定义发送函数（用于传输队列，与 _handle_file_request_forward 一致）
+            def send_file_func(stop_event: threading.Event, client_id_arg: str, filename_arg: str, file_path_arg: str):
+                try:
+                    if stop_event.is_set():
+                        return
+                    self._send_file_to_client(client_id_arg, filename_arg, file_path_arg, stop_event)
+                except Exception as e:
+                    self.log_message.emit(f"发送文件失败: {e}")
+
+            # 将任务加入传输队列（使用 client_id:filename 作为去重键）
+            task_key = f"{client_id}:{filename}"
+            self.transfer_queue.add_task('file', send_file_func, task_key, client_id, filename, file_path)
+
         except Exception as e:
             self.log_message.emit(f"发送文件失败: {e}")
     
@@ -1226,100 +1236,7 @@ class SyncServer(QObject):
                     continue
             self.log_message.emit(f"重新发送文件给失败客户端: {failed_client_id}")
             self._send_file_to_client(failed_client_id, filename, filepath, stop_event)
-    
-    def _broadcast_existing_file(self, filename: str, exclude_client: str = None, stop_event: threading.Event = None):
-        """
-        广播已存在的文件（用于转发接收的文件）
-        从磁盘流式读取并发送
 
-        Args:
-            stop_event: 停止标志（可选，用于取消传输）
-        """
-        # 检查是否有其他客户端需要接收（排除发送者）
-        with self._lock:
-            other_clients = [
-                client_id for client_id, client_info in self.clients.items()
-                if client_id != exclude_client and client_info.get('authenticated')
-            ]
-
-        # 如果没有其他客户端，直接返回，不发射任何信号
-        if not other_clients:
-            return
-
-        try:
-            file_path = self._safe_join(filename)
-        except ValueError as e:
-            self.log_message.emit(f"拒绝非法路径: {e}")
-            return
-
-        if not os.path.exists(file_path):
-            self.log_message.emit(f"文件不存在，无法转发: {filename}")
-            return
-
-        try:
-            file_size = os.path.getsize(file_path)
-            mtime = os.path.getmtime(file_path)
-
-            self.log_message.emit(f"转发文件: {filename} ({self._format_size(file_size)})")
-
-            # 统一使用流式分块传输
-            # 维护失败客户端集合，一旦某客户端某次发送失败，后续不再发给它
-            failed_clients = set()
-            # 发送文件开始消息
-            begin_msg = Protocol.pack_message(
-                MessageType.FILE_BEGIN, filename, file_size, False, b'', mtime
-            )
-            if not self._broadcast_data(begin_msg, exclude_client, stop_event=stop_event, failed_clients=failed_clients, cancel_filename=filename):
-                self._broadcast_data(Protocol.create_file_cancel(filename), exclude_client, failed_clients=failed_clients)
-                self.log_message.emit(f"取消转发文件: {filename}")
-                return
-
-            # 流式读取并发送数据块
-            chunk_index = 0
-            sent_size = 0
-            with open(file_path, 'rb') as f:
-                while True:
-                    if stop_event and stop_event.is_set():
-                        self._broadcast_data(Protocol.create_file_cancel(filename), exclude_client, failed_clients=failed_clients)
-                        self.log_message.emit(f"取消转发文件: {filename}")
-                        return
-                    chunk = f.read(self.CHUNK_SIZE)
-                    if not chunk:
-                        break
-
-                    chunk_msg = Protocol.create_file_data_message(filename, chunk_index, chunk)
-                    if not self._broadcast_data(chunk_msg, exclude_client, stop_event=stop_event, failed_clients=failed_clients, cancel_filename=filename):
-                        self._broadcast_data(Protocol.create_file_cancel(filename), exclude_client, failed_clients=failed_clients)
-                        self.log_message.emit(f"取消转发文件: {filename}")
-                        return
-                    sent_size += len(chunk)
-                    chunk_index += 1
-                    # 发射发送进度信号
-                    sent_kb = sent_size // 1024
-                    total_kb = file_size // 1024
-                    self.file_send_progress.emit(filename, sent_kb, total_kb)
-
-            # 发送文件结束消息
-            end_msg = Protocol.create_file_end_message(filename, file_size, mtime)
-            if not self._broadcast_data(end_msg, exclude_client, stop_event=stop_event, failed_clients=failed_clients, cancel_filename=filename):
-                self._broadcast_data(Protocol.create_file_cancel(filename), exclude_client, failed_clients=failed_clients)
-                self.log_message.emit(f"取消转发文件: {filename}")
-                return
-
-            # 对失败客户端重新发送整个文件，确保最终同步完成
-            # 失败客户端之前已收到 FILE_CANCEL 清理了接收状态，重新发送从 FILE_BEGIN 开始是安全的
-            for failed_client_id in list(failed_clients):
-                if stop_event and stop_event.is_set():
-                    break
-                with self._lock:
-                    if failed_client_id not in self.clients or not self.clients[failed_client_id].get('authenticated'):
-                        continue
-                self.log_message.emit(f"重新转发文件给失败客户端: {failed_client_id}")
-                self._send_file_to_client(failed_client_id, filename, file_path, stop_event)
-
-        except Exception as e:
-            self.log_message.emit(f"转发文件失败: {e}")
-    
     def _format_size(self, size: int) -> str:
         """格式化文件大小"""
         for unit in ['B', 'KB', 'MB', 'GB', 'TB']:
@@ -1327,74 +1244,6 @@ class SyncServer(QObject):
                 return f"{size:.1f} {unit}"
             size /= 1024.0
         return f"{size:.1f} PB"
-    
-    def _broadcast_file(self, filename: str, content: bytes, mtime: float, exclude_client: str = None, stop_event: threading.Event = None):
-        """广播文件给所有客户端（内部方法，流式传输）"""
-        file_size = len(content)
-
-        # 检查是否有其他客户端需要接收（排除发送者）
-        with self._lock:
-            other_clients = [
-                client_id for client_id, client_info in self.clients.items()
-                if client_id != exclude_client and client_info.get('authenticated')
-            ]
-
-        # 如果没有其他客户端，直接返回，不发射任何信号
-        if not other_clients:
-            return
-
-        # 统一使用流式分块传输
-        # 维护失败客户端集合，一旦某客户端某次发送失败，后续不再发给它
-        failed_clients = set()
-        message = Protocol.pack_message(
-            MessageType.FILE_BEGIN, filename, file_size, False, b'', mtime
-        )
-        if not self._broadcast_data(message, exclude_client, stop_event=stop_event, failed_clients=failed_clients, cancel_filename=filename):
-            self._broadcast_data(Protocol.create_file_cancel(filename), exclude_client, failed_clients=failed_clients)
-            self.log_message.emit(f"取消广播文件: {filename}")
-            return
-
-        # 发送数据块
-        sent_size = 0
-        for i in range(0, file_size, self.CHUNK_SIZE):
-            if stop_event and stop_event.is_set():
-                self._broadcast_data(Protocol.create_file_cancel(filename), exclude_client, failed_clients=failed_clients)
-                self.log_message.emit(f"取消广播文件: {filename}")
-                return
-            chunk = content[i:i + self.CHUNK_SIZE]
-            chunk_msg = Protocol.create_file_data_message(filename, i // self.CHUNK_SIZE, chunk)
-            if not self._broadcast_data(chunk_msg, exclude_client, stop_event=stop_event, failed_clients=failed_clients, cancel_filename=filename):
-                self._broadcast_data(Protocol.create_file_cancel(filename), exclude_client, failed_clients=failed_clients)
-                self.log_message.emit(f"取消广播文件: {filename}")
-                return
-            sent_size += len(chunk)
-
-            # 发射发送进度信号（使用KB单位）
-            self.file_send_progress.emit(filename, sent_size // 1024, file_size // 1024)
-
-        # 发送结束标记
-        end_msg = Protocol.create_file_end_message(filename, file_size, mtime)
-        if not self._broadcast_data(end_msg, exclude_client, stop_event=stop_event, failed_clients=failed_clients, cancel_filename=filename):
-            self._broadcast_data(Protocol.create_file_cancel(filename), exclude_client, failed_clients=failed_clients)
-            self.log_message.emit(f"取消广播文件: {filename}")
-            return
-
-        # 发射发送完成信号
-        self.file_sent.emit(filename)
-
-        # 对失败客户端重新发送整个文件，确保最终同步完成
-        # 失败客户端之前已收到 FILE_CANCEL 清理了接收状态，重新发送从 FILE_BEGIN 开始是安全的
-        for failed_client_id in list(failed_clients):
-            if stop_event and stop_event.is_set():
-                break
-            with self._lock:
-                client_info = self.clients.get(failed_client_id)
-                if not client_info or not client_info.get('authenticated'):
-                    continue
-                failed_sock = client_info['socket']
-            self.log_message.emit(f"重新发送文件给失败客户端: {failed_client_id}")
-            # 用内存中的 content 重新发送整个文件
-            self._send_file_in_memory(failed_sock, failed_client_id, filename, content, mtime, stop_event)
     
     def broadcast_delete(self, filepath: str):
         """
@@ -1500,18 +1349,12 @@ class SyncServer(QObject):
                         failed_clients.add(client_id)
                     # 发送 FILE_CANCEL 清理接收端状态，避免残留临时文件
                     if cancel_filename:
-                        try:
-                            sock.sendall(Protocol.create_file_cancel(cancel_filename))
-                        except Exception:
-                            pass
+                        self._send_with_cancel(sock, Protocol.create_file_cancel(cancel_filename), None)
                     self.log_message.emit(f"发送给 {client_id} 失败，已取消该客户端传输")
             except Exception as e:
                 if failed_clients is not None:
                     failed_clients.add(client_id)
                 if cancel_filename:
-                    try:
-                        sock.sendall(Protocol.create_file_cancel(cancel_filename))
-                    except Exception:
-                        pass
+                    self._send_with_cancel(sock, Protocol.create_file_cancel(cancel_filename), None)
                 self.log_message.emit(f"发送给 {client_id} 失败: {e}")
         return True
