@@ -33,6 +33,7 @@ class SyncServer(QObject):
     file_sent = Signal(str)              # 发送文件完成
     file_send_progress = Signal(str, int, int)     # 文件发送进度 (filename, current, total)
     file_forward_progress = Signal(str, str, int, int)  # 文件转发进度 (target_ip, filename, current, total)
+    file_forward_sent = Signal(str, str)  # 文件转发完成 (target_ip, filename)
     log_message = Signal(str)            # 日志消息
     
     # 数据块大小（64KB）
@@ -1063,7 +1064,11 @@ class SyncServer(QObject):
                 return
 
             # 发射发送完成信号
-            self.file_sent.emit(filename)
+            if is_forward:
+                target_ip = client_id.split(':')[0]  # 从 client_id 提取IP
+                self.file_forward_sent.emit(target_ip, filename)
+            else:
+                self.file_sent.emit(filename)
             
         except Exception as e:
             self.log_message.emit(f"发送大文件失败: {e}")

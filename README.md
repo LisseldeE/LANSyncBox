@@ -139,6 +139,7 @@ LANSyncBox 是一款简洁高效的局域网文件实时同步工具，实现多
 - 新增：自动清理房间缓存文件
 - 新增：主界面缓存占用友好显示
 - 修复：文件替换逻辑存在的错误
+- 修复：主机端发送文件时进度条逻辑异常
 
 详见 [更新日志](https://github.com/LisseldeE/LANSyncBox/blob/main/CHANGELOG.md)
 

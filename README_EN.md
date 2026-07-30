@@ -139,6 +139,7 @@ The core goal of sync is to keep file lists consistent across all endpoints. Fil
 - New: Automatically clean up room cache files
 - New: Friendly display of cache usage on the main interface
 - Fix: Error in file replacement logic
+- Fix: Exceptional progress bar logic on host side
 
 see [Changelog](https://github.com/LisseldeE/LANSyncBox/blob/main/CHANGELOG.md)
 

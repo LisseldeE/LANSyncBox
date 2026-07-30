@@ -59,6 +59,9 @@ class SyncWindow(QMainWindow):
         # 关闭确认标志（避免 on_disconnect 确认后 close() 再次弹窗）
         self._close_confirmed = False
 
+        # 隐藏的日志记录（不在表格显示，但导出时包含）
+        self._hidden_logs = []
+
         self.init_ui()
         self.init_network()
     
@@ -285,6 +288,7 @@ class SyncWindow(QMainWindow):
             self.server.file_sent.connect(self.on_file_sent)
             # 主机端转发文件的进度信号（包含目标IP）
             self.server.file_forward_progress.connect(self.on_file_forward_progress)
+            self.server.file_forward_sent.connect(self.on_file_forward_sent)
 
             # 先启动房间响应服务（占用发现端口）
             self.responder = RoomResponder(self)
@@ -756,7 +760,23 @@ class SyncWindow(QMainWindow):
         else:
             # 更新进度
             self._update_transfer_progress(filename, current, total, target_ip)
-    
+
+    def on_file_forward_sent(self, target_ip: str, filename: str):
+        """主机端转发文件完成（线程安全）"""
+        QMetaObject.invokeMethod(self, "_do_file_forward_sent", Qt.QueuedConnection,
+                                 Q_ARG(str, target_ip), Q_ARG(str, filename))
+
+    @Slot(str, str)
+    def _do_file_forward_sent(self, target_ip: str, filename: str):
+        """实际执行：转发文件完成"""
+        self._finish_transfer_progress(filename, "发送", target_ip)
+        # 只有当没有其他文件正在同步时，才更新状态为"已连接"
+        if not self._transfer_rows:
+            if self.is_host:
+                self._update_clients_count()
+            else:
+                self.status_label.setText(f'<span style="color: green;">{I18n.tr("status_connected")}</span>')
+
     def on_remote_file_renamed(self, old_name: str, new_name: str):
         """远程文件已重命名（线程安全）"""
         # 使用 QMetaObject.invokeMethod 确保在主线程执行
@@ -828,7 +848,9 @@ class SyncWindow(QMainWindow):
         
         # 内容
         content_item = QTableWidgetItem(display_text)
-        content_item.setToolTip(content)
+        # 完整内容存入 tooltip，供导出时使用
+        full_text = f"{content} - {status}" if status else content
+        content_item.setToolTip(full_text)
         self.records_table.setItem(row_count, 1, content_item)
         
         # 滚动到底部
@@ -837,6 +859,13 @@ class SyncWindow(QMainWindow):
         # 限制记录数量
         while self.records_table.rowCount() > 100:
             self.records_table.removeRow(0)
+            # 更新所有传输进度行的行号（removeRow(0) 导致后续所有行号减1）
+            for transfer_key, info in list(self._transfer_rows.items()):
+                if info['row'] > 0:
+                    info['row'] -= 1
+                else:
+                    # 行号为0的进度行已被移除，清理记录
+                    del self._transfer_rows[transfer_key]
 
     def _export_log(self):
         """导出传输日志到文件"""
@@ -866,10 +895,15 @@ class SyncWindow(QMainWindow):
                 info_item = self.records_table.item(row, 1)
 
                 action = action_item.text() if action_item else ""
-                info = info_item.text() if info_item else ""
+                # 优先使用 tooltip（完整内容），没有则回退到显示文本
+                info = info_item.toolTip() if info_item and info_item.toolTip() else (info_item.text() if info_item else "")
 
                 # 格式化为一行
                 lines.append(f"{action}\t{info}")
+
+            # 追加隐藏日志（广播文件等）
+            for log_type, message in self._hidden_logs:
+                lines.append(f"{log_type}\t{message}")
 
             # 写入文件
             with open(file_path, 'w', encoding='utf-8') as f:
@@ -1026,11 +1060,14 @@ class SyncWindow(QMainWindow):
             # 构建完成文本
             if row_target_ip:
                 display_text = f"发送至 {row_target_ip} {display_name} - 完成"
+                full_text = f"发送至 {row_target_ip} {filename} - 完成"
             else:
                 display_text = f"{display_name} - 完成"
+                full_text = f"{filename} - 完成"
 
             # 更新信息列为绿色完成状态
             status_item = QTableWidgetItem(display_text)
+            status_item.setToolTip(full_text)  # 完整路径存入 tooltip，供导出使用
             status_item.setForeground(QColor("#51cf66"))
             self.records_table.setItem(row, 1, status_item)
 
@@ -1048,6 +1085,7 @@ class SyncWindow(QMainWindow):
 
             # 信息列（绿色完成状态）
             status_item = QTableWidgetItem(f"{display_name} - 完成")
+            status_item.setToolTip(f"{filename} - 完成")  # 完整路径存入 tooltip，供导出使用
             status_item.setForeground(QColor("#51cf66"))
             self.records_table.setItem(row_count, 1, status_item)
 
@@ -1061,6 +1099,10 @@ class SyncWindow(QMainWindow):
     @Slot(str, str)
     def add_log(self, log_type: str, message: str):
         """添加日志（兼容旧代码）"""
+        # 广播文件日志不在表格中显示，但会保留在隐藏日志中供导出
+        if message.startswith("广播文件:"):
+            self._hidden_logs.append((log_type, message))
+            return
         self._add_record(message, log_type, "")
     
     @Slot(str)
@@ -1093,6 +1135,7 @@ class SyncWindow(QMainWindow):
 
             # 更新信息列为橙色取消状态
             status_item = QTableWidgetItem(f"{display_name} - 已取消")
+            status_item.setToolTip(f"{filename} - 已取消")  # 完整路径存入 tooltip，供导出使用
             status_item.setForeground(QColor("#ff922b"))
             self.records_table.setItem(row, 1, status_item)
 
