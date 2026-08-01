@@ -243,6 +243,7 @@ class JoinRoomDialog(QDialog):
         self.room_code_input.code_completed.connect(self._on_code_completed)
         # 连接输入变化信号，实时匹配列表项
         self.room_code_input.code_changed.connect(self._update_matching_room_style)
+        self.room_code_input.code_changed.connect(self._on_room_code_input_changed)
         room_code_layout.addWidget(self.room_code_input)
         
         # 状态标签（显示扫描状态）
@@ -350,6 +351,7 @@ class JoinRoomDialog(QDialog):
         self.connect_btn.clicked.connect(self.on_connect)
         self.connect_btn.setDefault(True)
         self.connect_btn.setStyleSheet(BUTTON_STYLES['primary'])
+        self.connect_btn.setEnabled(False)  # 初始禁用，等待房间号输入完成
 
         self.cancel_btn = AnimatedButton(I18n.tr('cancel'))
         self.cancel_btn.setFixedWidth(100)
@@ -387,6 +389,11 @@ class JoinRoomDialog(QDialog):
         
         # 添加一个小延迟，让用户看到输入完成
         QTimer.singleShot(300, self._check_room_exists)
+    
+    def _on_room_code_input_changed(self):
+        """房间号输入变化时更新连接按钮状态"""
+        if not self.room_code_input.is_complete():
+            self.connect_btn.setEnabled(False)
     
     def _check_room_exists(self):
         """检测房间是否存在"""
@@ -762,6 +769,8 @@ class JoinRoomDialog(QDialog):
 
             # 填充房间号到输入框（不触发检测，避免重复刷新）
             self.room_code_input.set_room_code(room_info['room_code'], trigger_check=False)
+            # 启用连接按钮
+            self.connect_btn.setEnabled(True)
             # 记录主机信息（连接时使用）
             self.discovered_host = room_info['ip']
             self.host_port = room_info['port']

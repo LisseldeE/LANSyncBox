@@ -654,6 +654,11 @@ class FileListWidget(QWidget):
             self.drag_hint_label.hide()
             return
 
+        # 如果表格已有内容（文件可能在定时器触发前到达），不显示提示
+        if self.table.rowCount() > 0:
+            self.drag_hint_label.hide()
+            return
+
         # 居中显示在表格中央
         table_rect = self.table.rect()
         if table_rect.width() == 0 or table_rect.height() == 0:

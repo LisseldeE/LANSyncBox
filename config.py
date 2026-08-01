@@ -15,7 +15,7 @@ class Config:
     # 应用信息
     APP_NAME = "LANSyncBox"
     APP_VERSION = "R6.9"
-    STORE_VERSION = "6.9.0.0"
+    STORE_VERSION = "6.9.1.0"
     APP_AUTHOR = "Lisselde_E"
     APP_AUTHOR_LINK = "https://lisseldee.github.io/#1"  # 作者主页链接
 

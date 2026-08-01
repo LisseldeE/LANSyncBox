@@ -637,6 +637,30 @@ class SyncServer(QObject):
                     # 主机端缺失的文件，请求连接端发送
                     files_to_request_from_client.append(filename)
             
+            # 同步空目录结构
+            try:
+                from sync.file_manager import FileManager
+                from pathlib import Path
+                host_fm = FileManager(Path(self.sync_folder))
+                host_empty_dirs = host_fm.get_empty_directory_list()
+                
+                # 构建连接端目录集合（从文件路径推断父目录）
+                client_dirs = set()
+                for f in client_file_list:
+                    filename = f['filename']
+                    parts = filename.split('/')
+                    for i in range(len(parts) - 1):
+                        parent = '/'.join(parts[:i+1])
+                        if parent:
+                            client_dirs.add(parent)
+                
+                # 发送缺失的目录创建指令
+                for dirname in host_empty_dirs:
+                    if dirname not in client_dirs:
+                        self._send_dir_create_to_client(client_id, dirname)
+            except Exception as e:
+                self.log_message.emit(f"同步目录结构失败: {e}")
+            
             # 发送缺失的文件给连接端
             if files_to_send_to_client:
                 self.log_message.emit(f"发送 {len(files_to_send_to_client)} 个文件给 {client_id}")
@@ -732,6 +756,27 @@ class SyncServer(QObject):
             with self._lock:
                 if filename in self.requesting_files:
                     del self.requesting_files[filename]
+    
+    def _send_dir_create_to_client(self, client_id: str, dirname: str):
+        """发送创建目录指令给连接端
+        
+        Args:
+            client_id: 客户端ID
+            dirname: 目录名（相对路径）
+        """
+        try:
+            msg = Protocol.pack_message(MessageType.DIR_CREATE, dirname)
+            with self._lock:
+                client_info = self.clients.get(client_id)
+                if not client_info:
+                    return
+                sock = client_info.get('socket')
+                if not sock:
+                    return
+            sock.sendall(msg)
+            self.log_message.emit(f"创建目录: {dirname}")
+        except Exception as e:
+            self.log_message.emit(f"创建目录失败: {e}")
     
     def _handle_file_request(self, client_id: str, filename: str):
         """处理文件请求"""

@@ -135,6 +135,10 @@ The core goal of sync is to keep file lists consistent across all endpoints. Fil
 
 ### 2026.6.29 R6
 
+ **#09.1**
+- Fix: Initial sync ignores empty directories
+- Optimize: Improved room input experience
+
 **#09**
 - New: Automatically clean up room cache files
 - New: Friendly display of cache usage on the main interface

@@ -93,6 +93,38 @@ class FileManager:
         
         return files
     
+    def get_directory_list(self) -> List[str]:
+        """获取所有目录列表（用于同步目录结构）
+        
+        Returns:
+            目录列表，格式为 ["subdir1", "subdir1/subdir2", ...]
+        """
+        dirs = []
+        if not self.folder_path.exists():
+            return dirs
+        
+        for item in self.folder_path.rglob('*'):
+            if item.is_dir():
+                dirname = str(item.relative_to(self.folder_path)).replace('\\', '/')
+                dirs.append(dirname)
+        return dirs
+    
+    def get_empty_directory_list(self) -> List[str]:
+        """获取空目录列表（用于同步时创建空目录）
+        
+        Returns:
+            空目录列表，格式为 ["subdir1", "subdir1/subdir2", ...]
+        """
+        empty_dirs = []
+        if not self.folder_path.exists():
+            return empty_dirs
+        
+        for item in self.folder_path.rglob('*'):
+            if item.is_dir() and not any(item.iterdir()):
+                dirname = str(item.relative_to(self.folder_path)).replace('\\', '/')
+                empty_dirs.append(dirname)
+        return empty_dirs
+    
     def calculate_file_hash(self, file_path: Path) -> str:
         """计算文件哈希值"""
         hasher = hashlib.md5()
