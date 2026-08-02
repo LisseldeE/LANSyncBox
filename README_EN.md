@@ -1,5 +1,13 @@
 # LANSyncBox - LAN Real-time File Synchronization Tool
 
+<p align="center">
+  <a href="https://github.com/LisseldeE/LANSyncBox/releases"><img src="https://img.shields.io/github/v/release/LisseldeE/LANSyncBox" alt="Latest Release"></a>
+  <a href="https://github.com/LisseldeE/LANSyncBox/releases"><img src="https://img.shields.io/github/release-date/LisseldeE/LANSyncBox" alt="Release Date"></a>
+  <a href="https://github.com/LisseldeE/LANSyncBox/releases"><img src="https://img.shields.io/github/downloads/LisseldeE/LANSyncBox/total" alt="Total Downloads"></a>
+  <a href="LICENSE"><img src="https://img.shields.io/github/license/LisseldeE/LANSyncBox" alt="License"></a>
+  <img src="https://img.shields.io/badge/platform-Windows-blue?logo=windows" alt="Platform">
+</p>
+
 ## Project Introduction
 
 LANSyncBox is a simple and efficient LAN real-time file synchronization tool that enables multi-user file sharing. Connect within the same local network to share and sync files - no public network connection required. Built with the new Qt6 architecture, supports large file streaming transfers, optimized multi-connection sync logic, providing a smooth user experience.

@@ -1,5 +1,13 @@
 # LANSyncBox - 局域网文件实时同步工具
 
+<p align="center">
+  <a href="https://github.com/LisseldeE/LANSyncBox/releases"><img src="https://img.shields.io/github/v/release/LisseldeE/LANSyncBox" alt="最新版本"></a>
+  <a href="https://github.com/LisseldeE/LANSyncBox/releases"><img src="https://img.shields.io/github/release-date/LisseldeE/LANSyncBox" alt="发布时间"></a>
+  <a href="https://github.com/LisseldeE/LANSyncBox/releases"><img src="https://img.shields.io/github/downloads/LisseldeE/LANSyncBox/total" alt="下载总量"></a>
+  <a href="LICENSE"><img src="https://img.shields.io/github/license/LisseldeE/LANSyncBox" alt="开源协议"></a>
+  <img src="https://img.shields.io/badge/platform-Windows-blue?logo=windows" alt="支持平台">
+</p>
+
 ## 项目简介
 
 LANSyncBox 是一款简洁高效的局域网文件实时同步工具，实现多人隔空文件共享。在同一局域网内即可实现文件共享与同步，无需公网连接。采用全新QT6架构，支持大文件流式传输，优化多连接同步逻辑，提供流畅的用户体验。

@@ -226,7 +226,7 @@ class MainWindow(QMainWindow):
         cache_size = Config.get_cache_size()
         cache_size_str = self._format_size(cache_size)
         cache_color = self._get_cache_color(cache_size)
-        version_text = f"{I18n.tr('about_version', version=Config.DISPLAY_VERSION)}  |  <span style='color: {cache_color};'>{I18n.tr('cache_size', size=cache_size_str)}</span>"
+        version_text = f"{I18n.tr('about_version', version=Config.APP_VERSION)}  |  <span style='color: {cache_color};'>{I18n.tr('cache_size', size=cache_size_str)}</span>"
         self._version_label = QLabel(version_text)
         self._version_label.setAlignment(Qt.AlignCenter)
         self._version_label.setStyleSheet("color: #999; font-size: 11px;")
@@ -338,7 +338,7 @@ class MainWindow(QMainWindow):
                     cache_size = Config.get_cache_size()
                     cache_size_str = self._format_size(cache_size)
                     cache_color = self._get_cache_color(cache_size)
-                    version_text = f"{I18n.tr('about_version', version=Config.DISPLAY_VERSION)}  |  <span style='color: {cache_color};'>{I18n.tr('cache_size', size=cache_size_str)}</span>"
+                    version_text = f"{I18n.tr('about_version', version=Config.APP_VERSION)}  |  <span style='color: {cache_color};'>{I18n.tr('cache_size', size=cache_size_str)}</span>"
                     self._version_label.setText(version_text)
     
     def on_about(self):
@@ -377,7 +377,7 @@ class MainWindow(QMainWindow):
             cache_size = Config.get_cache_size()
             cache_size_str = self._format_size(cache_size)
             cache_color = self._get_cache_color(cache_size)
-            version_text = f"{I18n.tr('about_version', version=Config.DISPLAY_VERSION)}  |  <span style='color: {cache_color};'>{I18n.tr('cache_size', size=cache_size_str)}</span>"
+            version_text = f"{I18n.tr('about_version', version=Config.APP_VERSION)}  |  <span style='color: {cache_color};'>{I18n.tr('cache_size', size=cache_size_str)}</span>"
             self._version_label.setText(version_text)
 
     def _show_and_refresh_cache(self):

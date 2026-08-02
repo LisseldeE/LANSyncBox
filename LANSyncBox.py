@@ -55,7 +55,7 @@ def main():
     # 创建应用
     app = QApplication(sys.argv)
     app.setApplicationName(Config.APP_NAME)
-    app.setApplicationVersion(Config.DISPLAY_VERSION)
+    app.setApplicationVersion(Config.APP_VERSION)
     app.setOrganizationName(Config.APP_AUTHOR)
     
     # 设置默认字体

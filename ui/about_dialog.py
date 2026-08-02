@@ -48,7 +48,7 @@ class AboutDialog(QDialog):
         layout.addWidget(title_label)
 
         # 版本信息
-        version_label = QLabel(f"{I18n.tr('about_version_label')} {Config.DISPLAY_VERSION}")
+        version_label = QLabel(f"{I18n.tr('about_version_label')} {Config.APP_VERSION}")
         version_label.setStyleSheet("font-size: 12px; color: #495057;")
         version_label.setAlignment(Qt.AlignCenter)
         layout.addWidget(version_label)
@@ -157,6 +157,16 @@ class AboutDialog(QDialog):
         """打开作者主页链接（查看详情）"""
         QDesktopServices.openUrl(QUrl(Config.APP_AUTHOR_LINK))
 
+    def _show_styled_message(self, title: str, text: str, icon_type=QMessageBox.Information):
+        """显示统一风格的提示框"""
+        msg_box = QMessageBox(self)
+        msg_box.setWindowTitle(title)
+        msg_box.setText(text)
+        msg_box.setIcon(icon_type)
+        ok_btn = msg_box.addButton(I18n.tr('ok'), QMessageBox.AcceptRole)
+        ok_btn.setStyleSheet(BUTTON_STYLES['primary'])
+        msg_box.exec_()
+
     def _check_update(self):
         """检查更新（根据语言选择 API 源）"""
         try:
@@ -177,41 +187,61 @@ class AboutDialog(QDialog):
                 data = json.loads(response.read().decode())
 
             if not data:
-                QMessageBox.warning(self, I18n.tr('about_check_update'), I18n.tr('about_no_tags'))
+                self._show_styled_message(
+                    I18n.tr('about_check_update'),
+                    I18n.tr('about_no_tags'),
+                    QMessageBox.Warning
+                )
                 return
 
             # 遍历所有 tags，找到版本号最大的那个
             latest_tag = None
-            latest_version_num = -1.0
+            latest_version = (0, 0, 0, 0)
 
             for tag in data:
                 tag_name = tag.get('name', '')
-                # 支持 Rx 和 Rx.x 格式（如 R6、R6.1）
-                version_match = re.search(r'R(\d+(?:\.\d+)?)', tag_name)
+                version = None
+                # 优先匹配 R6.9.1.0 四段式格式
+                version_match = re.search(r'R(\d+)\.(\d+)\.(\d+)\.(\d+)', tag_name)
                 if version_match:
-                    version_num = float(version_match.group(1))
-                    if version_num > latest_version_num:
-                        latest_version_num = version_num
-                        latest_tag = tag_name
+                    version = tuple(map(int, version_match.groups()))
+                else:
+                    # 兼容 R6.x 旧格式，补齐为 R6.x.0.0
+                    old_match = re.search(r'R(\d+)(?:\.(\d+))?', tag_name)
+                    if old_match:
+                        major = int(old_match.group(1))
+                        minor = int(old_match.group(2)) if old_match.group(2) else 0
+                        version = (major, minor, 0, 0)
+                if version and version > latest_version:
+                    latest_version = version
+                    latest_tag = tag_name
 
             if latest_tag is None:
-                QMessageBox.warning(self, I18n.tr('about_check_update'), I18n.tr('about_remote_parse_error'))
+                self._show_styled_message(
+                    I18n.tr('about_check_update'),
+                    I18n.tr('about_remote_parse_error'),
+                    QMessageBox.Warning
+                )
                 return
 
-            # 解析当前版本号（支持 Rx 和 Rx.x 格式）
-            current_version_match = re.search(r'R(\d+(?:\.\d+)?)', Config.APP_VERSION)
+            # 解析当前版本号
+            current_version_match = re.search(r'R(\d+)\.(\d+)\.(\d+)\.(\d+)', Config.APP_VERSION)
             if not current_version_match:
-                QMessageBox.warning(self, I18n.tr('about_check_update'), I18n.tr('about_parse_error'))
+                self._show_styled_message(
+                    I18n.tr('about_check_update'),
+                    I18n.tr('about_parse_error'),
+                    QMessageBox.Warning
+                )
                 return
 
-            current_version = float(current_version_match.group(1))
+            current_version = tuple(map(int, current_version_match.groups()))
 
-            # 比较版本号（浮点数比较）
-            if latest_version_num > current_version:
+            # 比较版本号（元组逐段比较）
+            if latest_version > current_version:
                 # 发现新版本
                 msg_box = QMessageBox(self)
                 msg_box.setWindowTitle(I18n.tr('about_check_update'))
-                msg_box.setText(I18n.tr('about_new_version', version=latest_tag))
+                msg_box.setText(I18n.tr('about_new_version', version=f"R{'.'.join(map(str, latest_version))}"))
                 msg_box.setIcon(QMessageBox.NoIcon)
 
                 # 自定义按钮
@@ -231,9 +261,21 @@ class AboutDialog(QDialog):
                     QDesktopServices.openUrl(QUrl(releases_url))
             else:
                 # 已是最新版本
-                QMessageBox.information(self, I18n.tr('about_check_update'), I18n.tr('about_latest'))
+                self._show_styled_message(
+                    I18n.tr('about_check_update'),
+                    I18n.tr('about_latest'),
+                    QMessageBox.Information
+                )
 
         except urllib.error.URLError as e:
-            QMessageBox.warning(self, I18n.tr('about_check_update'), I18n.tr('about_network_error', error=str(e)))
+            self._show_styled_message(
+                I18n.tr('about_check_update'),
+                I18n.tr('about_network_error', error=str(e)),
+                QMessageBox.Warning
+            )
         except Exception as e:
-            QMessageBox.warning(self, I18n.tr('about_check_update'), I18n.tr('about_check_failed', error=str(e)))
+            self._show_styled_message(
+                I18n.tr('about_check_update'),
+                I18n.tr('about_check_failed', error=str(e)),
+                QMessageBox.Warning
+            )

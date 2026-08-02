@@ -91,7 +91,7 @@ class I18n:
             "leave_room": "离开房间",
             "transfer_log": "传输日志",
             "export_log": "导出日志",
-            "clean_cache_label": "清理缓存文件",
+            "clean_cache_label": "退出时清理缓存",
             "clean_cache_tooltip": "退出当前同步房间时自动清理缓存文件",
             
             # 文件列表
@@ -288,7 +288,7 @@ class I18n:
             "leave_room": "Leave Room",
             "transfer_log": "Transfer Log",
             "export_log": "Export Log",
-            "clean_cache_label": "Clean Cache",
+            "clean_cache_label": "Clean on Exit",
             "clean_cache_tooltip": "Automatically clean cache files when leaving the current sync room",
             
             # File list
