@@ -1,6 +1,6 @@
 """
 平行四边形扫描加载动画 - PySide6 实现
-Copyright (c) 2026 Lisselde_E.
+Copyright (c) 2026 Lisselde_E <Lisselde.E@outlook.com>.
 Licensed under the GNU General Public License v3.0.
 
 支持两种状态：

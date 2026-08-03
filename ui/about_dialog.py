@@ -1,6 +1,6 @@
 """
 关于对话框 - 包含项目信息和检查更新功能
-Copyright (c) 2026 Lisselde_E.
+Copyright (c) 2026 Lisselde_E <Lisselde.E@outlook.com>.
 Licensed under the GNU General Public License v3.0.
 """
 import re

@@ -1,7 +1,7 @@
 """
 同步服务器
 主机端运行，接收连接并转发文件
-Copyright (c) 2026 Lisselde_E.
+Copyright (c) 2026 Lisselde_E <Lisselde.E@outlook.com>.
 Licensed under the GNU General Public License v3.0.
 """
 import socket

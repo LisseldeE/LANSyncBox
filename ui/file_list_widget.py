@@ -2,7 +2,7 @@
 文件列表组件
 支持拖拽、右键菜单、文件操作
 所有同步信号由 UI 操作触发，不使用文件监听
-Copyright (c) 2026 Lisselde_E.
+Copyright (c) 2026 Lisselde_E <Lisselde.E@outlook.com>.
 Licensed under the GNU General Public License v3.0.
 """
 import os

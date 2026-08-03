@@ -1,7 +1,7 @@
 """
 清理队列模块
 用于异步清理缓存文件夹，避免文件锁问题
-Copyright (c) 2026 Lisselde_E.
+Copyright (c) 2026 Lisselde_E <Lisselde.E@outlook.com>.
 Licensed under the GNU General Public License v3.0.
 """
 import threading

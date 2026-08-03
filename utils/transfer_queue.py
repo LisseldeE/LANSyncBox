@@ -1,7 +1,7 @@
 """
 传输队列管理器
 限制同时传输的文件数量，避免内存占用过大
-Copyright (c) 2026 Lisselde_E.
+Copyright (c) 2026 Lisselde_E <Lisselde.E@outlook.com>.
 Licensed under the GNU General Public License v3.0.
 """
 import threading

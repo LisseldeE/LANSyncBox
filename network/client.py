@@ -1,7 +1,7 @@
 """
 同步客户端
 连接端运行，连接服务器并发送/接收文件
-Copyright (c) 2026 Lisselde_E.
+Copyright (c) 2026 Lisselde_E <Lisselde.E@outlook.com>.
 Licensed under the GNU General Public License v3.0.
 """
 import socket

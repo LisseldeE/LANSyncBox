@@ -1,7 +1,7 @@
 """
 同步协议
 使用二进制协议进行高效文件传输
-Copyright (c) 2026 Lisselde_E.
+Copyright (c) 2026 Lisselde_E <Lisselde.E@outlook.com>.
 Licensed under the GNU General Public License v3.0.
 """
 import struct

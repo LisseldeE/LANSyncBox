@@ -1,7 +1,7 @@
 """
 房间发现模块
 使用UDP广播发现局域网内的房间
-Copyright (c) 2026 Lisselde_E.
+Copyright (c) 2026 Lisselde_E <Lisselde.E@outlook.com>.
 Licensed under the GNU General Public License v3.0.
 """
 import socket
