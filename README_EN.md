@@ -143,10 +143,8 @@ The core goal of sync is to keep file lists consistent across all endpoints. Fil
 
 ### 2026.8.3 R7
 
-**#01**
-- Optimize: Logic adaptation for new version number
-- Optimize: Interface details display
-- Fix: SSL certificate issue in Install program
+**#01.1**
+- Optimize: Removed transfer queue limit, solved file transfer loss problem
 
 see [Changelog](https://github.com/LisseldeE/LANSyncBox/blob/main/CHANGELOG.md)
 

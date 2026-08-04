@@ -52,7 +52,7 @@ class SyncClient(QObject):
         self._receiving_lock = threading.Lock()  # 保护 receiving_files 的线程锁
 
         # 创建传输队列，控制并发传输数量
-        self.transfer_queue = TransferQueue(max_concurrent=5, max_queue_size=50)
+        self.transfer_queue = TransferQueue(max_concurrent=5)
     
     def _safe_join(self, filename: str) -> str:
         """

@@ -13,16 +13,14 @@ from collections import deque
 class TransferQueue:
     """传输队列管理器"""
 
-    def __init__(self, max_concurrent: int = 5, max_queue_size: int = 50):
+    def __init__(self, max_concurrent: int = 5):
         """
         初始化传输队列
 
         Args:
             max_concurrent: 同时传输的最大文件数量，默认为5
-            max_queue_size: 队列最大长度，默认为50，超过则丢弃最旧的任务
         """
         self.max_concurrent = max_concurrent
-        self.max_queue_size = max_queue_size
         self.queue = deque()  # 待传输队列
         self.active_count = 0  # 当前正在传输的数量
         self.lock = threading.Lock()  # 线程锁
@@ -57,10 +55,6 @@ class TransferQueue:
                     if task.get('filename') == filename:
                         # 已经在队列中，不需要重复添加
                         return
-
-            # 检查队列上限，超过则丢弃最旧的任务
-            while len(self.queue) >= self.max_queue_size:
-                self.queue.popleft()
 
             # 将任务加入队列
             task = {

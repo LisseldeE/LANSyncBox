@@ -51,7 +51,7 @@ class SyncServer(QObject):
         self._lock = threading.Lock()
         
         # 创建传输队列，控制并发传输数量
-        self.transfer_queue = TransferQueue(max_concurrent=5, max_queue_size=50)
+        self.transfer_queue = TransferQueue(max_concurrent=5)
         
         # 记录正在请求的文件（文件名 -> 客户端ID）
         self.requesting_files: Dict[str, str] = {}

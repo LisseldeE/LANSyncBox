@@ -143,10 +143,8 @@ LANSyncBox 是一款简洁高效的局域网文件实时同步工具，实现多
 
 ### 2026.8.3 R7
 
-**#01**
-- 优化：逻辑适配全新版本号
-- 优化：界面部分细节显示效果
-- 修复：Install安装程序遇到的SSL证书问题
+**#01.1**
+- 优化：移除传输队列上限，解决文件传输丢失问题
 
 详见 [更新日志](https://github.com/LisseldeE/LANSyncBox/blob/main/CHANGELOG.md)
 

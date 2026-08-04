@@ -54,7 +54,7 @@ class SyncWindow(QMainWindow):
         self._cancelled_transfers = set()  # 已取消的文件名（忽略残留进度信号）
         
         # 传输队列管理器（限制同时传输5个文件）
-        self.transfer_queue = TransferQueue(max_concurrent=5, max_queue_size=50)
+        self.transfer_queue = TransferQueue(max_concurrent=5)
 
         # 关闭确认标志（避免 on_disconnect 确认后 close() 再次弹窗）
         self._close_confirmed = False
