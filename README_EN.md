@@ -141,17 +141,12 @@ The core goal of sync is to keep file lists consistent across all endpoints. Fil
 
 ## Change Log
 
-### 2026.6.29 R6
+### 2026.8.3 R7
 
- **#09.1**
-- Fix: Initial sync ignores empty directories
-- Optimize: Improved room input experience
-
-**#09**
-- New: Automatically clean up room cache files
-- New: Friendly display of cache usage on the main interface
-- Fix: Error in file replacement logic
-- Fix: Exceptional progress bar logic on host side
+**#01**
+- Optimize: Logic adaptation for new version number
+- Optimize: Interface details display
+- Fix: SSL certificate issue in Install program
 
 see [Changelog](https://github.com/LisseldeE/LANSyncBox/blob/main/CHANGELOG.md)
 
