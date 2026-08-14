@@ -15,7 +15,7 @@ LANSyncBox 是一款简洁高效的局域网文件实时同步工具，实现多
 ## 项目截图
 | 主界面 | 同步界面 |
 | :---: | :---: |
-| ![主界面](https://lisseldee.github.io/images/webp/1-1.webp) | ![同步界面](https://lisseldee.github.io/images/webp/1-2.webp) |
+| ![主界面](https://lisseldee.github.io/assets/images/webp/1-1.webp) | ![同步界面](https://lisseldee.github.io/assets/images/webp/1-2.webp) |
 
 ## 项目信息
 

@@ -15,7 +15,7 @@ LANSyncBox is a simple and efficient LAN real-time file synchronization tool tha
 ## Project Screenshots
 | Main Interface | Sync Interface |
 | :---: | :---: |
-| ![Main Interface](https://lisseldee.github.io/images/webp/1-1.webp) | ![Sync Interface](https://lisseldee.github.io/images/webp/1-2.webp) |
+| ![Main Interface](https://lisseldee.github.io/assets/images/webp/1-1.webp) | ![Sync Interface](https://lisseldee.github.io/assets/images/webp/1-2.webp) |
 
 ## Project Information
 
