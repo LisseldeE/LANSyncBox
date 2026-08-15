@@ -1,4 +1,6 @@
-# LANSyncBox - LAN Real-time File Synchronization Tool
+<p align="center">
+  <img src="https://lisseldee.github.io/assets/images/webp/1-e.webp" width="100%" alt="LANSyncBox">
+</p>
 
 <div align="center">
 
@@ -33,12 +35,23 @@ LANSyncBox is a simple and efficient LAN real-time file synchronization tool tha
 
 ## Download
 
-<a href="https://apps.microsoft.com/detail/9nsjvp7fxkm3?referrer=appbadge&mode=full" target="_blank"  rel="noopener noreferrer">
-	<img src="https://get.microsoft.com/images/en-us%20dark.svg" width="200"/>
-</a>
+<p align="center">
+  <a href="https://apps.microsoft.com/detail/9nsjvp7fxkm3?referrer=appbadge&mode=full">
+    <img src="https://get.microsoft.com/images/en-us%20dark.svg" width="180" alt="Microsoft Store">
+  </a>
+</p>
 
-- **GitHub Releases**: https://github.com/LisseldeE/LANSyncBox/releases
-- **Gitee Mirror Download**: https://gitee.com/Lisselde_E/LANSyncBox/releases (Recommended for users in China)
+<p align="center">
+  <a href="https://github.com/LisseldeE/LANSyncBox/releases">
+    <img src="https://img.shields.io/badge/GitHub-Releases-181717?style=flat-square&logo=github&logoColor=white" alt="GitHub Releases">
+  </a>
+  &nbsp;&nbsp;
+  <a href="https://gitee.com/Lisselde_E/LANSyncBox/releases">
+    <img src="https://img.shields.io/badge/Gitee-Mirror-C71D23?style=flat-square&logo=gitee&logoColor=white" alt="Gitee Mirror">
+  </a>
+</p>
+
+> 💡 Recommended for users in China: Gitee Mirror
 
 ## Features
 
@@ -140,17 +153,12 @@ The core goal of sync is to keep file lists consistent across all endpoints. Fil
 - **Host Offline**: All clients notified "Connection disconnected"
 - **Transfer Protocol**: TCP + custom protocol
 - **Large File Handling**: Streaming chunked transfer to avoid high memory usage
-- **Concurrency Control**: Max 3 files transferred simultaneously to optimize system resource usage
+- **Concurrency Control**: Max 5 files transferred simultaneously to optimize system resource usage
 - **Transfer Cancellation**: Auto-cancels transfer on file change, sends FILE_CANCEL to notify receiver cleanup
 - **Resumable Transfer**: Chunks written by chunk_index positioning, failed retransmissions don't affect received parts
 - **Integrity Check**: Validates file size on FILE_END, discards temp file if incomplete
 
 ## Change Log
-
-### 2026.8.3 R7
-
-**#01.1**
-- Optimize: Removed transfer queue limit, solved file transfer loss problem
 
 see [Changelog](https://github.com/LisseldeE/LANSyncBox/blob/main/CHANGELOG.md)
 
@@ -163,18 +171,14 @@ see [Changelog](https://github.com/LisseldeE/LANSyncBox/blob/main/CHANGELOG.md)
 ## Installation & Running
 
 ### System Requirements
-- Python 3.6 or higher
-- Windows 10 or higher
+- Windows 10 or later (64-bit)
 
-### Install Dependencies
-```bash
-pip install PySide6
-```
+### Installation
+- **Microsoft Store**: Search for LANSyncBox or click the download button above
+- **Other Methods**: Download from [GitHub Releases](https://github.com/LisseldeE/LANSyncBox/releases) or [Gitee Mirror](https://gitee.com/Lisselde_E/LANSyncBox/releases), then run the installer
 
-### Run Program
-```bash
-python LANSyncBox.py
-```
+### Running
+After installation, launch LANSyncBox from the Start menu or desktop shortcut
 
 ## Open Source License
 

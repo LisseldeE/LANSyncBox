@@ -1,4 +1,6 @@
-# LANSyncBox - 局域网文件实时同步工具
+<p align="center">
+  <img src="https://lisseldee.github.io/assets/images/webp/1-c.webp" width="100%" alt="LANSyncBox">
+</p>
 
 <div align="center">
 
@@ -33,12 +35,23 @@ LANSyncBox 是一款简洁高效的局域网文件实时同步工具，实现多
 
 ## 下载
 
-<a href="https://apps.microsoft.com/detail/9nsjvp7fxkm3?referrer=appbadge&mode=full" target="_blank"  rel="noopener noreferrer">
-	<img src="https://get.microsoft.com/images/zh-cn%20dark.svg" width="200"/>
-</a>
+<p align="center">
+  <a href="https://apps.microsoft.com/detail/9nsjvp7fxkm3?referrer=appbadge&mode=full">
+    <img src="https://get.microsoft.com/images/zh-cn%20dark.svg" width="180" alt="Microsoft Store">
+  </a>
+</p>
 
-- **GitHub Releases**: https://github.com/LisseldeE/LANSyncBox/releases
-- **Gitee 镜像下载**: https://gitee.com/Lisselde_E/LANSyncBox/releases （推荐国内用户使用）
+<p align="center">
+  <a href="https://github.com/LisseldeE/LANSyncBox/releases">
+    <img src="https://img.shields.io/badge/GitHub-Releases-181717?style=flat-square&logo=github&logoColor=white" alt="GitHub Releases">
+  </a>
+  &nbsp;&nbsp;
+  <a href="https://gitee.com/Lisselde_E/LANSyncBox/releases">
+    <img src="https://img.shields.io/badge/Gitee-镜像下载-C71D23?style=flat-square&logo=gitee&logoColor=white" alt="Gitee 镜像下载">
+  </a>
+</p>
+
+> 💡 国内用户推荐使用 Gitee 镜像下载
 
 ## 功能特性
 
@@ -140,17 +153,12 @@ LANSyncBox 是一款简洁高效的局域网文件实时同步工具，实现多
 - **主机离线**：所有连接端提示"连接已断开"
 - **传输协议**：TCP + 自定义协议
 - **大文件处理**：采用流式分块传输，避免内存占用过高
-- **并发控制**：最多同时传输3个文件，优化系统资源占用
+- **并发控制**：最多同时传输5个文件，优化系统资源占用
 - **传输取消**：文件变化时自动取消传输，发送 FILE_CANCEL 通知接收端清理
 - **断点续传**：分块按 chunk_index 定位写入，失败重发不影响已接收部分
 - **完整性校验**：FILE_END 时校验文件大小，不完整则丢弃临时文件
 
 ## 更新日志
-
-### 2026.8.3 R7
-
-**#01.1**
-- 优化：移除传输队列上限，解决文件传输丢失问题
 
 详见 [更新日志](https://github.com/LisseldeE/LANSyncBox/blob/main/CHANGELOG.md)
 
@@ -163,18 +171,14 @@ LANSyncBox 是一款简洁高效的局域网文件实时同步工具，实现多
 ## 安装与运行
 
 ### 系统要求
-- Python 3.6 或更高版本
-- Windows 10 或更高版本
+- Windows 10 或更高版本（64位）
 
-### 安装依赖
-```bash
-pip install PySide6
-```
+### 安装方式
+- **Microsoft Store**：搜索 LANSyncBox 或点击上方下载按钮安装
+- **其他方式**：从 [GitHub Releases](https://github.com/LisseldeE/LANSyncBox/releases) 或 [Gitee 镜像](https://gitee.com/Lisselde_E/LANSyncBox/releases) 下载安装包，双击运行即可
 
-### 运行程序
-```bash
-python LANSyncBox.py
-```
+### 运行
+安装完成后，从开始菜单或桌面快捷方式启动 LANSyncBox
 
 ## 开源声明
 
