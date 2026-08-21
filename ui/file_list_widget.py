@@ -16,10 +16,13 @@ from PySide6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QTableWidget, 
     QTableWidgetItem, QHeaderView, QMenu, QMessageBox, 
     QFileDialog, QAbstractItemView, QLabel, QPushButton, QLineEdit,
-    QRubberBand
+    QRubberBand, QGraphicsOpacityEffect
 )
-from PySide6.QtCore import Qt, Signal, QMimeData, QUrl, QPoint, QThread, QMetaObject, Q_ARG, QRect, QItemSelection, QItemSelectionModel
-from PySide6.QtGui import QAction, QIcon, QDrag, QDropEvent, QDragEnterEvent, QDragMoveEvent, QCursor
+from PySide6.QtCore import (Qt, Signal, QMimeData, QUrl, QPoint, QThread,
+                            QMetaObject, Q_ARG, QRect, QItemSelection,
+                            QItemSelectionModel, QTimer, QPropertyAnimation,
+                            QSequentialAnimationGroup, QEasingCurve)
+from PySide6.QtGui import QAction, QIcon, QDrag, QDropEvent, QDragEnterEvent, QDragMoveEvent, QCursor, QColor
 from PySide6.QtWidgets import QApplication
 
 from i18n import I18n
@@ -451,6 +454,9 @@ class FileListWidget(QWidget):
         
         # 标记是否正在接收远程文件（刷新文件列表时不触发同步）
         self._receiving_remote = False
+
+        # 顶部悬浮提示的停留时长（毫秒），演示/测试时可调慢
+        self._toast_hold_ms = 1500
         
         # 取消传输回调（由 SyncWindow 设置，直接调用避免 Qt 信号异步性问题）
         self._cancel_transfer_callback = None
@@ -537,11 +543,11 @@ class FileListWidget(QWidget):
         self.path_edit.setReadOnly(True)
         toolbar_layout.addWidget(self.path_edit)
         
-        # 刷新按钮
-        refresh_btn = QPushButton(I18n.tr('refresh'))
-        refresh_btn.setFixedWidth(60)
-        refresh_btn.clicked.connect(self.load_files)
-        toolbar_layout.addWidget(refresh_btn)
+        # 刷新按钮（已注释：远程/本地变化均有自动刷新，此手动按钮冗余，暂不删除、保留逻辑）
+        # refresh_btn = QPushButton(I18n.tr('refresh'))
+        # refresh_btn.setFixedWidth(60)
+        # refresh_btn.clicked.connect(self.load_files)
+        # toolbar_layout.addWidget(refresh_btn)
         
         layout.addWidget(toolbar)
         
@@ -592,7 +598,21 @@ class FileListWidget(QWidget):
         """加载文件列表"""
         self.table.setRowCount(0)
 
-        if not self.current_path.exists():
+        # 当前目录可能已被远程删除/改名：自动回退到最近的仍存在的祖先目录
+        # 以根目录 folder_path 为上限，不越界；根目录自身失效时仅清空显示
+        original = self.current_path
+        target = self.current_path
+        while (not target.exists() or not target.is_dir()) \
+                and target != self.folder_path \
+                and target.parent != target:
+            target = target.parent
+        if target != original and target.exists() and target.is_dir():
+            self.current_path = target
+            self.update_path_display()
+            # 给出顶部悬浮提示
+            self._show_toast(I18n.tr('toast_dir_changed'))
+
+        if not self.current_path.exists() or not self.current_path.is_dir():
             self.drag_hint_label.hide()
             return
 
@@ -648,6 +668,82 @@ class FileListWidget(QWidget):
             # 保存路径信息
             name_item.setData(Qt.UserRole, str(item))
 
+    def _toast_card_style(self) -> str:
+        """根据界面明暗主题自动生成卡片样式：自适应背景 + 1px 深灰描边"""
+        win = self.palette().color(self.palette().ColorRole.Window)
+        luminance = 0.299 * win.red() + 0.587 * win.green() + 0.114 * win.blue()
+        if luminance > 128:  # 浅色主题
+            bg, fg, border = (
+                QColor(255, 255, 255), QColor(34, 38, 42), QColor(140, 140, 146)
+            )
+        else:  # 深色主题
+            bg, fg, border = (
+                QColor(58, 60, 64), QColor(244, 244, 244), QColor(108, 108, 114)
+            )
+        return (
+            f"QLabel {{"
+            f"  background-color: {bg.name()};"
+            f"  color: {fg.name()};"
+            f"  border: 1px solid {border.name()};"
+            f"  border-radius: 8px;"
+            f"  padding: 8px 18px;"
+            f"  font-size: 13px;"
+            f"}}"
+        )
+
+    def _show_toast(self, message: str):
+        """顶部悬浮提示：淡入→停留→淡出"""
+        if getattr(self, '_toast', None) is None:
+            self._toast = QLabel(self)
+            self._toast.setAlignment(Qt.AlignCenter)
+            self._toast.setWordWrap(False)  # 单行显示
+            self._toast.setAttribute(Qt.WA_TransparentForMouseEvents)
+            self._toast_effect = QGraphicsOpacityEffect(self._toast)
+            self._toast.setGraphicsEffect(self._toast_effect)
+            # 首次触发时套用自适应明暗主题的卡片样式
+            self._toast.setStyleSheet(self._toast_card_style())
+
+        self._toast.setText(message)
+        self._toast.adjustSize()
+        self._center_toast()
+        self._toast.raise_()
+        self._toast.show()
+
+        # 终止上一次动画，避免叠加
+        if getattr(self, '_toast_anim', None) is not None:
+            try:
+                self._toast_anim.stop()
+            except Exception:
+                pass
+
+        self._toast_effect.setOpacity(0.0)
+        fade_in = QPropertyAnimation(self._toast_effect, b'opacity', self._toast)
+        fade_in.setDuration(250)
+        fade_in.setStartValue(0.0)
+        fade_in.setEndValue(1.0)
+        fade_in.setEasingCurve(QEasingCurve.InOutQuad)
+
+        fade_out = QPropertyAnimation(self._toast_effect, b'opacity', self._toast)
+        fade_out.setDuration(250)
+        fade_out.setStartValue(1.0)
+        fade_out.setEndValue(0.0)
+        fade_out.setEasingCurve(QEasingCurve.InOutQuad)
+        fade_out.finished.connect(self._toast.hide)
+
+        self._toast_anim = QSequentialAnimationGroup(self._toast)
+        self._toast_anim.addAnimation(fade_in)
+        self._toast_anim.addPause(self._toast_hold_ms)
+        self._toast_anim.addAnimation(fade_out)
+        self._toast_anim.start()
+
+    def _center_toast(self):
+        """将悬浮提示水平居中于顶部（单行按内容自适应宽度）"""
+        self._toast.adjustSize()
+        w = min(self._toast.width(), self.width() - 24)
+        x = (self.width() - w) // 2
+        self._toast.resize(w, self._toast.height())
+        self._toast.move(x, 10)
+
     def _show_drag_hint(self):
         """显示拖拽提示悬浮层"""
         if not self.table.isVisible():
@@ -681,6 +777,8 @@ class FileListWidget(QWidget):
     def resizeEvent(self, event):
         """窗口大小改变时重新定位悬浮提示"""
         super().resizeEvent(event)
+        if getattr(self, '_toast', None) is not None and self._toast.isVisible():
+            self._center_toast()
         if self.drag_hint_label.isVisible():
             self._show_drag_hint()
 
