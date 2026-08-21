@@ -5,7 +5,7 @@ Licensed under the GNU General Public License v3.0.
 """
 import re
 import urllib.request
-import json
+import ssl
 from PySide6.QtWidgets import (
     QDialog, QVBoxLayout, QHBoxLayout, QLabel,
     QPushButton, QMessageBox, QApplication
@@ -28,6 +28,12 @@ class AboutDialog(QDialog):
         flags = Qt.Dialog | Qt.WindowCloseButtonHint
         self.setWindowFlags(flags)
         self.setFixedSize(400, 260)  # 更紧凑的高度
+
+        # SSL 上下文（避免 SSL 证书校验错误导致无法更新）
+        self.ssl_context = ssl.create_default_context()
+        self.ssl_context.check_hostname = False
+        self.ssl_context.verify_mode = ssl.CERT_NONE
+
         self._init_ui()
 
     def _init_ui(self):
@@ -167,115 +173,87 @@ class AboutDialog(QDialog):
         ok_btn.setStyleSheet(BUTTON_STYLES['primary'])
         msg_box.exec_()
 
-    def _check_update(self):
-        """检查更新（根据语言选择 API 源）"""
+    def _get_latest_version(self):
+        """从 GitHub Pages 纯文本文件拉取最新版本号
+        返回值: (版本号字符串, 错误信息字符串) 元组
+            成功时: ("R7.1.1.0", None)
+            失败时: (None, "错误描述")
+        """
+        req = urllib.request.Request(Config.UPDATE_URL)
+        req.add_header('User-Agent', Config.APP_NAME)
+
         try:
-            # 根据语言选择 API 端点
-            if I18n.get_language() == "zh_CN":
-                api_url = Config.GITEE_API
-                releases_url = Config.GITEE_RELEASES
-            else:
-                api_url = Config.GITHUB_API
-                releases_url = Config.GITHUB_RELEASES
+            with urllib.request.urlopen(req, timeout=15, context=self.ssl_context) as response:
+                body = response.read().decode('utf-8').strip()
+            # io 文件为 R 前缀四段（如 R7.1.1.0），校验后直接返回。
+            if not re.match(r'R\d+(\.\d+){0,3}', body):
+                return None, None
+            return body, None
+        except Exception as e:
+            return None, str(e)
 
-            # 创建请求，添加 User-Agent
-            req = urllib.request.Request(api_url)
-            req.add_header('User-Agent', Config.APP_NAME)
-
-            # 发送请求，设置超时时间
-            with urllib.request.urlopen(req, timeout=10) as response:
-                data = json.loads(response.read().decode())
-
-            if not data:
-                self._show_styled_message(
-                    I18n.tr('about_check_update'),
-                    I18n.tr('about_no_tags'),
-                    QMessageBox.Warning
-                )
-                return
-
-            # 遍历所有 tags，找到版本号最大的那个
-            latest_tag = None
-            latest_version = (0, 0, 0, 0)
-
-            for tag in data:
-                tag_name = tag.get('name', '')
-                version = None
-                # 优先匹配 R6.9.1.0 四段式格式
-                version_match = re.search(r'R(\d+)\.(\d+)\.(\d+)\.(\d+)', tag_name)
-                if version_match:
-                    version = tuple(map(int, version_match.groups()))
-                else:
-                    # 兼容 R6.x 旧格式，补齐为 R6.x.0.0
-                    old_match = re.search(r'R(\d+)(?:\.(\d+))?', tag_name)
-                    if old_match:
-                        major = int(old_match.group(1))
-                        minor = int(old_match.group(2)) if old_match.group(2) else 0
-                        version = (major, minor, 0, 0)
-                if version and version > latest_version:
-                    latest_version = version
-                    latest_tag = tag_name
-
-            if latest_tag is None:
-                self._show_styled_message(
-                    I18n.tr('about_check_update'),
-                    I18n.tr('about_remote_parse_error'),
-                    QMessageBox.Warning
-                )
-                return
-
-            # 解析当前版本号
-            current_version_match = re.search(r'R(\d+)\.(\d+)\.(\d+)\.(\d+)', Config.APP_VERSION)
-            if not current_version_match:
-                self._show_styled_message(
-                    I18n.tr('about_check_update'),
-                    I18n.tr('about_parse_error'),
-                    QMessageBox.Warning
-                )
-                return
-
-            current_version = tuple(map(int, current_version_match.groups()))
-
-            # 比较版本号（元组逐段比较）
-            if latest_version > current_version:
-                # 发现新版本
-                msg_box = QMessageBox(self)
-                msg_box.setWindowTitle(I18n.tr('about_check_update'))
-                msg_box.setText(I18n.tr('about_new_version', version=f"R{'.'.join(map(str, latest_version))}"))
-                msg_box.setIcon(QMessageBox.NoIcon)
-
-                # 自定义按钮
-                yes_btn = msg_box.addButton(I18n.tr('about_yes'), QMessageBox.YesRole)
-                no_btn = msg_box.addButton(I18n.tr('about_no'), QMessageBox.NoRole)
-
-                # 绿色"是"按钮
-                yes_btn.setStyleSheet(BUTTON_STYLES['success'])
-
-                # 红色"否"按钮
-                no_btn.setStyleSheet(BUTTON_STYLES['danger'])
-
-                msg_box.exec_()
-
-                # 处理用户选择
-                if msg_box.clickedButton() == yes_btn:
-                    QDesktopServices.openUrl(QUrl(releases_url))
-            else:
-                # 已是最新版本
-                self._show_styled_message(
-                    I18n.tr('about_check_update'),
-                    I18n.tr('about_latest'),
-                    QMessageBox.Information
-                )
-
-        except urllib.error.URLError as e:
+    def _check_update(self):
+        """检查更新（从 github.io 拉取版本号，下载落地页按语言区分）"""
+        # 拉取远程最新版本
+        latest, err = self._get_latest_version()
+        if not latest:
             self._show_styled_message(
                 I18n.tr('about_check_update'),
-                I18n.tr('about_network_error', error=str(e)),
+                err or I18n.tr('about_remote_parse_error'),
                 QMessageBox.Warning
             )
-        except Exception as e:
+            return
+
+        # 下载落地页按语言区分（中文 Gitee / 其他 GitHub）
+        releases_url = Config.GITEE_RELEASES if I18n.get_language() == "zh_CN" else Config.GITHUB_RELEASES
+
+        # 解析远程与当前版本号（四段式元组比较）
+        latest_match = re.search(r'R(\d+)\.(\d+)\.(\d+)\.(\d+)', latest)
+        current_match = re.search(r'R(\d+)\.(\d+)\.(\d+)\.(\d+)', Config.APP_VERSION)
+        if not latest_match:
             self._show_styled_message(
                 I18n.tr('about_check_update'),
-                I18n.tr('about_check_failed', error=str(e)),
+                I18n.tr('about_remote_parse_error'),
                 QMessageBox.Warning
+            )
+            return
+        if not current_match:
+            self._show_styled_message(
+                I18n.tr('about_check_update'),
+                I18n.tr('about_parse_error'),
+                QMessageBox.Warning
+            )
+            return
+
+        latest_version = tuple(map(int, latest_match.groups()))
+        current_version = tuple(map(int, current_match.groups()))
+
+        # 比较版本号（元组逐段比较）
+        if latest_version > current_version:
+            # 发现新版本
+            msg_box = QMessageBox(self)
+            msg_box.setWindowTitle(I18n.tr('about_check_update'))
+            msg_box.setText(I18n.tr('about_new_version', version=f"R{'.'.join(map(str, latest_version))}"))
+            msg_box.setIcon(QMessageBox.NoIcon)
+
+            # 自定义按钮
+            yes_btn = msg_box.addButton(I18n.tr('about_yes'), QMessageBox.YesRole)
+            no_btn = msg_box.addButton(I18n.tr('about_no'), QMessageBox.NoRole)
+
+            # 绿色"是"按钮
+            yes_btn.setStyleSheet(BUTTON_STYLES['success'])
+            # 红色"否"按钮
+            no_btn.setStyleSheet(BUTTON_STYLES['danger'])
+
+            msg_box.exec_()
+
+            # 处理用户选择
+            if msg_box.clickedButton() == yes_btn:
+                QDesktopServices.openUrl(QUrl(releases_url))
+        else:
+            # 已是最新版本
+            self._show_styled_message(
+                I18n.tr('about_check_update'),
+                I18n.tr('about_latest'),
+                QMessageBox.Information
             )
