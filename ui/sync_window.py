@@ -244,9 +244,27 @@ class SyncWindow(QMainWindow):
         bottom_layout = QHBoxLayout(bottom_frame)
         bottom_layout.setContentsMargins(10, 2, 10, 2)
 
-        # 同步文件夹路径
-        folder_label = QLabel(I18n.tr('sync_folder_path', path=str(self.room_folder)))
-        bottom_layout.addWidget(folder_label)
+        # 同步文件夹路径（前缀显示版本号.串号，竖线分隔、垂直居中）
+        folder_widget = QWidget()
+        folder_layout = QHBoxLayout(folder_widget)
+        folder_layout.setContentsMargins(0, 0, 0, 0)
+        folder_layout.setSpacing(6)
+
+        serial_label = QLabel(Config.APP_VERSION_SERIAL)
+        folder_layout.addWidget(serial_label, 0, Qt.AlignVCenter)
+
+        # 竖线（用 VLine 绘制，固定高度保证垂直居中不越界）
+        vline = QFrame()
+        vline.setFrameShape(QFrame.VLine)
+        vline.setFrameShadow(QFrame.Plain)
+        vline.setFixedHeight(12)
+        folder_layout.addWidget(vline, 0, Qt.AlignVCenter)
+
+        path_label = QLabel(I18n.tr('sync_folder_path', path=str(self.room_folder)))
+        path_label.setToolTip(str(self.room_folder))  # 长路径悬浮查看完整
+        folder_layout.addWidget(path_label, 0, Qt.AlignVCenter)
+
+        bottom_layout.addWidget(folder_widget)
 
         bottom_layout.addStretch()
 
@@ -890,6 +908,8 @@ class SyncWindow(QMainWindow):
         try:
             # 收集表格内容
             lines = []
+            # 日志文件第一行写入完整串号（名称.版本号.串号）
+            lines.append(Config.APP_SERIAL_FULL)
             for row in range(self.records_table.rowCount()):
                 action_item = self.records_table.item(row, 0)
                 info_item = self.records_table.item(row, 1)

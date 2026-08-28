@@ -1,8 +1,8 @@
 __pycache__/
 .idea/
 .vs/
+.md/
 output/
-标记文件/
 SyncFolder/
 old/
 dist/

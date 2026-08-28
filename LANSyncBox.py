@@ -52,6 +52,9 @@ def main():
         except (AttributeError, OSError):
             pass
 
+    # 使用 PassThrough 策略处理非整数缩放（如125%），避免边框被位图放大裁切
+    QApplication.setHighDpiScaleFactorRoundingPolicy(Qt.HighDpiScaleFactorRoundingPolicy.PassThrough)
+
     # 创建应用
     app = QApplication(sys.argv)
     app.setApplicationName(Config.APP_NAME)

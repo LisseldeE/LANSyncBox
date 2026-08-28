@@ -15,7 +15,7 @@ from i18n import I18n
 from config import Config
 from network.discovery import RoomDiscovery
 from network.client import SyncClient
-from ui.widgets import AnimatedButton, BUTTON_STYLES, fade_widget
+from ui.widgets import AnimatedButton, SnapOutlineButton, BUTTON_STYLES, fade_widget
 from ui.loading_animation import PageLoader, LoaderState
 
 
@@ -296,10 +296,9 @@ class JoinRoomDialog(QDialog):
         discover_label.setStyleSheet("font-weight: bold;")
         discover_header.addWidget(discover_label)
 
-        self.scan_btn = AnimatedButton(I18n.tr('refresh_scan'))
+        self.scan_btn = SnapOutlineButton(I18n.tr('refresh_scan'))
         self.scan_btn.setFixedWidth(80)
         self.scan_btn.clicked.connect(self._start_scan_all_rooms)
-        self.scan_btn.setStyleSheet(BUTTON_STYLES['outline'])
         discover_header.addStretch()
         discover_header.addWidget(self.scan_btn)
         discover_layout.addLayout(discover_header)

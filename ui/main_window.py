@@ -16,7 +16,7 @@ from config import Config, UserConfig
 from ui.create_room_dialog import CreateRoomDialog
 from ui.join_room_dialog import JoinRoomDialog
 from ui.about_dialog import AboutDialog
-from ui.widgets import AnimatedButton, BUTTON_STYLES
+from ui.widgets import AnimatedButton, SnapOutlineButton, BUTTON_STYLES
 
 
 class MainWindow(QMainWindow):
@@ -192,7 +192,7 @@ class MainWindow(QMainWindow):
         
         # 语言切换按钮
         self.lang_btn = AnimatedButton(self._get_language_text())
-        self.lang_btn.setFixedWidth(100)
+        self.lang_btn.setFixedSize(100, 34)
         self.lang_btn.clicked.connect(self.on_toggle_language)
         self.lang_btn.setStyleSheet(BUTTON_STYLES['secondary'])
         bottom_layout.addWidget(self.lang_btn)
@@ -200,21 +200,19 @@ class MainWindow(QMainWindow):
         # 弹性空间 - 中间
         bottom_layout.addStretch()
         
-        # 管理缓存按钮
-        self.manage_cache_btn = AnimatedButton(I18n.tr('manage_cache'))
-        self.manage_cache_btn.setFixedWidth(100)
+        # 管理缓存按钮（设备像素对齐边框，避免非整数缩放下边框被裁切）
+        self.manage_cache_btn = SnapOutlineButton(I18n.tr('manage_cache'))
+        self.manage_cache_btn.setFixedSize(100, 34)
         self.manage_cache_btn.clicked.connect(self.on_manage_cache)
-        self.manage_cache_btn.setStyleSheet(BUTTON_STYLES['outline'])
         bottom_layout.addWidget(self.manage_cache_btn)
         
         # 弹性空间 - 中间
         bottom_layout.addStretch()
         
-        # 关于按钮
-        about_btn = AnimatedButton(I18n.tr('about'))
-        about_btn.setFixedWidth(100)
+        # 关于按钮（设备像素对齐边框）
+        about_btn = SnapOutlineButton(I18n.tr('about'))
+        about_btn.setFixedSize(100, 34)
         about_btn.clicked.connect(self.on_about)
-        about_btn.setStyleSheet(BUTTON_STYLES['outline'])
         bottom_layout.addWidget(about_btn)
         
         # 弹性空间 - 尾部

@@ -16,7 +16,7 @@ from PySide6.QtGui import QPalette, QFont, QShowEvent
 
 from i18n import I18n
 from config import Config, UserConfig
-from ui.widgets import AnimatedButton, BUTTON_STYLES
+from ui.widgets import AnimatedButton, SnapOutlineButton, BUTTON_STYLES
 from ui.join_room_dialog import RoomCodeInput
 from network.discovery import RoomDiscovery
 from ui.loading_animation import PageLoader, LoaderState
@@ -116,24 +116,23 @@ class CreateRoomDialog(QDialog):
         self.status_label.setWordWrap(True)
         room_code_layout.addWidget(self.status_label)
 
-        # 固定房间号勾选框
+        # 固定房间号勾选框 + 自定义/重新生成按钮（同一行）
+        fixed_layout = QHBoxLayout()
         self.fixed_room_code_checkbox = QCheckBox(I18n.tr('fixed_room_code'))
         self.fixed_room_code_checkbox.setToolTip(I18n.tr('fixed_room_code_hint'))
         self.fixed_room_code_checkbox.stateChanged.connect(self.on_fixed_room_code_toggled)
-        room_code_layout.addWidget(self.fixed_room_code_checkbox)
+        fixed_layout.addWidget(self.fixed_room_code_checkbox)
 
         # 先生成随机房间号（默认状态，避免阻塞渲染）
         self.generate_room_code()
 
-        # 重新生成按钮
-        regenerate_btn_layout = QHBoxLayout()
-        regenerate_btn_layout.addStretch()
-        self.regenerate_btn = AnimatedButton(I18n.tr('regenerate_room_code'))
+        # 重新生成按钮（固定状态时切换为"自定义"）
+        fixed_layout.addStretch()
+        self.regenerate_btn = SnapOutlineButton(I18n.tr('regenerate_room_code'))
         self.regenerate_btn.setFixedWidth(120)
         self.regenerate_btn.clicked.connect(self.generate_room_code)
-        self.regenerate_btn.setStyleSheet(BUTTON_STYLES['outline'])
-        regenerate_btn_layout.addWidget(self.regenerate_btn)
-        room_code_layout.addLayout(regenerate_btn_layout)
+        fixed_layout.addWidget(self.regenerate_btn)
+        room_code_layout.addLayout(fixed_layout)
 
         layout.addLayout(room_code_layout)
         

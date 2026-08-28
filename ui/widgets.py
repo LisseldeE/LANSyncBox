@@ -3,10 +3,11 @@
 Copyright (c) 2026 Lisselde_E <Lisselde.E@outlook.com>.
 Licensed under the GNU General Public License v3.0.
 """
-from PySide6.QtWidgets import QPushButton, QLabel, QFrame, QGraphicsOpacityEffect, QWidget
+from PySide6.QtWidgets import QPushButton, QLabel, QFrame, QGraphicsOpacityEffect, QWidget, QApplication
 from PySide6.QtCore import Qt, QTimer, QPropertyAnimation, QByteArray, QPoint, QEvent, Signal, Property, QRectF, QEasingCurve
-from PySide6.QtGui import QFont, QEnterEvent, QPainter, QColor, QPen, QBrush
+from PySide6.QtGui import QFont, QEnterEvent, QPainter, QColor, QPen, QBrush, QPalette
 from functools import partial
+from math import ceil, floor
 
 
 class AnimatedButton(QPushButton):
@@ -55,6 +56,149 @@ class AnimatedButton(QPushButton):
         if self._original_pos is not None:
             self.move(self._original_pos)
         super().mouseReleaseEvent(event)
+
+
+class SnapOutlineButton(AnimatedButton):
+    """
+    设备像素对齐边框按钮
+
+    解决非整数缩放（如125%）下 QSS 1px 边框落在小数设备像素上，
+    导致上/左边框被裁切、显示不完整不圆润的视觉缺陷。
+
+    边框使用 QPainter 手动绘制，并对齐到物理像素网格：
+    - 描边宽度为 1 逻辑像素（与 QSS 1px 视觉一致，不会变细）
+    - 边界取整后描边完全位于控件内，不会被裁切
+    - 悬浮/按下背景与边框共用同一对齐矩形，边缘完全吻合
+    - 任意缩放下四边完整、宽度均匀、圆角锐利
+    """
+
+    def __init__(self, text="", parent=None):
+        super().__init__(text, parent)
+        self._hovered = False
+        self._pressed_state = False
+        # 移除 QSS 边框，避免与自绘边框双重渲染（保留文字颜色与内边距）
+        # padding 保持与 outline 样式一致，避免未显式设置高度时按钮塌缩成胶囊形
+        self.setStyleSheet("""
+            QPushButton {
+                background-color: transparent;
+                color: #339af0;
+                border: none;
+                border-radius: 6px;
+                padding: 8px 16px;
+            }
+            QPushButton:disabled {
+                color: #adb5bd;
+            }
+        """)
+
+    def enterEvent(self, event):
+        self._hovered = True
+        self.update()
+        super().enterEvent(event)
+
+    def leaveEvent(self, event):
+        self._hovered = False
+        self.update()
+        super().leaveEvent(event)
+
+    def mousePressEvent(self, event):
+        if event.button() == Qt.LeftButton:
+            self._pressed_state = True
+            self.update()
+        super().mousePressEvent(event)
+
+    def mouseReleaseEvent(self, event):
+        self._pressed_state = False
+        self.update()
+        super().mouseReleaseEvent(event)
+
+    def paintEvent(self, event):
+        # 1. 背景（悬停/按下状态填充，与边框使用同一对齐矩形 → 边缘完全吻合）
+        #    禁用时不绘制背景，避免禁用态仍出现悬浮高亮
+        if (self._hovered or self._pressed_state) and self.isEnabled():
+            hover_color, pressed_color = self._fill_colors()
+            p = QPainter(self)
+            p.setRenderHint(QPainter.Antialiasing, True)
+            p.setPen(Qt.NoPen)
+            p.setBrush(pressed_color if self._pressed_state else hover_color)
+            p.drawRoundedRect(self._aligned_rect(), 6.0, 6.0)
+            p.end()
+        # 2. 文字（基类绘制，QSS 仅提供文字颜色、无边框）
+        super().paintEvent(event)
+        # 3. 设备像素对齐边框
+        p = QPainter(self)
+        p.setRenderHint(QPainter.Antialiasing, True)
+        p.setPen(self._aligned_pen())
+        p.setBrush(Qt.NoBrush)
+        p.drawRoundedRect(self._aligned_rect(), 6.0, 6.0)
+        p.end()
+
+    def _pen_width(self) -> float:
+        """描边逻辑像素宽度（保证至少 1.25 设备像素，100% 缩放下不过细）
+
+        100% 缩放时若为 1 设备像素会显得过细；与 125% 下的视觉一致，
+        统一按至少 1.25 设备像素渲染，高缩放比例下退化为 1 逻辑像素。
+        """
+        dpr = self.devicePixelRatio()
+        return max(1.0, 1.25 / dpr)
+
+    def _aligned_rect(self) -> QRectF:
+        """返回对齐到设备像素网格的描边中心线矩形（逻辑坐标）
+
+        中心线相对对齐边界内缩 半笔宽（设备像素），
+        使描边恰好从对齐边界起向内铺满、四边完整。
+        """
+        dpr = self.devicePixelRatio()
+        # 控件物理原点（相对于顶层窗口，逻辑坐标 * dpr 后可能为小数）
+        win = self.window()
+        pos = self.mapTo(win, QPoint(0, 0)) if (win is not None and win is not self) else QPoint(0, 0)
+        px0 = pos.x() * dpr
+        py0 = pos.y() * dpr
+        phys_right = px0 + self.width() * dpr
+        phys_bottom = py0 + self.height() * dpr
+        # 边界对齐到整像素：左上取上整、右下取下整，保证描边完全位于控件内
+        al_left = ceil(px0)
+        al_top = ceil(py0)
+        al_right = floor(phys_right)
+        al_bottom = floor(phys_bottom)
+        # 半笔宽（设备像素）：由 _pen_width 决定的实际笔宽折算
+        half = self._pen_width() * dpr / 2.0
+        left = (al_left + half - px0) / dpr
+        top = (al_top + half - py0) / dpr
+        right = (al_right - half - px0) / dpr
+        bottom = (al_bottom - half - py0) / dpr
+        return QRectF(left, top, right - left, bottom - top)
+
+    def _aligned_pen(self) -> QPen:
+        """返回按 _pen_width 加宽的画笔（100% 下加粗、高缩放退化为 1 逻辑像素）"""
+        pen = QPen(QColor("#adb5bd") if not self.isEnabled() else QColor("#339af0"))
+        pen.setWidthF(self._pen_width())
+        pen.setCapStyle(Qt.RoundCap)
+        pen.setJoinStyle(Qt.RoundJoin)
+        return pen
+
+    def _is_dark_mode(self) -> bool:
+        """当前是否为深色模式（依据窗口背景亮度判断，与 loading_animation 一致）
+
+        注意：不能使用 self.palette() —— 本控件 QSS 设置了
+        background-color: transparent，会污染自身调色板的 Window 角色
+        （解析为纯黑），导致深浅模式误判。应使用顶层窗口/应用调色板。
+        """
+        win = self.window()
+        pal = win.palette() if win is not None and win is not self else QApplication.palette()
+        bg = pal.color(QPalette.Window)
+        luminance = bg.red() * 0.299 + bg.green() * 0.587 + bg.blue() * 0.114
+        return luminance < 128
+
+    def _fill_colors(self):
+        """根据深浅模式返回悬浮/按下填充色
+
+        浅色模式使用与原 outline 样式一致的浅蓝实色；
+        深色模式下使用深蓝调，避免浅色填充块在深色背景上刺眼。
+        """
+        if self._is_dark_mode():
+            return QColor("#1e3a5c"), QColor("#274b79")
+        return QColor("#e7f5ff"), QColor("#d0ebff")
 
 
 class ClickableLabel(QLabel):
@@ -454,7 +598,7 @@ BUTTON_STYLES = {
             border-radius: 6px;
             background-color: #868e96;
             color: white;
-            border: none;
+            border: 1px solid transparent;
         }
         QPushButton:hover {
             background-color: #495057;
