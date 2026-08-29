@@ -15,11 +15,19 @@ class Config:
     # 应用信息
     APP_NAME = "LANSyncBox"
     APP_VERSION = "R7.1.3.0"
-    APP_SERIAL = "26.8H"
+    APP_SERIAL = "26.8WH"
     APP_SERIAL_FULL = ".".join(x for x in (APP_NAME, APP_VERSION, APP_SERIAL) if x)
     APP_VERSION_SERIAL = ".".join(x for x in (APP_VERSION, APP_SERIAL) if x)
     APP_AUTHOR = "Lisselde_E"
     APP_AUTHOR_LINK = "https://lisseldee.github.io/#1"  # 作者主页链接
+
+    # 运行平台（单个手动变量，跨平台调试时直接改此值即可切换分支，不自动检测）
+    PLATFORM = 'w'
+
+    # 平台派生布尔标志，供各处分支使用（勿手动改，由上方 PLATFORM 推导）
+    IS_WINDOWS = PLATFORM == 'w'
+    IS_LINUX = PLATFORM == 'l'
+    IS_MACOS = PLATFORM == 'm'
 
     # 功能开关
     # 检查更新按钮：True=显示（开源直装版），False=隐藏（微软商店版本）
@@ -75,22 +83,16 @@ class Config:
 
     @staticmethod
     def get_real_appdata() -> Path:
-        """获取用户数据存储路径（避开MSIX虚拟化）
+        """获取用户数据存储路径
 
-        MSIX虚拟化会对AppData\\Roaming路径进行重定向，即使manifest设置为mediumIL。
-        为了彻底解决虚拟化问题，使用用户主目录下的独立文件夹。
+        各平台统一使用用户主目录下的 LANSyncBox 文件夹：
+        - Windows: ~/LANSyncBox（避开 MSIX 虚拟化重定向）
+        - Linux:   ~/LANSyncBox（与 Windows 保持一致，便于跨平台共用同步逻辑）
+        - macOS:   ~/LANSyncBox（暂未单独实现，沿用统一路径）
 
         Returns:
-            Path: 用户主目录下的LANSyncBox文件夹
+            Path: 用户主目录下的 LANSyncBox 文件夹
         """
-        if sys.platform != 'win32':
-            # 非 Windows 平台：直接返回 ~/.config 或 XDG_CONFIG_HOME
-            xdg = os.environ.get('XDG_CONFIG_HOME', str(Path.home() / '.config'))
-            return Path(xdg)
-
-        # Windows平台：使用用户主目录下的独立文件夹（避开MSIX虚拟化）
-        # 文件位置：C:\\Users\\<用户>\\LANSyncBox\\
-        # 这个路径不受MSIX文件系统虚拟化影响
         return Path.home() / 'LANSyncBox'
 
     @staticmethod
@@ -117,7 +119,7 @@ class Config:
     @staticmethod
     def get_downloads_folder() -> Path:
         """获取 Windows 下载文件夹路径（动态获取，应对用户修改默认位置）"""
-        if sys.platform == 'win32':
+        if Config.IS_WINDOWS:
             try:
                 import ctypes
                 from ctypes import wintypes

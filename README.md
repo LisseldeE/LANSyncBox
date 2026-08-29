@@ -14,6 +14,7 @@
   <a href="https://github.com/LisseldeE/LANSyncBox/releases"><img src="https://img.shields.io/github/downloads/LisseldeE/LANSyncBox/total" alt="下载总量"></a>
   <a href="LICENSE"><img src="https://img.shields.io/github/license/LisseldeE/LANSyncBox" alt="开源协议"></a>
   <img src="https://img.shields.io/badge/platform-Windows-blue?logo=windows" alt="支持平台">
+  <img src="https://img.shields.io/badge/platform-Linux-orange?logo=linux" alt="支持平台">
 </p>
 
 ## 项目简介
@@ -60,7 +61,7 @@ LANSyncBox 是一款简洁高效的局域网文件实时同步工具，实现多
 - 支持自定义6位数字房间号，方便记忆与分享
 - 可选密码验证，确保同步安全
 - 大文件流式传输，避免内存占用过高
-- 并发传输限制（最多同时传输3个文件），优化系统资源占用
+- 并发传输限制（最多同时传输5个文件），优化系统资源占用
 - 初次连接全量同步，自动对齐双端差异
 - 加入房间双端版本号验证，确保连接兼容性
 
@@ -172,13 +173,22 @@ LANSyncBox 是一款简洁高效的局域网文件实时同步工具，实现多
 
 ### 系统要求
 - Windows 10 或更高版本（64位）
+- Ubuntu 22.04 LTS 或更高版本（64位）
 
 ### 安装方式
 - **Microsoft Store**：搜索 LANSyncBox 或点击上方下载按钮安装
 - **其他方式**：从 [GitHub Releases](https://github.com/LisseldeE/LANSyncBox/releases) 或 [Gitee 镜像](https://gitee.com/Lisselde_E/LANSyncBox/releases) 下载安装包，双击运行即可
+- **Linux（deb 包）**：从 [GitHub Releases](https://github.com/LisseldeE/LANSyncBox/releases) 下载对应架构的 `.deb` 安装包，在终端中执行以下命令安装：
+  ```bash
+  sudo apt install -y ./lansyncbox_*.deb
+  ```
 
 ### 运行
-安装完成后，从开始菜单或桌面快捷方式启动 LANSyncBox
+- **Windows**：安装完成后，从开始菜单或桌面快捷方式启动 LANSyncBox
+- **Linux**：从应用菜单（Activities）中搜索 LANSyncBox 并启动；若运行时提示缺少系统依赖，请先执行：
+  ```bash
+  sudo apt install -y libxcb-cursor0 libgl1 libxkbcommon-x11-0
+  ```
 
 ## 开源声明
 

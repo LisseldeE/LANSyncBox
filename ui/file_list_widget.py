@@ -22,7 +22,7 @@ from PySide6.QtCore import (Qt, Signal, QMimeData, QUrl, QPoint, QThread,
                             QMetaObject, Q_ARG, QRect, QItemSelection,
                             QItemSelectionModel, QTimer, QPropertyAnimation,
                             QSequentialAnimationGroup, QEasingCurve)
-from PySide6.QtGui import QAction, QIcon, QDrag, QDropEvent, QDragEnterEvent, QDragMoveEvent, QCursor, QColor
+from PySide6.QtGui import QAction, QIcon, QDrag, QDropEvent, QDragEnterEvent, QDragMoveEvent, QCursor, QColor, QDesktopServices
 from PySide6.QtWidgets import QApplication
 
 from i18n import I18n
@@ -834,15 +834,14 @@ class FileListWidget(QWidget):
                 # 确保目标目录存在
                 preview_path.parent.mkdir(parents=True, exist_ok=True)
 
-                # 如果预览文件已存在，移除只读属性（让shutil.copy2可覆盖）
-                if preview_path.exists():
+                # Windows：预览文件已存在时，先移除只读属性以便 shutil.copy2 覆盖
+                if Config.IS_WINDOWS and preview_path.exists():
                     try:
                         import ctypes
                         # 移除只读属性（FILE_ATTRIBUTE_NORMAL = 0x80）
                         ctypes.windll.kernel32.SetFileAttributesW(str(preview_path), 0x80)
                     except Exception:
-                        # 移除属性失败（如权限问题），让shutil.copy2自然抛出PermissionError
-                        # 外层try/except会捕获并显示错误消息
+                        # 移除属性失败（如权限问题），让 shutil.copy2 在覆盖时自然抛出错误
                         pass
 
                 # 复制文件（覆盖旧的预览文件）
@@ -851,13 +850,17 @@ class FileListWidget(QWidget):
                 # - 只读文件：抛出PermissionError（外层捕获）
                 shutil.copy2(path, preview_path)
                 
-                # 设置只读属性（Windows API）
-                import ctypes
-                # FILE_ATTRIBUTE_READONLY = 0x1
-                ctypes.windll.kernel32.SetFileAttributesW(str(preview_path), 0x1)
+                # Windows：设置只读属性，防止预览文件被误修改
+                if Config.IS_WINDOWS:
+                    try:
+                        import ctypes
+                        # FILE_ATTRIBUTE_READONLY = 0x1
+                        ctypes.windll.kernel32.SetFileAttributesW(str(preview_path), 0x1)
+                    except Exception:
+                        pass
                 
-                # 用系统默认应用打开预览副本
-                os.startfile(str(preview_path))
+                # 用系统默认应用打开预览副本（跨平台，Qt 内部按桌面环境转调 xdg-open 等）
+                QDesktopServices.openUrl(QUrl.fromLocalFile(str(preview_path)))
                 
             except Exception as e:
                 QMessageBox.warning(

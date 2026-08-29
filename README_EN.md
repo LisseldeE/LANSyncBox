@@ -14,6 +14,7 @@
   <a href="https://github.com/LisseldeE/LANSyncBox/releases"><img src="https://img.shields.io/github/downloads/LisseldeE/LANSyncBox/total" alt="Total Downloads"></a>
   <a href="LICENSE"><img src="https://img.shields.io/github/license/LisseldeE/LANSyncBox" alt="License"></a>
   <img src="https://img.shields.io/badge/platform-Windows-blue?logo=windows" alt="Platform">
+  <img src="https://img.shields.io/badge/platform-Linux-orange?logo=linux" alt="Platform">
 </p>
 
 ## Project Introduction
@@ -60,7 +61,7 @@ LANSyncBox is a simple and efficient LAN real-time file synchronization tool tha
 - Support for custom 6-digit room codes for easy sharing
 - Optional password verification for secure syncing
 - Large file streaming transfers to avoid high memory usage
-- Concurrent transfer limit (max 3 files simultaneously) to optimize system resource usage
+- Concurrent transfer limit (max 5 files simultaneously) to optimize system resource usage
 - Initial full sync on first connection, automatically aligns differences between both ends
 - Dual-end version verification when joining a room, ensuring connection compatibility
 
@@ -172,13 +173,22 @@ see [Changelog](https://github.com/LisseldeE/LANSyncBox/blob/main/CHANGELOG.md)
 
 ### System Requirements
 - Windows 10 or later (64-bit)
+- Ubuntu 22.04 LTS or later (64-bit)
 
 ### Installation
 - **Microsoft Store**: Search for LANSyncBox or click the download button above
 - **Other Methods**: Download from [GitHub Releases](https://github.com/LisseldeE/LANSyncBox/releases) or [Gitee Mirror](https://gitee.com/Lisselde_E/LANSyncBox/releases), then run the installer
+- **Linux (deb package)**: Download the architecture-appropriate `.deb` package from [GitHub Releases](https://github.com/LisseldeE/LANSyncBox/releases), then install it from the terminal:
+  ```bash
+  sudo apt install -y ./lansyncbox_*.deb
+  ```
 
 ### Running
-After installation, launch LANSyncBox from the Start menu or desktop shortcut
+- **Windows**: After installation, launch LANSyncBox from the Start menu or desktop shortcut
+- **Linux**: Launch LANSyncBox from the app menu (Activities); if it reports missing system dependencies at runtime, run:
+  ```bash
+  sudo apt install -y libxcb-cursor0 libgl1 libxkbcommon-x11-0
+  ```
 
 ## Open Source License
 

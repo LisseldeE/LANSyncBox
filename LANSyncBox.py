@@ -9,7 +9,7 @@ import ctypes
 
 from PySide6.QtWidgets import QApplication
 from PySide6.QtCore import Qt
-from PySide6.QtGui import QIcon, QFont
+from PySide6.QtGui import QIcon, QFont, QPalette, QGuiApplication
 
 from ui.main_window import MainWindow
 from i18n import I18n
@@ -31,11 +31,8 @@ def main():
     if Config.ENABLE_CHECK_UPDATE:
         try:
             # 获取当前可执行文件路径
-            if '__compiled__' in globals():
-                # Nuitka 打包：使用 containing_dir 获取真实 exe 所在目录
-                exe_path = os.path.join(__compiled__.containing_dir, Config.APP_NAME + '.exe')
-            elif getattr(sys, 'frozen', False):
-                # PyInstaller 打包：exe完整路径
+            if getattr(sys, 'frozen', False):
+                # PyInstaller 打包：可执行文件完整路径
                 exe_path = sys.executable
             else:
                 # 开发环境：主脚本路径
@@ -46,7 +43,7 @@ def main():
             pass  # 静默失败，不影响程序启动
 
     # 设置AppUserModelID（必须在QApplication创建之前）
-    if sys.platform == 'win32':
+    if Config.IS_WINDOWS:
         try:
             ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID(Config.APP_NAME)
         except (AttributeError, OSError):
@@ -61,14 +58,33 @@ def main():
     app.setApplicationVersion(Config.APP_VERSION)
     app.setOrganizationName(Config.APP_AUTHOR)
     
-    # 设置默认字体
-    font = QFont("Microsoft YaHei UI", 10)
-    app.setFont(font)
+    # 设置默认字体（按平台选择，配合手动切换平台时自动匹配中文显示字体）
+    font_family = {
+        'w': "Microsoft YaHei UI",
+        'l': "Noto Sans CJK SC",
+        'm': "PingFang SC",
+    }.get(Config.PLATFORM, "Microsoft YaHei UI")
+    # 若系统缺失该字体，Qt 会自动回退到默认字体，避免中文显示为方框
+    app.setFont(QFont(font_family, 10))
     
-    # 设置程序图标
-    icon_path = get_resource_path('icon.ico')
+    # Linux：GNOME 合成器对程序窗口投影较弱/缺失，为顶层窗口加淡边线以与桌面背景区分
+    # 边线颜色依据应用调色板 Window 角色亮度自适应深/浅色模式（与 SnapOutlineButton 判定一致）
+    if Config.IS_LINUX:
+        bg = app.palette().color(QPalette.Window)
+        luminance = bg.red() * 0.299 + bg.green() * 0.587 + bg.blue() * 0.114
+        border_color = "#3f3f3f" if luminance < 128 else "#c4c4c4"
+        # 对 QMainWindow / QDialog 两类顶层窗口统一加 1px 直角边框；子控件不受影响
+        app.setStyleSheet(f"QMainWindow, QDialog {{ border: 1px solid {border_color}; }}")
+    
+    # 设置程序图标（Linux 用 icon.png，其余用 icon.ico）
+    icon_name = 'icon.png' if Config.IS_LINUX else 'icon.ico'
+    icon_path = get_resource_path(icon_name)
     if os.path.exists(icon_path):
         app.setWindowIcon(QIcon(icon_path))
+
+    # Linux：关联 .desktop 文件，使 GNOME 任务栏/程序坞按 .desktop 的 icon 显示
+    if Config.IS_LINUX:
+        QGuiApplication.setDesktopFileName(f"{Config.APP_NAME}.desktop")
     
     # 设置默认语言（从 config.json 加载用户偏好）
     I18n.set_language(UserConfig.get_language())
@@ -80,7 +96,7 @@ def main():
     window.show()
     
     # Windows任务栏图标设置
-    if sys.platform == 'win32' and os.path.exists(icon_path):
+    if Config.IS_WINDOWS and os.path.exists(icon_path):
         try:
             hwnd = int(window.winId())
             hicon = ctypes.windll.user32.LoadImageW(
