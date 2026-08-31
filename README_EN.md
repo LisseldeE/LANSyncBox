@@ -21,6 +21,20 @@
 
 LANSyncBox is a simple and efficient LAN real-time file synchronization tool that enables multi-user file sharing. Connect within the same local network to share and sync files - no public network connection required. Built with the new Qt6 architecture, supports large file streaming transfers, optimized multi-connection sync logic, providing a smooth user experience.
 
+## System Support
+
+<div align="center">
+
+| Operating System | x64 (AMD64) | ARM64 |
+| :--- | :---: | :---: |
+| Windows 10 / 11 | ✅ | ❌ |
+| Linux (Ubuntu, etc.) | ✅ | ❌ |
+| macOS | ❌ | ❌ |
+
+</div>
+
+> Currently only covers Windows 10/11 and Linux (x64); macOS support is on my roadmap.
+
 ## Project Screenshots
 | Main Interface | Sync Interface |
 | :---: | :---: |
