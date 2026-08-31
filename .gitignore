@@ -10,6 +10,7 @@ test/
 
 *.exe
 *.bat
+*.sh
 
 1.txt
 config.json

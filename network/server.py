@@ -588,9 +588,38 @@ class SyncServer(QObject):
         
         Args:
             client_id: 客户端ID
-            client_file_list: 连接端的文件列表，格式为 [{"filename": "test.txt", "size": 1024, "mtime": 1234567890.123}, ...]
+            client_file_list: 连接端返回的内容，可为两种格式：
+                1) 兼容旧格式： [{"filename": "test.txt", "size": 1024, "mtime": ...}, ...]
+                2) 新格式 dict： {"files": [...], "empty_dirs": ["subdir1", ...]}
+                    其中 empty_dirs 为连接端的空目录，需在主机端补建
         """
         try:
+            # 兼容解析新格式（dict）与旧格式（list）
+            if isinstance(client_file_list, dict):
+                client_files = client_file_list.get('files', []) or []
+                client_empty_dirs = client_file_list.get('empty_dirs', []) or []
+            else:
+                client_files = client_file_list or []
+                client_empty_dirs = []
+            client_file_list = client_files
+
+            # 同步连接端上报的空目录到主机端（连接端有、主机端缺失的空目录）
+            # 每个目录独立容错：单目录失败（如与现有文件同名冲突）不影响其余目录的补建
+            for dirname in client_empty_dirs:
+                if not dirname:
+                    continue
+                try:
+                    dir_path = self._safe_join(dirname)
+                    if os.path.isdir(dir_path):
+                        continue
+                    os.makedirs(dir_path, exist_ok=True)
+                    self.log_message.emit(f"创建目录: {dirname}")
+                    # 发射目录创建信号，并广播给其他连接端（与收到 DIR_CREATE 行为一致）
+                    self.dir_created.emit(dirname)
+                    self._broadcast_dir_create(dirname, exclude_client=client_id)
+                except Exception as e:
+                    self.log_message.emit(f"同步目录结构失败: {e}")
+
             # 获取主机端的文件列表
             from sync.file_manager import FileManager
             from pathlib import Path

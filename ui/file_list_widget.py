@@ -62,6 +62,34 @@ class DragableTableWidget(QTableWidget):
         
         # 记录按下时项目是否已被选中（用于 mouseMoveEvent 的正确判断）
         self._was_press_on_selected = False
+
+        # 拖拽目标指示（区别于点击选中的淡灰整行焦点，用半透明蓝高亮 + "放入 XX" 提示）
+        # 高亮块盖在目标文件夹行上，提示标签跟随在其上方，两者都用 viewport 坐标系
+        self._drop_highlight = QLabel(self.viewport())
+        self._drop_highlight.setAttribute(Qt.WA_TransparentForMouseEvents)
+        self._drop_highlight.hide()
+        self._drop_hint = QLabel(self.viewport())
+        self._drop_hint.setAttribute(Qt.WA_TransparentForMouseEvents)
+        self._drop_hint.hide()
+
+        # 主题适配：点击选中是淡灰整行，拖拽高亮用更柔和的浅灰以作区分但不刺眼；
+        # "放入 XX"提示用低饱和蓝色系（蓝色文字、淡底），避免亮蓝高亮
+        win = self.palette().color(self.palette().ColorRole.Window)
+        luminance = 0.299 * win.red() + 0.587 * win.green() + 0.114 * win.blue()
+        if luminance > 128:
+            hl_color = "rgba(148, 151, 158, 0.30)"     # 浅色主题拖拽高亮（浅灰）
+            hint_bg, hint_fg = "#e3edfb", "#1a56a0"    # 淡蓝底 + 蓝色文字
+        else:
+            hl_color = "rgba(120, 124, 134, 0.38)"     # 深色主题拖拽高亮（稍亮的灰）
+            hint_bg, hint_fg = "#1f3a5f", "#a8c7ee"    # 深蓝底 + 浅蓝文字
+        self._drop_highlight.setStyleSheet(f"background-color: {hl_color};")
+        self._drop_hint.setStyleSheet(
+            f"background-color: {hint_bg}; color: {hint_fg}; "
+            "border-radius: 6px; padding: 3px 8px; font-size: 11px;"
+        )
+
+        # 当前拖拽悬停的目标行（-1 表示不落在文件夹行上）
+        self._drop_target_row = -1
     
     def mousePressEvent(self, event):
         """鼠标按下事件"""
@@ -260,6 +288,7 @@ class DragableTableWidget(QTableWidget):
     def dragEnterEvent(self, event):
         """拖拽进入事件"""
         if event.mimeData().hasUrls():
+            self._update_drop_indicator(event.pos())
             event.acceptProposedAction()
         else:
             event.ignore()
@@ -267,13 +296,22 @@ class DragableTableWidget(QTableWidget):
     def dragMoveEvent(self, event):
         """拖拽移动事件"""
         if event.mimeData().hasUrls():
+            # 实时更新目标行高亮与提示
+            self._update_drop_indicator(event.pos())
             event.acceptProposedAction()
         else:
             event.ignore()
     
+    def dragLeaveEvent(self, event):
+        """拖拽离开事件"""
+        self._clear_drop_indicator()
+        event.accept()
+    
     def dropEvent(self, event):
         """拖拽放下事件"""
         if event.mimeData().hasUrls():
+            # 先清理指示，再执行放下逻辑
+            self._clear_drop_indicator()
             # 获取拖拽的文件
             urls = event.mimeData().urls()
             files = [url.toLocalFile() for url in urls]
@@ -289,6 +327,63 @@ class DragableTableWidget(QTableWidget):
             event.acceptProposedAction()
         else:
             event.ignore()
+    
+    def _update_drop_indicator(self, pos):
+        """根据鼠标位置更新拖拽目标指示（蓝高亮 + "放入 XX" 提示）
+
+        悬停文件夹行 -> 高亮该行并提示放入该文件夹；否则提示放入当前目录（不高亮行，
+        因为内部拖拽是"移动进文件夹"，而非重排顺序，插入线会误导）。
+        """
+        item = self.itemAt(pos)
+        target_row = -1
+        hint_text = ""
+
+        if item:
+            path_item = self.item(item.row(), 0)
+            path = path_item.data(Qt.UserRole) if path_item else None
+            try:
+                is_dir = bool(path) and Path(path).is_dir()
+            except Exception:
+                is_dir = False
+            if is_dir:
+                target_row = item.row()
+                hint_text = f"放入 {Path(path).name}"
+            else:
+                # 悬停在文件行上：目标仍是当前目录
+                hint_text = "放入当前目录"
+        else:
+            # 空白区域：目标为当前目录
+            hint_text = "放入当前目录"
+
+        if target_row >= 0:
+            # 更新高亮块，使其覆盖目标文件夹整行
+            row_y = self.rowViewportPosition(target_row)
+            row_h = self.rowHeight(target_row)
+            self._drop_highlight.setGeometry(QRect(0, row_y, self.viewport().width(), row_h))
+            self._drop_highlight.show()
+            self._drop_highlight.raise_()
+            self._drop_target_row = target_row
+        else:
+            # 非文件夹目标，隐藏行高亮
+            self._drop_highlight.hide()
+            self._drop_target_row = -1
+
+        # 更新提示标签（悬停文件夹时显示在其上方，否则固定在列表顶部）
+        self._drop_hint.setText(hint_text)
+        self._drop_hint.adjustSize()
+        if target_row >= 0:
+            hint_y = max(0, row_y - self._drop_hint.height() - 4)
+        else:
+            hint_y = 0
+        self._drop_hint.move(12, hint_y)
+        self._drop_hint.show()
+        self._drop_hint.raise_()
+    
+    def _clear_drop_indicator(self):
+        """清除拖拽目标指示"""
+        self._drop_highlight.hide()
+        self._drop_hint.hide()
+        self._drop_target_row = -1
     
     def _get_drop_target(self, pos):
         """获取拖拽目标路径"""
@@ -341,9 +436,16 @@ class FileCopyWorker(QThread):
                     continue
 
                 dst = self.dest_path / src.name
-
                 # 发送开始信号
                 self.file_started.emit(src.name)
+
+                # 兜底：目标为源自身或其子目录（自嵌套）会触发 copytree 自递归/自我覆盖，
+                # 对目录与文件统一跳过该条目，避免崩溃与数据损坏。
+                try:
+                    if dst.resolve() == src.resolve() or dst.resolve().is_relative_to(src.resolve()):
+                        continue
+                except Exception:
+                    pass
 
                 try:
                     if src.is_dir():
@@ -530,7 +632,8 @@ class FileListWidget(QWidget):
         # 工具栏
         toolbar = QWidget()
         toolbar_layout = QHBoxLayout(toolbar)
-        toolbar_layout.setContentsMargins(5, 5, 5, 5)
+        # 顶部边距为 0：使"返回上级"和"路径框"的上边缘与左侧"房间信息卡片"顶部对齐
+        toolbar_layout.setContentsMargins(5, 0, 5, 5)
         
         # 返回上级按钮
         self.back_btn = QPushButton(I18n.tr('go_up'))
@@ -542,6 +645,12 @@ class FileListWidget(QWidget):
         self.path_edit = QLineEdit()
         self.path_edit.setReadOnly(True)
         toolbar_layout.addWidget(self.path_edit)
+
+        # 统一"返回上级"按钮与路径框的垂直高度，保证两者一致。
+        # 不使用 QSS 指定 margin（会启用基础样式、压低原生控件外观），以路径框高度为基准对齐
+        _bar_h = self.path_edit.sizeHint().height()
+        self.back_btn.setFixedHeight(_bar_h)
+        self.path_edit.setFixedHeight(_bar_h)
         
         # 刷新按钮（已注释：远程/本地变化均有自动刷新，此手动按钮冗余，暂不删除、保留逻辑）
         # refresh_btn = QPushButton(I18n.tr('refresh'))
@@ -553,6 +662,20 @@ class FileListWidget(QWidget):
         
         # 文件列表表格
         self.table = DragableTableWidget()
+        # 整行统一高亮（类似系统文件管理器）：关闭网格线切口，并消掉每格焦点框
+        self.table.setShowGrid(False)
+        win = self.palette().color(self.palette().ColorRole.Window)
+        luminance = 0.299 * win.red() + 0.587 * win.green() + 0.114 * win.blue()
+        if luminance > 128:  # 浅色主题
+            divider, sel_bg, sel_fg = "#ececf0", "#dee2e6", "#212529"
+        else:  # 深色主题
+            divider, sel_bg, sel_fg = "#2b2b2f", "#3a3a3e", "#e9ecef"
+        self.table.setStyleSheet(f"""
+            QTableWidget {{ background: transparent; border: none; }}
+            QTableWidget::item {{ border: none; border-bottom: 1px solid {divider}; padding: 6px; }}
+            QTableWidget::item:focus, QTableWidget:focus {{ outline: none; }}
+            QTableWidget::item:selected {{ background: {sel_bg}; color: {sel_fg}; }}
+        """)
         self.table.setColumnCount(3)
         self.table.setHorizontalHeaderLabels([
             I18n.tr('file_name'),
@@ -633,40 +756,45 @@ class FileListWidget(QWidget):
 
         # 添加文件到表格
         for item in items:
-            row = self.table.rowCount()
-            self.table.insertRow(row)
-            
-            # 文件名
-            name_item = QTableWidgetItem(item.name)
-            if item.is_dir():
-                name_item.setIcon(QIcon.fromTheme("folder"))
-            else:
-                name_item.setIcon(QIcon.fromTheme("text-x-generic"))
-            self.table.setItem(row, 0, name_item)
-            
-            # 文件大小/项目数量
-            if item.is_dir():
-                # 显示文件夹内的项目数量
-                try:
-                    count = len(list(item.iterdir()))
-                    size_text = f"{count} {I18n.tr('items')}"
-                except:
-                    size_text = "-"
-            else:
-                size = item.stat().st_size
-                size_text = self.format_size(size)
-            size_item = QTableWidgetItem(size_text)
-            size_item.setTextAlignment(Qt.AlignRight | Qt.AlignVCenter)
-            self.table.setItem(row, 1, size_item)
-            
-            # 修改时间
-            mtime = datetime.fromtimestamp(item.stat().st_mtime)
-            mtime_text = mtime.strftime("%Y-%m-%d %H:%M:%S")
-            mtime_item = QTableWidgetItem(mtime_text)
-            self.table.setItem(row, 2, mtime_item)
+            # 条目可能在列出后/读取前被并发删除（远程重命名/删除期间的刷新），
+            # 异常时直接跳过该条目，避免整次刷新崩溃。
+            try:
+                # 文件名
+                is_dir = item.is_dir()
+                name_item = QTableWidgetItem(item.name)
+                if is_dir:
+                    name_item.setIcon(QIcon.fromTheme("folder"))
+                else:
+                    name_item.setIcon(QIcon.fromTheme("text-x-generic"))
 
-            # 保存路径信息
-            name_item.setData(Qt.UserRole, str(item))
+                # 文件大小/项目数量
+                if is_dir:
+                    try:
+                        size_text = f"{len(list(item.iterdir()))} {I18n.tr('items')}"
+                    except OSError:
+                        size_text = "-"
+                else:
+                    size_text = self.format_size(item.stat().st_size)
+
+                # 修改时间
+                mtime_text = datetime.fromtimestamp(item.stat().st_mtime).strftime("%Y-%m-%d %H:%M:%S")
+
+                # 保存路径信息
+                name_item.setData(Qt.UserRole, str(item))
+
+                row = self.table.rowCount()
+                self.table.insertRow(row)
+                self.table.setItem(row, 0, name_item)
+
+                size_item = QTableWidgetItem(size_text)
+                size_item.setTextAlignment(Qt.AlignRight | Qt.AlignVCenter)
+                self.table.setItem(row, 1, size_item)
+
+                mtime_item = QTableWidgetItem(mtime_text)
+                self.table.setItem(row, 2, mtime_item)
+            except FileNotFoundError:
+                # 该项已被并发删除（远程重命名/删除时刷新），跳过
+                continue
 
     def _toast_card_style(self) -> str:
         """根据界面明暗主题自动生成卡片样式：自适应背景 + 1px 深灰描边"""
@@ -965,6 +1093,28 @@ class FileListWidget(QWidget):
         if not self.clipboard_files:
             return
 
+        # 同目录粘贴或复制进源自身子树（自嵌套）无实际意义，且 copytree 自递归会崩溃：
+        # 直接提示“无效操作”并返回，不弹替换确认、不复制。
+        all_self = True
+        any_src = False
+        for src_file in self.clipboard_files:
+            if not src_file.exists():
+                continue
+            any_src = True
+            try:
+                s = src_file.resolve()
+                d = (self.current_path / src_file.name).resolve()
+            except Exception:
+                all_self = False
+                break
+            # 目标等于源，或目标位于源自身子树内，均视为“自身复制”
+            if not (d == s or d.is_relative_to(s)):
+                all_self = False
+                break
+        if any_src and all_self:
+            self._show_toast(I18n.tr('toast_invalid_drop'))
+            return
+
         # 收集需要粘贴的文件
         files_to_paste = []
         existing_files = []
@@ -994,21 +1144,27 @@ class FileListWidget(QWidget):
             msg_box.setIcon(QMessageBox.Question)
 
             # 添加自定义按钮
-            yes_btn = msg_box.addButton(I18n.tr('yes'), QMessageBox.YesRole)
-            no_btn = msg_box.addButton(I18n.tr('no'), QMessageBox.NoRole)
+            ok_btn = msg_box.addButton(I18n.tr('ok'), QMessageBox.YesRole)
+            cancel_btn = msg_box.addButton(I18n.tr('cancel'), QMessageBox.RejectRole)
 
-            # 应用全局按钮样式
-            yes_btn.setStyleSheet(BUTTON_STYLES['primary'])
-            no_btn.setStyleSheet(BUTTON_STYLES['secondary'])
+            # 应用全局按钮样式：确定蓝色，取消红色
+            ok_btn.setStyleSheet(BUTTON_STYLES['primary'])
+            cancel_btn.setStyleSheet(BUTTON_STYLES['danger'])
+            # 统一按钮宽度，与“是否退出房间”等确认弹窗保持一致
+            ok_btn.setFixedWidth(80)
+            cancel_btn.setFixedWidth(80)
 
-            msg_box.setDefaultButton(no_btn)
+            msg_box.setDefaultButton(cancel_btn)
             msg_box.exec()
 
-            if msg_box.clickedButton() == yes_btn:
+            if msg_box.clickedButton() == ok_btn:
                 # 用户同意替换，添加所有已存在的文件
                 for src_file in self.clipboard_files:
                     if src_file.exists() and src_file.name in existing_files:
                         files_to_paste.append(src_file)
+            else:
+                # 取消：终止整个粘贴操作
+                return
 
         if not files_to_paste:
             return
@@ -1558,25 +1714,20 @@ class FileListWidget(QWidget):
             msg_box.setText(f"以下文件已存在，是否替换？\n\n{file_list}")
             msg_box.setIcon(QMessageBox.Question)
             
-            yes_btn = msg_box.addButton(I18n.tr('yes'), QMessageBox.YesRole)
-            no_btn = msg_box.addButton(I18n.tr('no'), QMessageBox.NoRole)
+            ok_btn = msg_box.addButton(I18n.tr('ok'), QMessageBox.YesRole)
             cancel_btn = msg_box.addButton(I18n.tr('cancel'), QMessageBox.RejectRole)
             
-            yes_btn.setStyleSheet(BUTTON_STYLES['primary'])
-            no_btn.setStyleSheet(BUTTON_STYLES['secondary'])
-            cancel_btn.setStyleSheet(BUTTON_STYLES['secondary'])
+            ok_btn.setStyleSheet(BUTTON_STYLES['primary'])
+            cancel_btn.setStyleSheet(BUTTON_STYLES['danger'])
+            # 统一按钮宽度
+            ok_btn.setFixedWidth(80)
+            cancel_btn.setFixedWidth(80)
             
-            msg_box.setDefaultButton(no_btn)
+            msg_box.setDefaultButton(cancel_btn)
             msg_box.exec()
             
-            clicked_btn = msg_box.clickedButton()
-            
-            if clicked_btn == cancel_btn:
+            if msg_box.clickedButton() != ok_btn:
                 return
-            elif clicked_btn == no_btn:
-                files = [f for f in files if f.name not in existing_files]
-                if not files:
-                    return
         
         # 使用进度对话框复制文件
         from ui.progress_dialog import CopyProgressDialog
@@ -1648,6 +1799,12 @@ class FileListWidget(QWidget):
         else:
             target_dir = self.current_path
 
+        # 用于同目录比较的规范化目标（统一大小写/“..”/分隔符，避免比较失效导致多余交互）
+        try:
+            target_resolved = Path(target_dir).resolve()
+        except Exception:
+            target_resolved = Path(target_dir)
+
         # 收集有效文件和已存在文件
         valid_files = []
         existing_files = []
@@ -1657,12 +1814,23 @@ class FileListWidget(QWidget):
             if not src.exists():
                 continue
 
-            # 检查是否在同一目录
-            if src.parent == target_dir:
-                continue  # 同一目录，不操作
+            # 规范化源路径（用于目录场景比较）
+            try:
+                src_resolved = Path(src).resolve()
+            except Exception:
+                src_resolved = Path(src)
 
-            # 检查是否拖拽到自己的子文件夹
-            if src.is_dir() and target_dir.is_relative_to(src):
+            # 拖到文件自身所在目录：静默跳过，不做任何移动，避免多余交互
+            # 包括两类：目标为源所在父目录（同目录），以及目录被拖到其自身（目标==源本身）
+            if src_resolved.parent == target_resolved or (src.is_dir() and src_resolved == target_resolved):
+                continue
+
+            # 拖拽到自己的子文件夹（严格真子目录）才提示，避免把"拖到自身"误判成子目录而误弹
+            try:
+                is_descendant = target_resolved != src_resolved and target_resolved.is_relative_to(src_resolved)
+            except Exception:
+                is_descendant = Path(target_dir) != src and Path(target_dir).is_relative_to(src)
+            if src.is_dir() and is_descendant:
                 # 创建自定义警告框
                 msg_box = QMessageBox(self)
                 msg_box.setWindowTitle("错误")
@@ -1697,26 +1865,44 @@ class FileListWidget(QWidget):
             msg_box.setIcon(QMessageBox.Question)
 
             # 添加自定义按钮
-            yes_btn = msg_box.addButton(I18n.tr('yes'), QMessageBox.YesRole)
-            no_btn = msg_box.addButton(I18n.tr('no'), QMessageBox.NoRole)
+            ok_btn = msg_box.addButton(I18n.tr('ok'), QMessageBox.YesRole)
+            cancel_btn = msg_box.addButton(I18n.tr('cancel'), QMessageBox.RejectRole)
 
-            # 应用全局按钮样式
-            yes_btn.setStyleSheet(BUTTON_STYLES['primary'])
-            no_btn.setStyleSheet(BUTTON_STYLES['secondary'])
+            # 应用全局按钮样式：确定蓝色，取消红色
+            ok_btn.setStyleSheet(BUTTON_STYLES['primary'])
+            cancel_btn.setStyleSheet(BUTTON_STYLES['danger'])
+            # 统一按钮宽度，与“是否退出房间”等确认弹窗保持一致
+            ok_btn.setFixedWidth(80)
+            cancel_btn.setFixedWidth(80)
 
-            msg_box.setDefaultButton(no_btn)
+            msg_box.setDefaultButton(cancel_btn)
             msg_box.exec()
 
-            if msg_box.clickedButton() == yes_btn:
+            if msg_box.clickedButton() == ok_btn:
                 # 用户同意替换，添加所有已存在的文件
                 for src_path in files:
                     src = Path(src_path)
                     if src.exists() and src.name in existing_files:
                         valid_files.append(src)
+            else:
+                # 取消：终止整个移动/复制操作
+                return
+
+        # 若既无需要移动/复制的文件，也无已存在的冲突，说明整体为无效/自身移动
+        # 显示"无效操作"悬浮提示，然后返回（不刷新列表，避免多余的交互）
+        if not valid_files and not existing_files:
+            self._show_toast(I18n.tr('toast_invalid_drop'))
+            return
 
         # 执行文件操作
         for src in valid_files:
             dst = target_dir / src.name
+            # 兜底：复制时目标位于源自身子树内（自嵌套）会触发 copytree 自递归崩溃，跳过该条目
+            try:
+                if is_copy and src.is_dir() and (dst.resolve() == src.resolve() or dst.resolve().is_relative_to(src.resolve())):
+                    continue
+            except Exception:
+                pass
 
             try:
                 if is_copy:
@@ -1727,15 +1913,20 @@ class FileListWidget(QWidget):
                             from sync.file_manager import safe_rmtree
                             safe_rmtree(dst)
                         shutil.copytree(src, dst)
+                        is_dir_copy = True
                     else:
                         # 如果目标文件已存在，先删除
                         if dst.exists():
                             dst.unlink()
                         shutil.copy2(src, dst)
+                        is_dir_copy = False
 
                     # 触发同步信号
                     if not self.is_syncing(str(dst)):
                         self.file_added.emit(str(dst))
+                        # 目录复制需递归发射空子目录，避免复制后空目录被忽略
+                        if is_dir_copy:
+                            self._emit_folder_files(dst)
                 else:
                     # 移动文件
                     # 如果目标文件已存在，先删除
@@ -1789,30 +1980,21 @@ class FileListWidget(QWidget):
             msg_box.setIcon(QMessageBox.Question)
             
             # 添加自定义按钮
-            yes_btn = msg_box.addButton(I18n.tr('yes'), QMessageBox.YesRole)
-            no_btn = msg_box.addButton(I18n.tr('no'), QMessageBox.NoRole)
+            ok_btn = msg_box.addButton(I18n.tr('ok'), QMessageBox.YesRole)
             cancel_btn = msg_box.addButton(I18n.tr('cancel'), QMessageBox.RejectRole)
             
-            # 应用全局按钮样式
-            yes_btn.setStyleSheet(BUTTON_STYLES['primary'])
-            no_btn.setStyleSheet(BUTTON_STYLES['secondary'])
-            cancel_btn.setStyleSheet(BUTTON_STYLES['secondary'])
+            # 应用全局按钮样式：确定蓝色，取消红色
+            ok_btn.setStyleSheet(BUTTON_STYLES['primary'])
+            cancel_btn.setStyleSheet(BUTTON_STYLES['danger'])
+            # 统一按钮宽度，与“是否退出房间”等确认弹窗保持一致
+            ok_btn.setFixedWidth(80)
+            cancel_btn.setFixedWidth(80)
             
-            msg_box.setDefaultButton(no_btn)
+            msg_box.setDefaultButton(cancel_btn)
             msg_box.exec()
             
-            clicked_btn = msg_box.clickedButton()
-            
-            if clicked_btn == cancel_btn:
+            if msg_box.clickedButton() != ok_btn:
                 return
-            elif clicked_btn == no_btn:
-                # 移除已存在的文件
-                file_paths = [
-                    p for p in file_paths 
-                    if Path(p).name not in existing_files
-                ]
-                if not file_paths:
-                    return
         
         # 创建进度对话框
         progress_dialog = CopyProgressDialog(self)
@@ -1865,10 +2047,19 @@ class FileListWidget(QWidget):
                 self.file_added.emit(file_path)
 
     def _emit_folder_files(self, folder_path: Path):
-        """递归发射文件夹内所有文件的信号"""
+        """递归发射文件夹内所有文件的信号
+
+        对 `is_dir()` 的子目录也发射 dir_created 信号，
+        否则不含文件的空子目录（不会被文件传输隐式创建）会被忽略，
+        导致复制/粘贴/拖拽导入的文件夹树丢失空目录结构。
+        """
         try:
             for item in folder_path.rglob('*'):
-                if item.is_file():
+                if item.is_dir():
+                    # 发射目录创建信号，保证空子目录及整棵目录结构都能同步
+                    # 根目录由调用处的 file_added(文件夹) 处理，此处 rglob('*') 不含根目录，不会重复
+                    self.dir_created.emit(str(item))
+                elif item.is_file():
                     # 发射文件添加信号
                     self.file_added.emit(str(item))
         except Exception as e:

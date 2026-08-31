@@ -401,22 +401,30 @@ class SyncWindow(QMainWindow):
             
             file_manager = FileManager(Path(self.room_folder))
             local_file_list = file_manager.get_file_list_for_sync()
+            local_empty_dirs = file_manager.get_empty_directory_list()
             
             # 发送文件列表给主机端
-            self._send_file_list_to_server(local_file_list)
+            self._send_file_list_to_server(local_file_list, local_empty_dirs)
     
-    def _send_file_list_to_server(self, file_list: list):
+    def _send_file_list_to_server(self, file_list: list, empty_dirs: list = None):
         """发送文件列表给主机端
         
         Args:
             file_list: 文件列表，格式为 [{"filename": "test.txt", "size": 1024, "mtime": 1234567890.123}, ...]
+            empty_dirs: 空目录列表，格式为 ["subdir1", "subdir1/subdir2", ...]
+
+        注意：文件列表内容以 {"files": [...], "empty_dirs": [...]} 结构上报，
+        让主机端能感知连接端的空目录并同步补建。
         """
         if not self.client or not self.client.authenticated:
             return
         
         # 发送文件列表响应消息（实际上是发送自己的文件列表）
         import json
-        content = json.dumps(file_list).encode('utf-8')
+        content = json.dumps({
+            'files': file_list,
+            'empty_dirs': empty_dirs or []
+        }).encode('utf-8')
         
         from network.protocol import Protocol, MessageType
         message = Protocol.pack_message(MessageType.FILE_LIST_RESP, '', len(content), False, content)
@@ -910,6 +918,8 @@ class SyncWindow(QMainWindow):
             lines = []
             # 日志文件第一行写入完整串号（名称.版本号.串号）
             lines.append(Config.APP_SERIAL_FULL)
+            # 第二行写入导出时间（精确到秒，无标题）
+            lines.append(now.strftime('%Y-%m-%d %H:%M:%S'))
             for row in range(self.records_table.rowCount()):
                 action_item = self.records_table.item(row, 0)
                 info_item = self.records_table.item(row, 1)
@@ -1296,6 +1306,9 @@ class SyncWindow(QMainWindow):
         # 应用全局按钮样式
         yes_btn.setStyleSheet(BUTTON_STYLES['danger'])
         no_btn.setStyleSheet(BUTTON_STYLES['secondary'])
+        # 统一按钮宽度，与文件替换的“确定/取消”按钮保持一致
+        yes_btn.setFixedWidth(80)
+        no_btn.setFixedWidth(80)
         
         msg_box.setDefaultButton(no_btn)
         msg_box.exec()
@@ -1328,6 +1341,9 @@ class SyncWindow(QMainWindow):
 
             yes_btn.setStyleSheet(BUTTON_STYLES['danger'])
             no_btn.setStyleSheet(BUTTON_STYLES['secondary'])
+            # 统一按钮宽度（与“是否退出房间”的主对话框一致）
+            yes_btn.setFixedWidth(80)
+            no_btn.setFixedWidth(80)
 
             msg_box.setDefaultButton(no_btn)
             msg_box.exec()

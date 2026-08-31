@@ -104,6 +104,8 @@ class I18n:
             "items": "项",
             # 目录回退悬浮提示
             "toast_dir_changed": "当前目录已变更，已返回有效目录",
+            # 无效拖拽（自身/同目录移动）悬浮提示
+            "toast_invalid_drop": "无效操作",
             # 文件状态
             "status_synced": "已同步",
             "status_connected": "已连接",
@@ -303,6 +305,8 @@ class I18n:
             "items": "items",
             # Directory rollback toast
             "toast_dir_changed": "Directory changed, returned to a valid directory",
+            # Invalid drop toast (self/same directory move)
+            "toast_invalid_drop": "Invalid operation",
             # File status
             "status_synced": "Synced",
             "status_connected": "Connected",

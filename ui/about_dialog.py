@@ -67,33 +67,22 @@ class AboutDialog(QDialog):
         layout.addWidget(desc_label)
 
         # 作者信息（灰色悬浮变蓝，不可点击）
-        author_label = QLabel(f"{I18n.tr('about_author')}: {Config.APP_AUTHOR}")
-        author_label.setStyleSheet("""
-            QLabel {
-                font-size: 11px;
-                color: #495057;
-            }
-            QLabel:hover {
-                color: #339af0;
-            }
-        """)
-        author_label.setAlignment(Qt.AlignCenter)
+        author_label = ClickableLabel(
+            f"{I18n.tr('about_author')}: {Config.APP_AUTHOR}",
+            normal_color="#495057",
+            hover_color="#339af0",
+            underline_on_hover=False
+        )
         layout.addWidget(author_label)
 
-        # GitHub链接（灰色悬浮变蓝）
-        github_label = QLabel(f"GitHub: {Config.GITHUB_REPO}")
-        github_label.setStyleSheet("""
-            QLabel {
-                font-size: 11px;
-                color: #495057;
-            }
-            QLabel:hover {
-                color: #339af0;
-            }
-        """)
-        github_label.setAlignment(Qt.AlignCenter)
-        github_label.setCursor(Qt.PointingHandCursor)
-        github_label.mousePressEvent = lambda event: self._open_github(event)
+        # GitHub链接（灰色悬浮变蓝，可点击打开仓库）
+        github_label = ClickableLabel(
+            f"GitHub: {Config.GITHUB_REPO}",
+            normal_color="#495057",
+            hover_color="#339af0",
+            underline_on_hover=False
+        )
+        github_label.set_click_callback(self._open_github)
         layout.addWidget(github_label)
 
         # 问题反馈和查看详情链接（蓝色，悬浮加下划线）
