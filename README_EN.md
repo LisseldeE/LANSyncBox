@@ -21,20 +21,6 @@
 
 LANSyncBox is a simple and efficient LAN real-time file synchronization tool that enables multi-user file sharing. Connect within the same local network to share and sync files - no public network connection required. Built with the new Qt6 architecture, supports large file streaming transfers, optimized multi-connection sync logic, providing a smooth user experience.
 
-## System Support
-
-<div align="center">
-
-| Operating System | x64 (AMD64) | ARM64 |
-| :--- | :---: | :---: |
-| Windows 10 / 11 | ✅ | ❌ |
-| Linux (Ubuntu, etc.) | ✅ | ❌ |
-| macOS | ❌ | ❌ |
-
-</div>
-
-> Currently only covers Windows 10/11 and Linux (x64); macOS support is on my roadmap.
-
 ## Project Screenshots
 | Main Interface | Sync Interface |
 | :---: | :---: |
@@ -47,6 +33,33 @@ LANSyncBox is a simple and efficient LAN real-time file synchronization tool tha
 - **License**: GNU General Public License v3.0
 - **Project Homepage**: https://lisseldee.github.io/#1
 - **Project Repository**: https://github.com/LisseldeE/LANSyncBox
+
+## Features
+
+| Area | Capability |
+| :--- | :--- |
+| **Real-time Sync** | File additions, edits, deletions, and renames sync to all clients instantly; initial connection auto-aligns differences |
+| **Room Sharing** | Custom 6-digit room codes, optional password protection, version compatibility check when joining |
+| **Large File Transfer** | Streaming chunked transfer, low memory usage; resumable, retransmits don't corrupt files |
+| **Transfer Control** | Max 5 files transferred simultaneously; auto-cancels on change to prevent corruption |
+| **Multi-client Sync** | Recursive folder sync; host forwards to all clients in real-time; incremental sync after manual reconnect |
+| **File Operations** | Add, create, copy, cut, paste, delete, rename and other standard operations |
+| **File Preview** | Double-click to preview files in read-only mode, preventing accidental edits |
+| **Interface** | Smooth Qt6 UI, real-time Chinese/English switching, visible transfer progress bars |
+
+## System Support
+
+<div align="center">
+
+| Operating System | x64 (AMD64) | ARM64 |
+| :--- | :---: | :---: |
+| Windows | ✅ | ❌ |
+| Linux | ✅ | ❌ |
+| macOS | ❌ | ❌ |
+
+</div>
+
+> Currently only covers Windows 10/11 and Linux (x64); macOS support is on my roadmap.
 
 ## Download
 
@@ -68,60 +81,6 @@ LANSyncBox is a simple and efficient LAN real-time file synchronization tool tha
 
 > 💡 Recommended for users in China: Gitee Mirror
 
-## Features
-
-### Real-time Sync
-- File additions, modifications, deletions, and renames are synced to all connected clients instantly
-- Support for custom 6-digit room codes for easy sharing
-- Optional password verification for secure syncing
-- Large file streaming transfers to avoid high memory usage
-- Concurrent transfer limit (max 5 files simultaneously) to optimize system resource usage
-- Initial full sync on first connection, automatically aligns differences between both ends
-- Dual-end version verification when joining a room, ensuring connection compatibility
-
-### Transfer Reliability
-- Transfer cancellation: Auto-cancels when file changes during transfer, preventing file corruption
-- Resumable transfer: Large file chunks are written by index positioning, failed retransmissions don't corrupt files
-- Integrity check: Validates file size on completion, automatically discards incomplete files
-- TCP buffer optimization: Increased send/receive buffers to avoid backpressure timeouts on large files
-- Backpressure adaptation: Auto-retries on send timeout, distinguishes between cancellation and backpressure, ensuring stable large file transfers
-- Auto-retransmit for failed clients: Skips and retransmits entire file when a client fails during broadcast, ensuring final sync
-
-### Multi-client Sync
-- Host file list changes synced to all connected clients in real-time
-- Support for folder sync, automatically recursively sync all files in folder
-- Real-time transfer progress display with progress bar visualization
-
-### Client Features
-- File changes uploaded to host (not directly to other clients)
-- Real-time sync status display
-- Auto incremental sync after reconnection
-- Real-time progress display with file transfer progress bar
-
-### File Operations
-- Double-click empty list area to popup menu for quick file/folder addition
-- Right-click menu supports adding files, adding folders, creating new folders
-- New folder creation supports ESC cancellation during rename phase, avoiding accidental creation
-- Supports common file operations: copy, cut, paste, delete, rename
-
-### File Preview
-- Double-click files to open in read-only preview mode
-- Prevents accidental modifications during preview
-
-### Cache Management
-- Manage sync cache, clear local cache files
-
-### Multi-language Support
-- Chinese/English interface switching
-- Real-time language switching without restart
-- Multi-language environment adaptation
-
-### UI Optimization
-- New Qt6 architecture for smoother interface
-- Optimized UI interaction logic for better user experience
-- Real-time progress display with file transfer progress bar
-- Optimized file list display logic
-
 ## Usage
 
 ### Host (Create Connection)
@@ -140,38 +99,26 @@ LANSyncBox is a simple and efficient LAN real-time file synchronization tool tha
 
 ## Sync Logic
 
-### General Principle
+### Endpoint Roles
 
-The core goal of sync is to keep file lists consistent across all endpoints. File changes are recorded via operation list, combined with cache file handling for transfers, ensuring stable and reliable synchronization. Conflict handling: latest modification time wins.
+| End | Role |
+| :--- | :--- |
+| **Host** | Maintains file list, syncs changes to all clients in real-time; receives client files and forwards to others |
+| **Client** | Uploads file changes to host (not directly to other clients); incremental sync after manual reconnect |
+| **Conflict** | The version with the latest modification time wins |
 
-### Host Side
+### Sync Mechanisms
 
-- Sync file changes via operation list
-- Changes synced to all connected clients in real-time
-- Receives client files, syncs to other clients in real-time
-- Support for concurrent transfer limit (max 3 files simultaneously) to avoid high resource usage
-- Support for folder sync, automatically recursively sync all files in folder
-- Large files use streaming transfer to avoid high memory usage
-- View all sync records and file sources
-- View online client list
-
-### Client Side
-
-- File list changes uploaded to host (not directly to other clients)
-- Real-time sync status display
-- Auto sync and align after reconnection
-- Real-time progress display with file transfer progress bar
-
-### Additional Rules
-
-- **Conflict Handling**: Latest modification time wins
-- **Host Offline**: All clients notified "Connection disconnected"
-- **Transfer Protocol**: TCP + custom protocol
-- **Large File Handling**: Streaming chunked transfer to avoid high memory usage
-- **Concurrency Control**: Max 5 files transferred simultaneously to optimize system resource usage
-- **Transfer Cancellation**: Auto-cancels transfer on file change, sends FILE_CANCEL to notify receiver cleanup
-- **Resumable Transfer**: Chunks written by chunk_index positioning, failed retransmissions don't affect received parts
-- **Integrity Check**: Validates file size on FILE_END, discards temp file if incomplete
+| Mechanism | Description |
+| :--- | :--- |
+| **Real-time Sync** | File changes recorded via operation list and dispatched in real-time |
+| **Transfer Protocol** | TCP + custom protocol |
+| **Streaming Transfer** | Chunked streaming to avoid loading entire files into memory |
+| **Concurrency Control** | Max 5 files transferred simultaneously to optimize resource usage |
+| **Resumable Transfer** | Chunks written by index positioning; retransmissions don't affect received parts |
+| **Integrity Check** | Validates file size on completion, discards incomplete files |
+| **Transfer Cancellation** | Auto-cancels on file change and notifies receiver to clean up |
+| **Host Offline** | All clients notified "Connection disconnected" |
 
 ## Change Log
 
@@ -180,14 +127,14 @@ see [Changelog](https://github.com/LisseldeE/LANSyncBox/blob/main/CHANGELOG.md)
 ## Tech Stack
 
 - Python 3.x
-- PySide6
+- Qt6 (PySide6)
 - Custom TCP Protocol
 
 ## Installation & Running
 
 ### System Requirements
 - Windows 10 or later (64-bit)
-- Ubuntu 22.04 LTS or later (64-bit)
+- Linux x64 (amd64) distributions
 
 ### Installation
 - **Microsoft Store**: Search for LANSyncBox or click the download button above
