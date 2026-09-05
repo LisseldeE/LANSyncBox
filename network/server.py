@@ -8,6 +8,7 @@ import socket
 import threading
 import os
 import time
+import struct
 from typing import Dict, Optional
 from PySide6.QtCore import QObject, Signal
 
@@ -34,7 +35,9 @@ class SyncServer(QObject):
     file_send_progress = Signal(str, int, int)     # 文件发送进度 (filename, current, total)
     file_forward_progress = Signal(str, str, int, int)  # 文件转发进度 (target_ip, filename, current, total)
     file_forward_sent = Signal(str, str)  # 文件转发完成 (target_ip, filename)
+    file_forward_cancelled = Signal(str, str)  # 文件转发被取消 (target_ip, filename)
     log_message = Signal(str)            # 日志消息
+    latency_updated = Signal(str, float)  # 延迟更新 (client_id, rtt_ms)
     
     # 数据块大小（64KB）
     CHUNK_SIZE = 64 * 1024
@@ -55,6 +58,11 @@ class SyncServer(QObject):
         
         # 记录正在请求的文件（文件名 -> 客户端ID）
         self.requesting_files: Dict[str, str] = {}
+
+        # 延迟探测线程控制
+        self._ping_stop = threading.Event()
+        self._ping_thread = None
+        self.PING_INTERVAL = 2.0  # 每 2 秒向每个已认证客户端发送一次 PING
     
     def start(self, port: int = None, exclude_port: int = None) -> bool:
         """启动服务器，尝试多个端口（9527-9536）
@@ -84,6 +92,11 @@ class SyncServer(QObject):
                 # 启动接受连接线程
                 accept_thread = threading.Thread(target=self._accept_loop, daemon=True)
                 accept_thread.start()
+
+                # 启动延迟探测线程
+                self._ping_stop.clear()
+                self._ping_thread = threading.Thread(target=self._ping_loop, daemon=True)
+                self._ping_thread.start()
                 
                 return True
                 
@@ -107,6 +120,7 @@ class SyncServer(QObject):
     def stop(self):
         """停止服务器"""
         self.running = False
+        self._ping_stop.set()
         
         # 关闭所有客户端连接，清理大文件接收状态
         with self._lock:
@@ -162,6 +176,23 @@ class SyncServer(QObject):
             raise ValueError(f"非法路径: {filename}")
         return file_path
     
+    def _ping_loop(self):
+        """延迟探测线程：每 2 秒向所有已认证客户端发送一次 PING"""
+        while not self._ping_stop.is_set():
+            # 每隔 PING_INTERVAL 秒探测一轮，同时保留 CPU
+            if self._ping_stop.wait(self.PING_INTERVAL):
+                break
+            if not self.running:
+                break
+            # 锁内收集已认证客户端，锁外执行网络IO（符合项目既有「锁内收集、锁外IO」约定）
+            with self._lock:
+                targets = [(cid, info['socket']) for cid, info in list(self.clients.items()) if info.get('authenticated')]
+            for cid, sock in targets:
+                try:
+                    sock.sendall(Protocol.create_ping(time.time()))
+                except Exception:
+                    pass
+
     def _accept_loop(self):
         """接受连接循环"""
         while self.running:
@@ -186,6 +217,8 @@ class SyncServer(QObject):
                         'socket': client_socket,
                         'receiver': MessageReceiver(),
                         'authenticated': False,
+                        'ip': addr[0],       # 客户端IP（自 client_id 取地址部分）
+                        'latency': None,     # 延迟（RTT毫秒，N/A表示未知），由 PING/PONG 更新
                         'receiving_files': {}  # 大文件接收状态：{filename: {handle, file_size, mtime, received_size, temp_path}}
                     }
                 
@@ -254,7 +287,26 @@ class SyncServer(QObject):
         
         if msg_type == MessageType.AUTH_REQ:
             self._handle_auth(client_id, content)
-        
+
+        elif msg_type == MessageType.PING:
+            # 连接端探测延迟：立即回 PONG 并原样带回发送时刻
+            try:
+                send_time = struct.unpack('!d', content)[0]
+                client_info['socket'].sendall(Protocol.create_pong(send_time))
+            except Exception:
+                pass
+
+        elif msg_type == MessageType.PONG:
+            # 收到对端回包：RTT = 当前时刻 - 发起时刻（同一端时钟，无跨机偏差）
+            # 同时更新该连接端的延迟，供主机端悬浮窗显示
+            try:
+                send_time = struct.unpack('!d', content)[0]
+                rtt_ms = (time.time() - send_time) * 1000.0
+                client_info['latency'] = rtt_ms
+                self.latency_updated.emit(client_id, rtt_ms)
+            except Exception:
+                pass
+
         elif msg_type == MessageType.FILE_BEGIN:
             # 大文件传输开始 - 使用临时文件
             try:
@@ -898,6 +950,11 @@ class SyncServer(QObject):
                     # 通知 UI 清理接收进度条
                     self.file_receive_cancelled.emit(filename)
                     self.log_message.emit(f"取消接收文件: {filename}")
+                else:
+                    # 非"主机正在接收"场景：主机正在转发该文件给此客户端，取消对应转发任务。
+                    # 转发线程看到 stop_event 后会中止并通过 _notify_forward_cancelled 清理转发进度条。
+                    self.transfer_queue.cancel_task(f"{client_id}:{filename}")
+                    self.log_message.emit(f"取消转发文件: {filename} → {client_id}")
 
         except Exception as e:
             self.log_message.emit(f"取消文件传输失败: {e}")
@@ -1128,6 +1185,7 @@ class SyncServer(QObject):
                 except Exception:
                     pass
                 self.log_message.emit(f"取消发送大文件: {filename}")
+                self._notify_forward_cancelled(client_id, filename, is_forward)
                 return
 
             # 流式读取并发送数据块
@@ -1143,6 +1201,7 @@ class SyncServer(QObject):
                         except Exception:
                             pass
                         self.log_message.emit(f"取消发送大文件: {filename}")
+                        self._notify_forward_cancelled(client_id, filename, is_forward)
                         return
 
                     chunk = f.read(self.CHUNK_SIZE)
@@ -1157,6 +1216,7 @@ class SyncServer(QObject):
                         except Exception:
                             pass
                         self.log_message.emit(f"取消发送大文件: {filename}")
+                        self._notify_forward_cancelled(client_id, filename, is_forward)
                         return
                     chunk_index += 1
                     sent_size += len(chunk)
@@ -1180,6 +1240,7 @@ class SyncServer(QObject):
                 except Exception:
                     pass
                 self.log_message.emit(f"取消发送大文件: {filename}")
+                self._notify_forward_cancelled(client_id, filename, is_forward)
                 return
 
             # 发射发送完成信号
@@ -1191,6 +1252,7 @@ class SyncServer(QObject):
             
         except Exception as e:
             self.log_message.emit(f"发送大文件失败: {e}")
+            self._notify_forward_cancelled(client_id, filename, is_forward)
 
     def _send_file_to_client_with_target(self, client_id: str, filename: str, file_path: str, stop_event: threading.Event = None):
         """发送文件给特定客户端（转发模式，显示目标IP）
@@ -1203,6 +1265,13 @@ class SyncServer(QObject):
         """
         # 调用 _send_file_to_client，传递 is_forward=True
         self._send_file_to_client(client_id, filename, file_path, stop_event, is_forward=True)
+
+    def _notify_forward_cancelled(self, client_id: str, filename: str, is_forward: bool):
+        """转发被取消时通知 UI 清理对应进度条（携带目标IP）"""
+        if not is_forward:
+            return
+        target_ip = client_id.split(':')[0]  # 从 client_id 提取IP
+        self.file_forward_cancelled.emit(target_ip, filename)
     
     def _remove_client(self, client_id: str):
         """移除客户端"""

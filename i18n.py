@@ -98,6 +98,10 @@ class I18n:
             "manual_sync_operation": "操作",
             "manual_sync_consistent": "列表一致，无需同步",
             "manual_sync_diff": "正在补齐差异项",
+            # 延迟显示
+            "latency_ms": "ms",
+            "latency_unknown": "--",
+            "no_clients_connected": "无连接端",
             
             # 文件列表
             "file_name": "文件名",
@@ -114,6 +118,7 @@ class I18n:
             # 文件状态
             "status_synced": "已同步",
             "status_connected": "已连接",
+            "status_ready": "已就绪",
             "status_syncing": "正在同步",
             "status_conflict": "冲突",
             "status_failed": "同步失败",
@@ -304,6 +309,10 @@ class I18n:
             "manual_sync_operation": "Operation",
             "manual_sync_consistent": "Lists are consistent, no sync needed",
             "manual_sync_diff": "Filling in differences...",
+            # Latency display
+            "latency_ms": "ms",
+            "latency_unknown": "--",
+            "no_clients_connected": "No clients connected",
             
             # File list
             "file_name": "Name",
@@ -320,6 +329,7 @@ class I18n:
             # File status
             "status_synced": "Synced",
             "status_connected": "Connected",
+            "status_ready": "Ready",
             "status_syncing": "Syncing",
             "status_conflict": "Conflict",
             "status_failed": "Failed",

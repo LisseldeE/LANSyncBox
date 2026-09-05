@@ -8,10 +8,11 @@ import os
 from PySide6.QtWidgets import (
     QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, 
     QLabel, QPushButton, QTextEdit, QFrame, QSplitter, QMessageBox,
-    QTableWidget, QTableWidgetItem, QProgressBar, QHeaderView, QApplication
+    QTableWidget, QTableWidgetItem, QProgressBar, QHeaderView, QApplication,
+    QGraphicsOpacityEffect
 )
-from PySide6.QtCore import Qt, Signal, QMetaObject, Q_ARG, Slot, QTimer
-from PySide6.QtGui import QColor, QIcon, QPixmap
+from PySide6.QtCore import Qt, Signal, QEvent, QMetaObject, Q_ARG, Slot, QTimer, QPropertyAnimation, QEasingCurve
+from PySide6.QtGui import QColor, QIcon, QPixmap, QCursor, QPalette
 from pathlib import Path
 
 from i18n import I18n
@@ -58,6 +59,18 @@ class SyncWindow(QMainWindow):
 
         # 关闭确认标志（避免 on_disconnect 确认后 close() 再次弹窗）
         self._close_confirmed = False
+
+        # 主机端连接端详情浮层（延迟显示）
+        self._latency_popup = None
+        self._latency_popup_effect = None
+        self._latency_popup_anim = None
+        self._latency_fade_out = False
+        self._latency_popup_hovered = False
+        self._latency_open_timer = None
+        self._latency_close_timer = None
+        # 浮层定时刷新：后台接收线程把延迟写入 server.clients[*]['latency'] 字典缓冲，
+        # 前台 GUI 用此 1 秒定时器读取字典重绘，避免高连接数下每秒数十次信号触发重绘。
+        self._latency_popup_refresh_timer = None
 
         # 隐藏的日志记录（不在表格显示，但导出时包含）
         self._hidden_logs = []
@@ -119,13 +132,19 @@ class SyncWindow(QMainWindow):
         self.ip_label.mousePressEvent = self._copy_ip_address
         info_layout.addWidget(self.ip_label)
 
-        # 状态标签（主机端显示"已连接 | 在线: X"，连接端显示"已连接/已断开"）
+        # 状态标签（主机端显示"已就绪 | 在线: X"，连接端显示"已连接/已断开"）
         if self.is_host:
-            self.status_label = QLabel(f'<span style="color: green;">{I18n.tr("status_connected")}</span> | {I18n.tr("online_count")}: 0')
+            self.status_label = QLabel(f'<span style="color: green;">{I18n.tr("status_ready")}</span> | {I18n.tr("online_count")}: 0')
         else:
             self.status_label = QLabel(I18n.tr('status_connected'))
         self.status_label.setAlignment(Qt.AlignCenter)
         info_layout.addWidget(self.status_label)
+
+        # 主机端：连接数标签安装事件过滤器，悬停时显示连接端详情浮层
+        if self.is_host:
+            self._latency_popup = None
+            self.status_label.setAttribute(Qt.WA_Hover, True)
+            self.status_label.installEventFilter(self)
         
         # 断开连接按钮
         disconnect_btn = AnimatedButton(I18n.tr('disconnect'))
@@ -311,6 +330,10 @@ class SyncWindow(QMainWindow):
             # 主机端转发文件的进度信号（包含目标IP）
             self.server.file_forward_progress.connect(self.on_file_forward_progress)
             self.server.file_forward_sent.connect(self.on_file_forward_sent)
+            # 主机端转发文件被取消（目标连接端取消接收 / 转发中断）
+            self.server.file_forward_cancelled.connect(self.on_file_forward_cancelled)
+            # 主机端连接端延迟更新信号
+            self.server.latency_updated.connect(self.on_client_latency_updated)
 
             # 先启动房间响应服务（占用发现端口）
             self.responder = RoomResponder(self)
@@ -356,6 +379,8 @@ class SyncWindow(QMainWindow):
             # 手动同步相关信号
             self.client.sync_requested.connect(self.on_sync_requested)
             self.client.sync_result.connect(self.on_sync_result)
+            # 连接端自身延迟更新信号
+            self.client.latency_updated.connect(self.on_latency_updated)
 
             # 连接到服务器（复用模式下 client 已验证通过，直接记录日志）
             host = self.host_address or "127.0.0.1"
@@ -389,19 +414,232 @@ class SyncWindow(QMainWindow):
         if self.is_host and self.server:
             with self.server._lock:
                 count = len([c for c in self.server.clients.values() if c['authenticated']])
-            # 主机端显示"已连接 | 在线: X"，"已连接"为绿色，其余为系统默认颜色
-            self.status_label.setText(f'<span style="color: green;">{I18n.tr("status_connected")}</span> | {I18n.tr("online_count")}: {count}')
+            # 主机端显示"已就绪 | 在线: X"，"已就绪"为绿色，其余为系统默认颜色
+            self.status_label.setText(f'<span style="color: green;">{I18n.tr("status_ready")}</span> | {I18n.tr("online_count")}: {count}')
             # 在线人数变化时刷新手动同步按钮可用性（在锁外调用，避免非可重入锁死锁）
             self._update_sync_btn_state()
+
+    def _on_status_label_hover(self, enter: bool):
+        """主机端连接数标签悬停：显示/隐藏连接端详情浮层"""
+        if not self.is_host:
+            return
+        if enter:
+            self._show_latency_popup()
+        else:
+            self._hide_latency_popup()
+
+    def _latency_popup_content(self) -> str:
+        """生成主机端浮层的 HTML 内容：每行「IP    延迟 ms」两列对齐。
+
+        用 HTML 表格实现：IP 左列、延迟右列右对齐，消除空格混排产生的混淆；
+        延迟值前加状态圆点并用阈值色，使延迟一眼可辨。无连接端时显示提示。
+        """
+        with self.server._lock:
+            entries = [(cid, info) for cid, info in list(self.server.clients.items())
+                       if info.get('authenticated')]
+        if not entries:
+            return I18n.tr('no_clients_connected')
+        rows = []
+        for cid, info in entries:
+            ip = info.get('ip') or cid.split(':')[0]
+            lat = info.get('latency')
+            if lat is not None:
+                ms = int(round(lat))
+                color = self._latency_color(ms)
+                lat_str = f'<span style="color: {color};">{ms} {I18n.tr("latency_ms")}</span>'
+                dot = f'<span style="color: {color};">●</span> '
+            else:
+                lat_str = I18n.tr('latency_unknown')
+                dot = f'<span style="color: #8c8cf0;">●</span> '
+            rows.append(
+                f"<tr><td style='padding-right: 24px;'>{ip}</td>"
+                f"<td align='right' style='white-space: nowrap;'>{dot}{lat_str}</td></tr>"
+            )
+        return (f"<table style='margin: 0;'>{''.join(rows)}</table>")
+
+    def _show_latency_popup(self):
+        """在连接数标签鼠标位置显示连接端详情浮层"""
+        if not self.is_host or self.server is None:
+            return
+        if self._latency_popup is None:
+            # 作为主窗口的子控件（与同步界面 toast 完全一致的渲染方式），
+            # 避免顶层窗口自带方形底板导致"圆角卡+方底"。
+            self._latency_popup = QLabel(self)
+            pal = self.window().palette() if self.window() is not None else QApplication.palette()
+            win_color = pal.color(QPalette.Window)
+            luminance = win_color.red() * 0.299 + win_color.green() * 0.587 + win_color.blue() * 0.114
+            if luminance > 128:  # 浅色主题
+                bg, fg, border = QColor(255, 255, 255), QColor(34, 38, 42), QColor(140, 140, 146)
+            else:  # 深色主题
+                bg, fg, border = QColor(58, 60, 64), QColor(244, 244, 244), QColor(108, 108, 114)
+            self._latency_popup.setStyleSheet(
+                f"QLabel {{"
+                f"  background-color: {bg.name()};"
+                f"  color: {fg.name()};"
+                f"  border: 1px solid {border.name()};"
+                f"  border-radius: 8px;"
+                f"  padding: 8px 14px;"
+                f"  font-size: 13px;"
+                f"}}"
+            )
+            self._latency_popup.setAlignment(Qt.AlignLeft | Qt.AlignVCenter)
+            self._latency_popup.setTextFormat(Qt.RichText)
+            # 浮层对鼠标事件透明，避免它抢走状态标签上的悬停/离开事件；
+            # 否则浮层出现瞬间，状态标签收到 Leave → 浮层立即消失。
+            self._latency_popup.setAttribute(Qt.WA_TransparentForMouseEvents, True)
+            # 渐入渐出效果（子控件不能用 windowOpacity，需用 QGraphicsOpacityEffect）
+            self._latency_popup_effect = QGraphicsOpacityEffect()
+            self._latency_popup_effect.setOpacity(1.0)
+            self._latency_popup.setGraphicsEffect(self._latency_popup_effect)
+            self._latency_popup_anim = QPropertyAnimation(self._latency_popup_effect, b"opacity", self)
+            self._latency_popup_anim.setDuration(150)
+            self._latency_popup_anim.setEasingCurve(QEasingCurve.OutQuad)
+            # 动画 finished 只连接一次（用 flag 区分渐入/渐出），避免 hide() 反复 append 连接
+            self._latency_popup_anim.finished.connect(self._on_latency_popup_anim_finished)
+        self._latency_popup.setText(self._latency_popup_content())
+        self._latency_popup.adjustSize()
+        self._latency_popup.raise_()
+        # 固定定位：居中显示在"在线人数"状态标签下方（窗口内坐标，随窗口移动/缩放保持相对位置，
+        # 且不受屏幕 DPI/缩放比例影响产生偏移）
+        anchor = self.status_label.mapTo(self, self.status_label.rect().topLeft())
+        x = anchor.x() + (self.status_label.width() - self._latency_popup.width()) // 2
+        y = anchor.y() + self.status_label.height() + 6
+        self._latency_popup.move(x, y)
+        # 停止未完成的关闭定时器（鼠标重新进入时取消即将的隐藏）
+        if self._latency_close_timer is not None and self._latency_close_timer.isActive():
+            self._latency_close_timer.stop()
+        # 若正在渐出，直接中断并回到完全不透明，便于立即反向渐入
+        self._latency_popup_anim.stop()
+        self._latency_popup_effect.setOpacity(1.0)
+        self._latency_fade_out = False
+        if not self._latency_popup.isVisible():
+            self._latency_popup.show()
+            self._latency_popup_anim.setStartValue(0.0)
+            self._latency_popup_anim.setEndValue(1.0)
+            self._latency_popup_anim.start()
+        # 浮层可见期间启动 1 秒定时刷新（从字典缓冲读取重绘）
+        if self._latency_popup_refresh_timer is None:
+            self._latency_popup_refresh_timer = QTimer(self)
+            self._latency_popup_refresh_timer.setInterval(1000)
+            self._latency_popup_refresh_timer.timeout.connect(self._refresh_latency_popup_from_buffer)
+        self._latency_popup_refresh_timer.start()
+
+    def _refresh_latency_popup_from_buffer(self):
+        """前台定时刷新：从 server.clients 字典缓冲读取各连接端延迟并重绘浮层。
+        
+        后台各接收线程负责把延迟写入字典，本方法只读并重建浮层内容，
+        将 GUI 重绘收敛为每秒一次，规避高连接数下高频信号触发重绘。
+        """
+        popup = self._latency_popup
+        if popup is None or not popup.isVisible():
+            return
+        popup.setText(self._latency_popup_content())
+        popup.adjustSize()
+
+    def _on_latency_popup_anim_finished(self):
+        """浮层动画结束：仅当是渐出时真正隐藏（渐入结束不隐藏）"""
+        if self._latency_fade_out:
+            self._latency_fade_out = False
+            self._latency_popup.hide()
+
+    def _hide_latency_popup(self):
+        """隐藏主机端连接端详情浮层（渐出后隐藏）。
+
+        使用延迟定时器：鼠标短暂移出又立刻移入时不误隐藏，只有确认
+        离开后才执行渐出，解决"移出移入呼不出面板"的问题。
+        """
+        if self._latency_close_timer is None:
+            self._latency_close_timer = QTimer(self)
+            self._latency_close_timer.setSingleShot(True)
+            self._latency_close_timer.timeout.connect(self._do_hide_latency_popup)
+        # 重启延迟关闭计时器：极短防抖，光标扫过标签边缘不误收，又接近即时收起
+        self._latency_close_timer.start(100)
+
+    def _do_hide_latency_popup(self):
+        """延迟确认后真正执行渐出隐藏"""
+        popup = self._latency_popup
+        if popup is None or not popup.isVisible():
+            return
+        # 浮层将隐藏，停止 1 秒定时刷新，避免空转
+        if self._latency_popup_refresh_timer is not None:
+            self._latency_popup_refresh_timer.stop()
+        anim = self._latency_popup_anim
+        effect = self._latency_popup_effect
+        if anim is not None and effect is not None:
+            anim.stop()
+            self._latency_fade_out = True
+            anim.setStartValue(effect.opacity())
+            anim.setEndValue(0.0)
+            anim.start()
+        else:
+            popup.hide()
+
+    def eventFilter(self, obj, event):
+        """事件过滤器：捕获主机端连接数标签的悬停事件（带防抖）"""
+        if self.is_host and obj is self.status_label:
+            etype = event.type()
+            if etype == QEvent.Type.Enter:
+                self._latency_popup_hovered = True
+                self._show_latency_popup()
+                return False
+            elif etype == QEvent.Type.Leave:
+                self._latency_popup_hovered = False
+                self._hide_latency_popup()
+                return False
+        return super().eventFilter(obj, event)
+
+    def on_client_latency_updated(self, client_id: str, rtt_ms: float):
+        """主机端：某连接端延迟更新（信号）。
+
+        后台接收线程已把延迟写入 server.clients[*] 字典缓冲，浮层由
+        _latency_popup_refresh_timer（1 秒定时）读取字典重绘，此处不再直接
+        重绘 GUI，避免高连接数下每秒数十次信号触发界面刷新。
+        """
+        pass
+
+    def _latency_color(self, ms: float) -> str:
+        """根据延迟阈值返回对应颜色。
+        绿 `<50` 与"已连接/已就绪"绿色一致(#008000)；橙 `<200`、红 `>=200` 与主界面缓存大小配色一致(#ff922b/#f03e3e)。
+        """
+        if ms < 50:
+            return '#008000'
+        if ms < 200:
+            return '#ff922b'
+        return '#f03e3e'
+
+    def on_latency_updated(self, rtt_ms: float):
+        """连接端：自身延迟更新，在"已连接"旁显示延迟"""
+        if self.is_host:
+            return
+        ms = int(round(rtt_ms))
+        color = self._latency_color(ms)
+        self.status_label.setText(f'<span style="color: green;">{I18n.tr("status_connected")}</span> · <span style="color: {color};">{ms} {I18n.tr("latency_ms")}</span>')
+
+    def _refresh_client_status_label(self):
+        """重建连接端状态标签：保留已获取的延迟值（若无延迟则显示 -- ms）。
+
+        连接端在每次文件传输完成等时机都会把状态标签重置为纯"已连接"，
+        这里统一重建为带延迟的文本，避免延迟短暂消失又闪烁回来。
+        """
+        if self.is_host:
+            return
+        lat = self.client.latency if (self.client is not None) else None
+        if lat is not None:
+            ms = int(round(lat))
+            color = self._latency_color(ms)
+            text = f'<span style="color: green;">{I18n.tr("status_connected")}</span> · <span style="color: {color};">{ms} {I18n.tr("latency_ms")}</span>'
+        else:
+            text = f'<span style="color: green;">{I18n.tr("status_connected")}</span> · {I18n.tr("latency_unknown")} {I18n.tr("latency_ms")}'
+        self.status_label.setText(text)
 
     def on_connected(self):
         """连接成功"""
         if self.is_host:
-            # 主机端显示"已连接 | 在线: X"，"已连接"为绿色，其余为系统默认颜色
-            self.status_label.setText(f'<span style="color: green;">{I18n.tr("status_connected")}</span> | {I18n.tr("online_count")}: 0')
+            # 主机端显示"已就绪 | 在线: X"，"已就绪"为绿色，其余为系统默认颜色
+            self.status_label.setText(f'<span style="color: green;">{I18n.tr("status_ready")}</span> | {I18n.tr("online_count")}: 0')
         else:
-            # 连接端显示"已连接"（绿色）
-            self.status_label.setText(f'<span style="color: green;">{I18n.tr("status_connected")}</span>')
+            # 连接端显示"已连接"，延迟初始为 -- ms，收到首个 PING 回包后再刷新为实际值
+            self.status_label.setText(f'<span style="color: green;">{I18n.tr("status_connected")}</span> · {I18n.tr("latency_unknown")} {I18n.tr("latency_ms")}')
             # 连接端连接成功：上报文件列表，触发首次全量差异同步
             self._perform_full_sync()
         
@@ -739,7 +977,7 @@ class SyncWindow(QMainWindow):
             if self.is_host:
                 self._update_clients_count()
             else:
-                self.status_label.setText(f'<span style="color: green;">{I18n.tr("status_connected")}</span>')
+                self._refresh_client_status_label()
 
     def on_remote_file_cancelled(self, filename: str):
         """远程文件接收被取消（线程安全）"""
@@ -759,12 +997,12 @@ class SyncWindow(QMainWindow):
         # 刷新文件列表
         self.file_list.refresh()
 
-        # 只有当没有其他文件正在同步时，才更新状态为"已连接"
+        # 只有当没有其他文件正在同步时，才更新状态为"已连接"（连接端保留延迟显示）
         if not self._transfer_rows:
             if self.is_host:
                 self._update_clients_count()
             else:
-                self.status_label.setText(f'<span style="color: green;">{I18n.tr("status_connected")}</span>')
+                self._refresh_client_status_label()
     
     def on_remote_file_deleted(self, filename: str):
         """远程文件已删除（线程安全）"""
@@ -780,12 +1018,12 @@ class SyncWindow(QMainWindow):
         
         from pathlib import Path
         self._add_record(Path(filename).name, "删除", "")
-        # 只有当没有其他文件正在同步时，才更新状态为"已连接"
+        # 只有当没有其他文件正在同步时，才更新状态为"已连接"（连接端保留延迟显示）
         if not self._transfer_rows:
             if self.is_host:
                 self._update_clients_count()
             else:
-                self.status_label.setText(f'<span style="color: green;">{I18n.tr("status_connected")}</span>')
+                self._refresh_client_status_label()
     
     def on_file_send_progress(self, filename: str, current: int, total: int):
         """主机端发送文件进度（线程安全）"""
@@ -824,12 +1062,12 @@ class SyncWindow(QMainWindow):
         """实际执行：发送文件完成"""
         # 完成进度条（发送）
         self._finish_transfer_progress(filename, "发送")
-        # 只有当没有其他文件正在同步时，才更新状态为"已连接"
+        # 只有当没有其他文件正在同步时，才更新状态为"已连接"（连接端保留延迟显示）
         if not self._transfer_rows:
             if self.is_host:
                 self._update_clients_count()
             else:
-                self.status_label.setText(f'<span style="color: green;">{I18n.tr("status_connected")}</span>')
+                self._refresh_client_status_label()
 
     def on_file_forward_progress(self, target_ip: str, filename: str, current: int, total: int):
         """主机端转发文件进度（线程安全）"""
@@ -868,16 +1106,26 @@ class SyncWindow(QMainWindow):
         QMetaObject.invokeMethod(self, "_do_file_forward_sent", Qt.QueuedConnection,
                                  Q_ARG(str, target_ip), Q_ARG(str, filename))
 
+    def on_file_forward_cancelled(self, target_ip: str, filename: str):
+        """主机端转发文件被取消（线程安全）"""
+        QMetaObject.invokeMethod(self, "_do_file_forward_cancelled", Qt.QueuedConnection,
+                                 Q_ARG(str, target_ip), Q_ARG(str, filename))
+
+    @Slot(str, str)
+    def _do_file_forward_cancelled(self, target_ip: str, filename: str):
+        """实际执行：主机端转发文件被取消，清理对应转发进度条（ip:filename 复合键）"""
+        self._cancel_transfer_progress(filename, target_ip)
+
     @Slot(str, str)
     def _do_file_forward_sent(self, target_ip: str, filename: str):
         """实际执行：转发文件完成"""
         self._finish_transfer_progress(filename, "发送", target_ip)
-        # 只有当没有其他文件正在同步时，才更新状态为"已连接"
+        # 只有当没有其他文件正在同步时，才更新状态为"已连接"（连接端保留延迟显示）
         if not self._transfer_rows:
             if self.is_host:
                 self._update_clients_count()
             else:
-                self.status_label.setText(f'<span style="color: green;">{I18n.tr("status_connected")}</span>')
+                self._refresh_client_status_label()
 
     def on_remote_file_renamed(self, old_name: str, new_name: str):
         """远程文件已重命名（线程安全）"""
@@ -892,12 +1140,12 @@ class SyncWindow(QMainWindow):
         self.file_list.refresh()
         
         self._add_record(f"{old_name} -> {new_name}", I18n.tr("log_change"), "")
-        # 只有当没有其他文件正在同步时，才更新状态为"已连接"
+        # 只有当没有其他文件正在同步时，才更新状态为"已连接"（连接端保留延迟显示）
         if not self._transfer_rows:
             if self.is_host:
                 self._update_clients_count()
             else:
-                self.status_label.setText(f'<span style="color: green;">{I18n.tr("status_connected")}</span>')
+                self._refresh_client_status_label()
     
     def on_remote_dir_created(self, dirname: str):
         """远程目录已创建（线程安全）"""
@@ -913,12 +1161,12 @@ class SyncWindow(QMainWindow):
         
         from pathlib import Path
         self._add_record(Path(dirname).name, "创建目录", "")
-        # 只有当没有其他文件正在同步时，才更新状态为"已连接"
+        # 只有当没有其他文件正在同步时，才更新状态为"已连接"（连接端保留延迟显示）
         if not self._transfer_rows:
             if self.is_host:
                 self._update_clients_count()
             else:
-                self.status_label.setText(f'<span style="color: green;">{I18n.tr("status_connected")}</span>')
+                self._refresh_client_status_label()
     
     def _add_record(self, content: str, action: str, status: str = ""):
         """添加同步记录

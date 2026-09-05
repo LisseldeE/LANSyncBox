@@ -30,6 +30,8 @@ class MessageType:
     FILE_REQUEST_FORWARD = 0x11  # 请求转发文件
     SYNC_REQUEST = 0x12   # 手动同步请求（主机→连接端，触发连接端重新上报并进行差异同步）
     SYNC_RESULT = 0x13    # 同步结果（主机→连接端，告知是否有差异，用于显示"一致/补齐"通知）
+    PING = 0x14           # 延迟探测（发起端→对端，content 携带发送时刻，对端收到原样回传为 PONG）
+    PONG = 0x15           # 延迟回包（对端→发起端，原样带回 PING 的发送时刻，发起端用于计算 RTT）
 
 
 class Protocol:
@@ -205,6 +207,32 @@ class Protocol:
         """
         content = b'1' if has_diff else b'0'
         return Protocol.pack_message(MessageType.SYNC_RESULT, '', len(content), False, content)
+
+    @staticmethod
+    def create_ping(send_time: float) -> bytes:
+        """创建延迟探测消息 PING（发起端→对端）
+
+        Args:
+            send_time: 本地发送时刻（秒，毫秒精度足够），原样回传用于计算 RTT
+
+        Returns:
+            消息字节
+        """
+        content = struct.pack('!d', send_time)
+        return Protocol.pack_message(MessageType.PING, '', len(content), False, content)
+
+    @staticmethod
+    def create_pong(send_time: float) -> bytes:
+        """创建延迟回包消息 PONG（对端→发起端，原样带回 PING 的发送时刻）
+
+        Args:
+            send_time: 从收到的 PING 解出的发送时刻
+
+        Returns:
+            消息字节
+        """
+        content = struct.pack('!d', send_time)
+        return Protocol.pack_message(MessageType.PONG, '', len(content), False, content)
 
 
 class MessageReceiver:

@@ -8,6 +8,7 @@ import socket
 import threading
 import os
 import time
+import struct
 from typing import Optional
 from PySide6.QtCore import QObject, Signal
 
@@ -37,6 +38,7 @@ class SyncClient(QObject):
     file_list_received = Signal(list) # 收到文件列表
     sync_requested = Signal()          # 收到主机端手动同步请求，需重新上报文件列表
     sync_result = Signal(bool)         # 收到同步结果（True=存在差异需补齐，False=列表一致无需同步）
+    latency_updated = Signal(float)     # 延迟更新 (rtt_ms)，连接端="已连接"旁显示的延迟
     
     # 数据块大小（64KB）
     CHUNK_SIZE = 64 * 1024
@@ -52,6 +54,14 @@ class SyncClient(QObject):
         self.sync_folder = Config.get_room_folder(room_code)
         self.receiving_files = {}  # 大文件接收状态：{filename: {handle, file_size, mtime, received_size, temp_path}}
         self._receiving_lock = threading.Lock()  # 保护 receiving_files 的线程锁
+
+        # 延迟缓存（连接端显示用），由 PING/PONG 在接收线程更新
+        self.latency = None
+
+        # 延迟探测线程控制
+        self._ping_stop = threading.Event()
+        self._ping_thread = None
+        self.PING_INTERVAL = 1.0  # 每 1 秒发送一次 PING 给主机（连接端单机独立探测，主机端汇总不增加负担）
 
         # 创建传输队列，控制并发传输数量
         self.transfer_queue = TransferQueue(max_concurrent=5)
@@ -106,6 +116,7 @@ class SyncClient(QObject):
         """断开连接"""
         self.running = False
         self.authenticated = False
+        self._ping_stop.set()
 
         # 清理大文件接收状态：关闭句柄、删除临时文件
         # 先在锁内收集所有需要清理的条目，然后在锁外执行 IO 操作
@@ -133,6 +144,26 @@ class SyncClient(QObject):
             except Exception:
                 pass
         self.socket = None
+
+    def _start_ping_thread(self):
+        """启动延迟探测线程"""
+        if self._ping_thread and self._ping_thread.is_alive():
+            return
+        self._ping_stop.clear()
+        self._ping_thread = threading.Thread(target=self._ping_loop, daemon=True)
+        self._ping_thread.start()
+
+    def _ping_loop(self):
+        """延迟探测线程：每 2 秒发送一次 PING 给主机，用于显示连接端自身延迟"""
+        while not self._ping_stop.is_set():
+            if self._ping_stop.wait(self.PING_INTERVAL):
+                break
+            if not self.socket or not self.authenticated:
+                continue
+            try:
+                self.socket.sendall(Protocol.create_ping(time.time()))
+            except Exception:
+                pass
     
     def _receive_loop(self):
         """接收数据循环"""
@@ -321,6 +352,24 @@ class SyncClient(QObject):
             # 主机端同步结果：告知是否存在差异（用于显示"列表一致/正在补齐差异项"）
             has_diff = content == b'1'
             self.sync_result.emit(has_diff)
+
+        elif msg_type == MessageType.PING:
+            # 主机探测延迟：立即回 PONG 并原样带回发送时刻
+            try:
+                send_time = struct.unpack('!d', content)[0]
+                self.socket.sendall(Protocol.create_pong(send_time))
+            except Exception:
+                pass
+
+        elif msg_type == MessageType.PONG:
+            # 收到主机回包：RTT = 当前时刻 - 发起时刻（同一端时钟，无跨机偏差）
+            try:
+                send_time = struct.unpack('!d', content)[0]
+                rtt_ms = (time.time() - send_time) * 1000.0
+                self.latency = rtt_ms
+                self.latency_updated.emit(rtt_ms)
+            except Exception:
+                pass
     
     def _handle_auth_response(self, content: bytes):
         """处理验证响应"""
@@ -333,6 +382,8 @@ class SyncClient(QObject):
                 self.authenticated = True
                 self.connected.emit()
                 self.log_message.emit("验证成功")
+                # 认证成功后启动延迟探测，连接端才能周期性 PING 主机以显示延迟
+                self._start_ping_thread()
             else:
                 self.log_message.emit(f"验证失败: {message}")
                 # 发射验证失败信号
