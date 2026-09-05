@@ -537,6 +537,7 @@ class FileListWidget(QWidget):
     file_deleted = Signal(str)  # 文件删除信号（本地操作触发）
     file_renamed = Signal(str, str)  # 文件重命名信号（旧名，新名）
     dir_created = Signal(str)  # 目录创建信号（本地操作触发）
+    manual_sync_requested = Signal()  # 手动同步按钮点击信号
 
     def __init__(self, folder_path: Path, parent=None):
         super().__init__(parent)
@@ -646,11 +647,18 @@ class FileListWidget(QWidget):
         self.path_edit.setReadOnly(True)
         toolbar_layout.addWidget(self.path_edit)
 
+        # 手动同步按钮（选中状态/禁用状态区分不同用途：连接端拉取、主机端通知所有连接端）
+        self.sync_btn = QPushButton(I18n.tr('manual_sync'))
+        self.sync_btn.setFixedWidth(80)
+        self.sync_btn.clicked.connect(self.manual_sync_requested.emit)
+        toolbar_layout.addWidget(self.sync_btn)
+
         # 统一"返回上级"按钮与路径框的垂直高度，保证两者一致。
         # 不使用 QSS 指定 margin（会启用基础样式、压低原生控件外观），以路径框高度为基准对齐
         _bar_h = self.path_edit.sizeHint().height()
         self.back_btn.setFixedHeight(_bar_h)
         self.path_edit.setFixedHeight(_bar_h)
+        self.sync_btn.setFixedHeight(_bar_h)
         
         # 刷新按钮（已注释：远程/本地变化均有自动刷新，此手动按钮冗余，暂不删除、保留逻辑）
         # refresh_btn = QPushButton(I18n.tr('refresh'))
@@ -818,6 +826,14 @@ class FileListWidget(QWidget):
             f"  font-size: 13px;"
             f"}}"
         )
+
+    def show_global_notification(self, message: str):
+        """显示顶部全局通知（复用现有玻璃态 toast 卡片样式）"""
+        self._show_toast(message)
+
+    def set_sync_btn_enabled(self, enabled: bool):
+        """启停手动同步按钮"""
+        self.sync_btn.setEnabled(enabled)
 
     def _show_toast(self, message: str):
         """顶部悬浮提示：淡入→停留→淡出"""

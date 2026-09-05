@@ -231,6 +231,10 @@ class SyncWindow(QMainWindow):
         self.file_list.dir_created.connect(self.on_dir_created)
         # 设置取消传输回调（直接调用，避免 Qt 信号异步性问题）
         self.file_list.set_cancel_transfer_callback(self.on_cancel_transfer)
+        # 手动同步按钮
+        self.file_list.manual_sync_requested.connect(self.on_manual_sync_requested)
+        self._sync_btn_locked = False  # 手动同步按钮 3 秒冷却锁
+        self.file_list.set_sync_btn_enabled(False)  # 初始不可点，连接/在线后启用
         splitter.addWidget(self.file_list)
         
         # 设置分隔器比例
@@ -349,6 +353,9 @@ class SyncWindow(QMainWindow):
             self.client.file_sent.connect(self.on_file_sent)
             # 客户端文件列表接收信号
             self.client.file_list_received.connect(self.on_file_list_received)
+            # 手动同步相关信号
+            self.client.sync_requested.connect(self.on_sync_requested)
+            self.client.sync_result.connect(self.on_sync_result)
 
             # 连接到服务器（复用模式下 client 已验证通过，直接记录日志）
             host = self.host_address or "127.0.0.1"
@@ -384,6 +391,8 @@ class SyncWindow(QMainWindow):
                 count = len([c for c in self.server.clients.values() if c['authenticated']])
             # 主机端显示"已连接 | 在线: X"，"已连接"为绿色，其余为系统默认颜色
             self.status_label.setText(f'<span style="color: green;">{I18n.tr("status_connected")}</span> | {I18n.tr("online_count")}: {count}')
+            # 在线人数变化时刷新手动同步按钮可用性（在锁外调用，避免非可重入锁死锁）
+            self._update_sync_btn_state()
 
     def on_connected(self):
         """连接成功"""
@@ -393,18 +402,27 @@ class SyncWindow(QMainWindow):
         else:
             # 连接端显示"已连接"（绿色）
             self.status_label.setText(f'<span style="color: green;">{I18n.tr("status_connected")}</span>')
+            # 连接端连接成功：上报文件列表，触发首次全量差异同步
+            self._perform_full_sync()
         
-        # 发送自己的文件列表给主机端（连接端）
-        if not self.is_host and self.client:
-            from sync.file_manager import FileManager
-            from pathlib import Path
-            
-            file_manager = FileManager(Path(self.room_folder))
-            local_file_list = file_manager.get_file_list_for_sync()
-            local_empty_dirs = file_manager.get_empty_directory_list()
-            
-            # 发送文件列表给主机端
-            self._send_file_list_to_server(local_file_list, local_empty_dirs)
+        # 更新手动同步按钮可用状态
+        self._update_sync_btn_state()
+
+    def _perform_full_sync(self):
+        """连接端执行一次全量差异同步：上报本地文件列表给主机端仲裁
+
+        初次加入、自动重连、手动同步、响应主机端 SYNC_REQUEST 均复用到此方法。
+        主机端收到后做差异仲裁并回传同步结果（列表一致/补齐差异项）。
+        """
+        if not self.client or not self.client.authenticated:
+            return
+        from sync.file_manager import FileManager
+        from pathlib import Path
+
+        file_manager = FileManager(Path(self.room_folder))
+        local_file_list = file_manager.get_file_list_for_sync()
+        local_empty_dirs = file_manager.get_empty_directory_list()
+        self._send_file_list_to_server(local_file_list, local_empty_dirs)
     
     def _send_file_list_to_server(self, file_list: list, empty_dirs: list = None):
         """发送文件列表给主机端
@@ -446,6 +464,64 @@ class SyncWindow(QMainWindow):
         self._add_record("", I18n.tr('disconnected'), "")
         self.status_label.setText(I18n.tr('status_disconnected'))
         self.status_label.setStyleSheet("color: red;")
+        # 断开后手动同步不可用
+        self._update_sync_btn_state()
+
+    def on_manual_sync_requested(self):
+        """手动同步按钮：请求全量差异同步
+
+        连接端：重新上报文件列表给主机端仲裁；
+        主机端：通知所有在线连接端各自重新上报并补齐。
+        """
+        if self._sync_btn_locked:
+            return
+        self._sync_btn_locked = True
+        self._update_sync_btn_state()
+        # 日志：操作列=操作，信息列=手动同步
+        self._add_record(I18n.tr('manual_sync'), I18n.tr('manual_sync_operation'))
+        # 3 秒后恢复可点击（重新评估连接/在线状态）
+        from PySide6.QtCore import QTimer
+        QTimer.singleShot(3000, self._release_sync_btn)
+
+        if self.is_host:
+            if self.server:
+                self.server.request_sync_all()
+        else:
+            self._perform_full_sync()
+
+    def _release_sync_btn(self):
+        """手动同步按钮冷却结束"""
+        self._sync_btn_locked = False
+        self._update_sync_btn_state()
+
+    def on_sync_requested(self):
+        """收到主机端 SYNC_REQUEST：触发一次全量差异同步（仅连接端）"""
+        if not self.is_host:
+            self._perform_full_sync()
+
+    def on_sync_result(self, has_diff: bool):
+        """收到主机端同步结果：显示"列表一致/正在补齐差异项"通知"""
+        if has_diff:
+            self.file_list.show_global_notification(I18n.tr('manual_sync_diff'))
+        else:
+            self.file_list.show_global_notification(I18n.tr('manual_sync_consistent'))
+
+    def _update_sync_btn_state(self):
+        """根据连接状态更新手动同步按钮可用性"""
+        if self._sync_btn_locked:
+            self.file_list.set_sync_btn_enabled(False)
+            return
+        if self.is_host:
+            # 主机端：有在线连接端才可点击
+            online = 0
+            if self.server:
+                with self.server._lock:
+                    online = len([c for c in self.server.clients.values() if c['authenticated']])
+            self.file_list.set_sync_btn_enabled(online > 0)
+        else:
+            # 连接端：已连接且已验证才可点击
+            enabled = bool(self.client and self.client.authenticated)
+            self.file_list.set_sync_btn_enabled(enabled)
     
     def on_file_list_received(self, remote_file_list: list):
         """收到文件列表响应（连接端）
@@ -863,8 +939,9 @@ class SyncWindow(QMainWindow):
         if len(display_text) > 40:
             display_text = display_text[:37] + "..."
         
-        # 添加新行
-        row_count = self.records_table.rowCount()
+        # 添加新行：普通记录插在活动进度行"钉住区"之上，保证进度行始终位于表格底部
+        pinned = self._pinned_count()
+        row_count = max(0, self.records_table.rowCount() - pinned)
         self.records_table.insertRow(row_count)
         
         # 操作
@@ -882,16 +959,8 @@ class SyncWindow(QMainWindow):
         # 滚动到底部
         self.records_table.scrollToBottom()
         
-        # 限制记录数量
-        while self.records_table.rowCount() > 100:
-            self.records_table.removeRow(0)
-            # 更新所有传输进度行的行号（removeRow(0) 导致后续所有行号减1）
-            for transfer_key, info in list(self._transfer_rows.items()):
-                if info['row'] > 0:
-                    info['row'] -= 1
-                else:
-                    # 行号为0的进度行已被移除，清理记录
-                    del self._transfer_rows[transfer_key]
+        # 只裁剪顶部历史记录，活动进度行"钉住区"始终不被裁剪
+        self._trim_history()
 
     def _export_log(self):
         """导出传输日志到文件"""
@@ -1014,8 +1083,9 @@ class SyncWindow(QMainWindow):
             'filename': filename
         }
 
-        # 滚动到底部
+        # 滚动到底部，并裁剪历史区、校正钉住区行号
         self.records_table.scrollToBottom()
+        self._trim_history()
 
     def _update_transfer_progress(self, filename: str, current: int, total: int, target_ip: str = ""):
         """更新传输进度（更新进度条控件）
@@ -1082,53 +1152,75 @@ class SyncWindow(QMainWindow):
         self._cancelled_transfers.discard(transfer_key)
 
         if transfer_key in self._transfer_rows:
-            # 已有进度行，移除进度条，更新为完成状态
-            transfer_info = self._transfer_rows[transfer_key]
-            row = transfer_info['row']
-            row_target_ip = transfer_info.get('target_ip', '')
-
-            # 移除进度条控件
-            self.records_table.setCellWidget(row, 1, None)
-
-            # 构建完成文本
-            if row_target_ip:
-                display_text = f"发送至 {row_target_ip} {display_name} - 完成"
-                full_text = f"发送至 {row_target_ip} {filename} - 完成"
-            else:
-                display_text = f"{display_name} - 完成"
-                full_text = f"{filename} - 完成"
-
-            # 更新信息列为绿色完成状态
-            status_item = QTableWidgetItem(display_text)
-            status_item.setToolTip(full_text)  # 完整路径存入 tooltip，供导出使用
-            status_item.setForeground(QColor("#51cf66"))
-            self.records_table.setItem(row, 1, status_item)
-
-            # 清除记录
+            # 有进度行：直接从钉住区移除该行（进度条随行销毁，安全不复用）
+            row = self._transfer_rows[transfer_key]['row']
             del self._transfer_rows[transfer_key]
+            self.records_table.removeRow(row)
+            self._reindex_block()   # 钉住区缩小后校正行号
+        # else: 无进度行（文件传输很快），直接新增完成记录，无需移除
+
+        # 构建完成文本
+        if target_ip:
+            display_text = f"发送至 {target_ip} {display_name} - 完成"
+            full_text = f"发送至 {target_ip} {filename} - 完成"
         else:
-            # 备用逻辑：如果没有进度行（文件传输很快），直接添加完成记录
-            row_count = self.records_table.rowCount()
-            self.records_table.insertRow(row_count)
+            display_text = f"{display_name} - 完成"
+            full_text = f"{filename} - 完成"
 
-            # 操作列
-            action_item = QTableWidgetItem(action)
-            action_item.setTextAlignment(Qt.AlignCenter)
-            self.records_table.setItem(row_count, 0, action_item)
+        # 在钉住区之上插入完成记录，使其进入上方历史区流转
+        pinned = self._pinned_count()
+        insert_row = max(0, self.records_table.rowCount() - pinned)
+        self.records_table.insertRow(insert_row)
 
-            # 信息列（绿色完成状态）
-            status_item = QTableWidgetItem(f"{display_name} - 完成")
-            status_item.setToolTip(f"{filename} - 完成")  # 完整路径存入 tooltip，供导出使用
-            status_item.setForeground(QColor("#51cf66"))
-            self.records_table.setItem(row_count, 1, status_item)
+        # 操作列
+        action_item = QTableWidgetItem(action)
+        action_item.setTextAlignment(Qt.AlignCenter)
+        self.records_table.setItem(insert_row, 0, action_item)
 
-            # 滚动到底部
-            self.records_table.scrollToBottom()
+        # 信息列（绿色完成状态）
+        status_item = QTableWidgetItem(display_text)
+        status_item.setToolTip(full_text)  # 完整路径存入 tooltip，供导出使用
+        status_item.setForeground(QColor("#51cf66"))
+        self.records_table.setItem(insert_row, 1, status_item)
 
-            # 限制记录数量
-            while self.records_table.rowCount() > 100:
-                self.records_table.removeRow(0)
-    
+        # 滚动到底部
+        self.records_table.scrollToBottom()
+
+        # 只裁剪顶部历史记录，钉住区永不裁剪
+        self._trim_history()
+
+    def _pinned_count(self):
+        """返回当前钉在表格底部的活动进度行数量。
+
+        所有 _transfer_rows 中的条目（含已取消但保留占位的）都位于表格最底部区域；
+        它们永不移动、控件永不复用，只通过控制插入位置维持"在底部"这一不变量。
+        """
+        n = self.records_table.rowCount()
+        return sum(1 for info in self._transfer_rows.values() if 0 <= info['row'] < n)
+
+    def _reindex_block(self):
+        """将 _transfer_rows 的行号校正为与底部"钉住区"精确对齐。
+
+        不移动任何控件，仅更新字典中的行号：按相对顺序把活动进度行映射到
+        表格最后 len(_transfer_rows) 行，配合插入位置控制维持
+        "活动进度行恒在底部、控件永不复用"的安全不变量。
+        """
+        ordered = sorted((info['row'], key) for key, info in self._transfer_rows.items())
+        n = len(ordered)
+        base = self.records_table.rowCount() - n
+        for i, (_, key) in enumerate(ordered):
+            self._transfer_rows[key]['row'] = base + i
+
+    def _trim_history(self, cap: int = 100):
+        """只裁剪顶部"历史记录"区，活动进度行钉住区永不裁剪。
+
+        removeRow(0) 会让整表行号下移，因此裁剪后统一 _reindex_block 校正。
+        """
+        while self.records_table.rowCount() - self._pinned_count() > cap:
+            # 活动进度行恒在底部，此处行号0必为历史记录，不会误删钉住行
+            self.records_table.removeRow(0)
+        self._reindex_block()
+
     @Slot(str, str)
     def add_log(self, log_type: str, message: str):
         """添加日志（兼容旧代码）"""
@@ -1146,34 +1238,53 @@ class SyncWindow(QMainWindow):
         self._cancel_transfer_progress(rel_path)
 
     def _cancel_transfer_progress(self, filename: str, target_ip: str = ""):
-        """取消传输进度条，标记为已取消（单行动态更新）
+        """取消/失败传输进度条，使其进入上方历史区流转（不再钉在底部）
 
         Args:
             filename: 文件名（相对路径）
             target_ip: 目标IP（可选，用于转发时显示）
         """
+        from pathlib import Path
+
         # 构建复合键（如果有目标IP，使用复合键；否则使用文件名）
         transfer_key = f"{target_ip}:{filename}" if target_ip else filename
 
         if transfer_key in self._transfer_rows:
             transfer_info = self._transfer_rows[transfer_key]
             row = transfer_info['row']
-            from pathlib import Path
+            action = transfer_info.get('action', '接收')
+
             display_name = Path(filename).name
             if len(display_name) > 25:
                 display_name = display_name[:22] + "..."
 
-            # 移除进度条控件（如果有）
-            self.records_table.setCellWidget(row, 1, None)
+            # 移除钉住行（进度条随行销毁，不复用），使其离开底部钉住区
+            del self._transfer_rows[transfer_key]
+            self.records_table.removeRow(row)
+            self._reindex_block()  # 钉住区缩小后校正行号
 
-            # 更新信息列为橙色取消状态
+            # 在钉住区之上插入"已取消"记录，使其进入上方历史区流转
+            pinned = self._pinned_count()
+            insert_row = max(0, self.records_table.rowCount() - pinned)
+            self.records_table.insertRow(insert_row)
+
+            action_item = QTableWidgetItem(action)
+            action_item.setTextAlignment(Qt.AlignCenter)
+            self.records_table.setItem(insert_row, 0, action_item)
+
+            # 信息列为橙色取消状态
             status_item = QTableWidgetItem(f"{display_name} - 已取消")
             status_item.setToolTip(f"{filename} - 已取消")  # 完整路径存入 tooltip，供导出使用
             status_item.setForeground(QColor("#ff922b"))
-            self.records_table.setItem(row, 1, status_item)
+            self.records_table.setItem(insert_row, 1, status_item)
 
-            # 不删除 _transfer_rows[transfer_key]，残留进度信号通过 _cancelled_transfers 过滤
-            self._cancelled_transfers.add(transfer_key)
+            # 滚动到底部，并只裁剪顶部历史区（钉住区仍不受影响）
+            self.records_table.scrollToBottom()
+            self._trim_history()
+
+        # 标记为已取消，过滤残留进度信号（同时登记 filename 与复合键，兼容历史遗留判断）
+        self._cancelled_transfers.add(filename)
+        self._cancelled_transfers.add(transfer_key)
     
     def on_file_added(self, file_path: str):
         """文件添加事件（本地操作）"""

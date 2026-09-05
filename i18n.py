@@ -93,6 +93,11 @@ class I18n:
             "export_log": "导出日志",
             "clean_cache_label": "退出时清理缓存",
             "clean_cache_tooltip": "退出当前同步房间时自动清理缓存文件",
+            # 手动同步
+            "manual_sync": "手动同步",
+            "manual_sync_operation": "操作",
+            "manual_sync_consistent": "列表一致，无需同步",
+            "manual_sync_diff": "正在补齐差异项",
             
             # 文件列表
             "file_name": "文件名",
@@ -294,6 +299,11 @@ class I18n:
             "export_log": "Export Log",
             "clean_cache_label": "Clean on Exit",
             "clean_cache_tooltip": "Automatically clean cache files when leaving the current sync room",
+            # Manual sync
+            "manual_sync": "Manual Sync",
+            "manual_sync_operation": "Operation",
+            "manual_sync_consistent": "Lists are consistent, no sync needed",
+            "manual_sync_diff": "Filling in differences...",
             
             # File list
             "file_name": "Name",

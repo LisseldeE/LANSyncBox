@@ -28,6 +28,8 @@ class MessageType:
     FILE_CANCEL = 0x0F    # 取消文件传输
     FILE_NOTIFY = 0x10    # 文件通知（静默，通知连接端有新文件）
     FILE_REQUEST_FORWARD = 0x11  # 请求转发文件
+    SYNC_REQUEST = 0x12   # 手动同步请求（主机→连接端，触发连接端重新上报并进行差异同步）
+    SYNC_RESULT = 0x13    # 同步结果（主机→连接端，告知是否有差异，用于显示"一致/补齐"通知）
 
 
 class Protocol:
@@ -182,6 +184,28 @@ class Protocol:
         """
         return Protocol.pack_message(MessageType.FILE_CANCEL, filename)
 
+    @staticmethod
+    def create_sync_request() -> bytes:
+        """创建手动同步请求消息（主机→连接端）
+        
+        Returns:
+            消息字节
+        """
+        return Protocol.pack_message(MessageType.SYNC_REQUEST)
+
+    @staticmethod
+    def create_sync_result(has_diff: bool) -> bytes:
+        """创建同步结果消息（主机→连接端，用于显示"一致/补齐"通知）
+        
+        Args:
+            has_diff: 是否存在差异（True=正在补齐差异项，False=列表一致无需同步）
+        
+        Returns:
+            消息字节
+        """
+        content = b'1' if has_diff else b'0'
+        return Protocol.pack_message(MessageType.SYNC_RESULT, '', len(content), False, content)
+
 
 class MessageReceiver:
     """消息接收器 - 处理TCP流式数据的分包"""
@@ -205,7 +229,7 @@ class MessageReceiver:
             if msg_type in [MessageType.FILE_BEGIN, MessageType.FILE_END,
                            MessageType.FILE_LIST_REQ, MessageType.FILE_REQUEST,
                            MessageType.FILE_CANCEL, MessageType.FILE_NOTIFY,
-                           MessageType.FILE_REQUEST_FORWARD]:
+                           MessageType.FILE_REQUEST_FORWARD, MessageType.SYNC_REQUEST]:
                 content_size = 0
             else:
                 content_size = file_size
@@ -227,7 +251,7 @@ class MessageReceiver:
         if msg_type in [MessageType.FILE_BEGIN, MessageType.FILE_END,
                        MessageType.FILE_LIST_REQ, MessageType.FILE_REQUEST,
                        MessageType.FILE_CANCEL, MessageType.FILE_NOTIFY,
-                       MessageType.FILE_REQUEST_FORWARD]:
+                       MessageType.FILE_REQUEST_FORWARD, MessageType.SYNC_REQUEST]:
             content_size = 0
         else:
             content_size = file_size

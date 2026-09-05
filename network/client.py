@@ -35,6 +35,8 @@ class SyncClient(QObject):
     file_send_progress = Signal(str, int, int)     # 文件发送进度 (filename, current, total)
     log_message = Signal(str)         # 日志消息
     file_list_received = Signal(list) # 收到文件列表
+    sync_requested = Signal()          # 收到主机端手动同步请求，需重新上报文件列表
+    sync_result = Signal(bool)         # 收到同步结果（True=存在差异需补齐，False=列表一致无需同步）
     
     # 数据块大小（64KB）
     CHUNK_SIZE = 64 * 1024
@@ -310,6 +312,15 @@ class SyncClient(QObject):
         elif msg_type == MessageType.FILE_NOTIFY:
             # 文件通知（静默，通知有新文件可用）
             self._handle_file_notify(filename, file_size, mtime)
+        
+        elif msg_type == MessageType.SYNC_REQUEST:
+            # 主机端请求手动同步：重新上报文件列表，触发差异补齐
+            self.sync_requested.emit()
+
+        elif msg_type == MessageType.SYNC_RESULT:
+            # 主机端同步结果：告知是否存在差异（用于显示"列表一致/正在补齐差异项"）
+            has_diff = content == b'1'
+            self.sync_result.emit(has_diff)
     
     def _handle_auth_response(self, content: bytes):
         """处理验证响应"""

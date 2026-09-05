@@ -667,6 +667,7 @@ class SyncServer(QObject):
                     files_to_request_from_client.append(filename)
             
             # 同步空目录结构
+            dir_diff_sent = False
             try:
                 from sync.file_manager import FileManager
                 from pathlib import Path
@@ -687,6 +688,7 @@ class SyncServer(QObject):
                 for dirname in host_empty_dirs:
                     if dirname not in client_dirs:
                         self._send_dir_create_to_client(client_id, dirname)
+                        dir_diff_sent = True
             except Exception as e:
                 self.log_message.emit(f"同步目录结构失败: {e}")
             
@@ -722,12 +724,45 @@ class SyncServer(QObject):
                 for filename in files_to_request_from_client:
                     self._request_file_from_client(client_id, filename)
             
+            # 向连接端回传同步结果，用于显示"列表一致/正在补齐差异项"通知。
+            # 初次加入、自动重连、手动同步（响应 SYNC_REQUEST）都会走到此处，行为统一。
+            has_diff = bool(files_to_send_to_client or files_to_request_from_client) or dir_diff_sent
+            try:
+                from network.protocol import Protocol
+                client_sock = self.clients.get(client_id, {}).get('socket')
+                if client_sock is not None and client_sock.fileno() != -1:
+                    client_sock.sendall(Protocol.create_sync_result(has_diff))
+            except Exception as e:
+                self.log_message.emit(f"发送同步结果失败: {e}")
+            
             # 如果没有需要同步的文件
             if not files_to_send_to_client and not files_to_request_from_client:
                 self.log_message.emit(f"与 {client_id} 无需同步")
             
         except Exception as e:
             self.log_message.emit(f"处理连接端文件列表失败: {e}")
+    
+    def request_sync_all(self) -> int:
+        """向所有已认证的连接端发送手动同步请求，触发其重新上报列表并差异化补齐
+
+        Returns:
+            成功下发请求的连接端数量
+        """
+        from network.protocol import Protocol
+        sent = 0
+        with self._lock:
+            targets = [(cid, c.get('socket')) for cid, c in self.clients.items()
+                       if c.get('authenticated') and c.get('socket') is not None]
+        for client_id, sock in targets:
+            try:
+                if sock.fileno() == -1:
+                    continue
+                sock.sendall(Protocol.create_sync_request())
+                sent += 1
+                self.log_message.emit(f"已请求 {client_id} 同步")
+            except Exception as e:
+                self.log_message.emit(f"请求 {client_id} 同步失败: {e}")
+        return sent
     
     def _compare_file_lists(self, host_files: list, client_files: list) -> list:
         """对比文件列表，找出需要请求的文件
