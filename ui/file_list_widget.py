@@ -30,6 +30,27 @@ from config import Config
 from ui.widgets import BUTTON_STYLES
 
 
+class WarnSyncButton(QPushButton):
+    """手动同步按钮：可点击时鼠标悬浮，边框与文字变红（红色仅作人类警示，不拦截点击）。
+
+    - 常态不加任何 QSS，保持原生按钮外观。
+    - 仅"可点击（enabled）"且鼠标悬浮时才临时套红色警示样式，移开立即恢复原生。
+    - 禁用态（灰色）不派发鼠标悬浮事件，天然不触发红色，维持现状。
+    """
+    # 圆角与全应用按钮(6px)一致；不设背景色则 Qt 用调色板 Button 角色绘制并随主题自适应，
+    # 红色边框沿按钮自身圆角裁剪，避免丢失原生圆角变成方形外圈。
+    _HOVER_QSS = "QPushButton { border: 1px solid #d93025; border-radius: 6px; color: #d93025; }"
+
+    def enterEvent(self, event):
+        if self.isEnabled():
+            self.setStyleSheet(self._HOVER_QSS)
+        super().enterEvent(event)
+
+    def leaveEvent(self, event):
+        self.setStyleSheet("")
+        super().leaveEvent(event)
+
+
 class DragableTableWidget(QTableWidget):
     """支持拖拽和框选的表格控件"""
 
@@ -648,7 +669,8 @@ class FileListWidget(QWidget):
         toolbar_layout.addWidget(self.path_edit)
 
         # 手动同步按钮（选中状态/禁用状态区分不同用途：连接端拉取、主机端通知所有连接端）
-        self.sync_btn = QPushButton(I18n.tr('manual_sync'))
+        # WarnSyncButton：可点击时悬浮边框/文字变红警示（仅人类警示，不拦截点击）
+        self.sync_btn = WarnSyncButton(I18n.tr('manual_sync'))
         self.sync_btn.setFixedWidth(80)
         self.sync_btn.clicked.connect(self.manual_sync_requested.emit)
         toolbar_layout.addWidget(self.sync_btn)
@@ -833,6 +855,9 @@ class FileListWidget(QWidget):
 
     def set_sync_btn_enabled(self, enabled: bool):
         """启停手动同步按钮"""
+        if not enabled:
+            # 禁用时清除可能残留的悬浮红色警示，避免灰色态误显红色
+            self.sync_btn.setStyleSheet("")
         self.sync_btn.setEnabled(enabled)
 
     def _show_toast(self, message: str):

@@ -684,7 +684,7 @@ class SyncWindow(QMainWindow):
         
         from network.protocol import Protocol, MessageType
         message = Protocol.pack_message(MessageType.FILE_LIST_RESP, '', len(content), False, content)
-        self.client.socket.sendall(message)
+        self.client.send_bytes(message)
         
         self._add_record("", "发送", f"发送文件列表: {len(file_list)} 个文件")
     
@@ -1404,7 +1404,8 @@ class SyncWindow(QMainWindow):
             row = self._transfer_rows[transfer_key]['row']
             del self._transfer_rows[transfer_key]
             self.records_table.removeRow(row)
-            self._reindex_block()   # 钉住区缩小后校正行号
+            # 注意：不在此处 reindex。完成记录 insertRow 会再次移动进度行，
+            # 须由末尾 _trim_history 里的 reindex 在 insert 完成后统一校正。此处过早校正会被 insert 破坏。
         # else: 无进度行（文件传输很快），直接新增完成记录，无需移除
 
         # 构建完成文本
@@ -1440,11 +1441,10 @@ class SyncWindow(QMainWindow):
     def _pinned_count(self):
         """返回当前钉在表格底部的活动进度行数量。
 
-        所有 _transfer_rows 中的条目（含已取消但保留占位的）都位于表格最底部区域；
-        它们永不移动、控件永不复用，只通过控制插入位置维持"在底部"这一不变量。
+        所有 _transfer_rows 中的条目都是活动进度行（完成/取消即 del），
+        恒位于表格底部，故以其条目数作为钉住区行数。
         """
-        n = self.records_table.rowCount()
-        return sum(1 for info in self._transfer_rows.values() if 0 <= info['row'] < n)
+        return len(self._transfer_rows)
 
     def _reindex_block(self):
         """将 _transfer_rows 的行号校正为与底部"钉住区"精确对齐。
@@ -1509,7 +1509,8 @@ class SyncWindow(QMainWindow):
             # 移除钉住行（进度条随行销毁，不复用），使其离开底部钉住区
             del self._transfer_rows[transfer_key]
             self.records_table.removeRow(row)
-            self._reindex_block()  # 钉住区缩小后校正行号
+            # 不在此处 reindex：由末尾 _trim_history 在插入"已取消"记录后统一校正，
+            # 避免过早校正被后续 insert 破坏。
 
             # 在钉住区之上插入"已取消"记录，使其进入上方历史区流转
             pinned = self._pinned_count()

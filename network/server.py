@@ -15,6 +15,7 @@ from PySide6.QtCore import QObject, Signal
 from config import Config
 from network.protocol import Protocol, MessageType, MessageReceiver
 from utils.transfer_queue import TransferQueue
+from utils.send_guard import SendLock
 
 
 class SyncServer(QObject):
@@ -186,10 +187,10 @@ class SyncServer(QObject):
                 break
             # 锁内收集已认证客户端，锁外执行网络IO（符合项目既有「锁内收集、锁外IO」约定）
             with self._lock:
-                targets = [(cid, info['socket']) for cid, info in list(self.clients.items()) if info.get('authenticated')]
-            for cid, sock in targets:
+                targets = [(cid, info) for cid, info in list(self.clients.items()) if info.get('authenticated')]
+            for cid, info in targets:
                 try:
-                    sock.sendall(Protocol.create_ping(time.time()))
+                    self._socket_send(info, Protocol.create_ping(time.time()))
                 except Exception:
                     pass
 
@@ -219,7 +220,8 @@ class SyncServer(QObject):
                         'authenticated': False,
                         'ip': addr[0],       # 客户端IP（自 client_id 取地址部分）
                         'latency': None,     # 延迟（RTT毫秒，N/A表示未知），由 PING/PONG 更新
-                        'receiving_files': {}  # 大文件接收状态：{filename: {handle, file_size, mtime, received_size, temp_path}}
+                        'receiving_files': {},  # 大文件接收状态：{filename: {handle, file_size, mtime, received_size, temp_path}}
+                        'send_guard': SendLock()  # 发送串行化：同一 socket 并发写不交错
                     }
                 
                 # 启动客户端处理线程
@@ -292,7 +294,7 @@ class SyncServer(QObject):
             # 连接端探测延迟：立即回 PONG 并原样带回发送时刻
             try:
                 send_time = struct.unpack('!d', content)[0]
-                client_info['socket'].sendall(Protocol.create_pong(send_time))
+                self._socket_send(client_info, Protocol.create_pong(send_time))
             except Exception:
                 pass
 
@@ -353,7 +355,7 @@ class SyncServer(QObject):
             if cancel_self:
                 cancel_msg = Protocol.create_file_cancel(filename)
                 try:
-                    client_info['socket'].sendall(cancel_msg)
+                    self._socket_send(client_info, cancel_msg)
                 except Exception:
                     pass
                 return
@@ -509,7 +511,7 @@ class SyncServer(QObject):
             if version != Config.APP_VERSION:
                 fail_msg = f"版本不匹配（客户端 {version}，主机 {Config.APP_VERSION}）"
                 response = Protocol.create_auth_response(False, fail_msg)
-                self.clients[client_id]['socket'].sendall(response)
+                self._socket_send(self.clients[client_id], response)
                 self.log_message.emit(f"客户端 {client_id} 验证失败: {fail_msg}")
                 self._remove_client(client_id)
                 return
@@ -518,7 +520,7 @@ class SyncServer(QObject):
             if room_code != self.room_code:
                 fail_msg = "房间号错误"
                 response = Protocol.create_auth_response(False, fail_msg)
-                self.clients[client_id]['socket'].sendall(response)
+                self._socket_send(self.clients[client_id], response)
                 self.log_message.emit(f"客户端 {client_id} 验证失败: {fail_msg}")
                 self._remove_client(client_id)
                 return
@@ -527,7 +529,7 @@ class SyncServer(QObject):
             if password_hash != expected_hash:
                 fail_msg = "密码错误"
                 response = Protocol.create_auth_response(False, fail_msg)
-                self.clients[client_id]['socket'].sendall(response)
+                self._socket_send(self.clients[client_id], response)
                 self.log_message.emit(f"客户端 {client_id} 验证失败: {fail_msg}")
                 self._remove_client(client_id)
                 return
@@ -535,7 +537,7 @@ class SyncServer(QObject):
             # 验证成功
             self.clients[client_id]['authenticated'] = True
             response = Protocol.create_auth_response(True, "验证成功")
-            self.clients[client_id]['socket'].sendall(response)
+            self._socket_send(self.clients[client_id], response)
             self.log_message.emit(f"客户端 {client_id} 验证成功（版本 {version}）")
             # 认证成功后通知 UI 更新连接数
             self.client_connected.emit(client_id)
@@ -628,7 +630,7 @@ class SyncServer(QObject):
             
             # 发送文件列表响应
             response = Protocol.create_file_list_response(file_list)
-            self.clients[client_id]['socket'].sendall(response)
+            self._socket_send(self.clients[client_id], response)
             
             self.log_message.emit(f"发送文件列表给 {client_id}: {len(file_list)} 个文件")
             
@@ -781,9 +783,10 @@ class SyncServer(QObject):
             has_diff = bool(files_to_send_to_client or files_to_request_from_client) or dir_diff_sent
             try:
                 from network.protocol import Protocol
-                client_sock = self.clients.get(client_id, {}).get('socket')
+                client_info = self.clients.get(client_id)
+                client_sock = client_info.get('socket') if client_info else None
                 if client_sock is not None and client_sock.fileno() != -1:
-                    client_sock.sendall(Protocol.create_sync_result(has_diff))
+                    self._socket_send(client_info, Protocol.create_sync_result(has_diff))
             except Exception as e:
                 self.log_message.emit(f"发送同步结果失败: {e}")
             
@@ -803,13 +806,13 @@ class SyncServer(QObject):
         from network.protocol import Protocol
         sent = 0
         with self._lock:
-            targets = [(cid, c.get('socket')) for cid, c in self.clients.items()
+            targets = [(cid, c) for cid, c in self.clients.items()
                        if c.get('authenticated') and c.get('socket') is not None]
-        for client_id, sock in targets:
+        for client_id, client_info in targets:
             try:
-                if sock.fileno() == -1:
+                if client_info['socket'].fileno() == -1:
                     continue
-                sock.sendall(Protocol.create_sync_request())
+                self._socket_send(client_info, Protocol.create_sync_request())
                 sent += 1
                 self.log_message.emit(f"已请求 {client_id} 同步")
             except Exception as e:
@@ -859,10 +862,13 @@ class SyncServer(QObject):
             # 记录正在请求的文件
             with self._lock:
                 self.requesting_files[filename] = client_id
-            
-            # 发送文件请求消息
+                client_info = self.clients.get(client_id)
+                if not client_info:
+                    return
+
+            # 发送文件请求消息（持该客户端发送锁，避免并发写交错）
             request_msg = Protocol.create_file_request(filename)
-            self.clients[client_id]['socket'].sendall(request_msg)
+            self._socket_send(client_info, request_msg)
             
             self.log_message.emit(f"请求文件 {filename} 从 {client_id}")
             
@@ -889,7 +895,7 @@ class SyncServer(QObject):
                 sock = client_info.get('socket')
                 if not sock:
                     return
-            sock.sendall(msg)
+            self._socket_send(client_info, msg)
             self.log_message.emit(f"创建目录: {dirname}")
         except Exception as e:
             self.log_message.emit(f"创建目录失败: {e}")
@@ -987,7 +993,7 @@ class SyncServer(QObject):
                 notify_msg = Protocol.pack_message(
                     MessageType.FILE_NOTIFY, filename, file_size, False, b'', mtime
                 )
-                client_info['socket'].sendall(notify_msg)
+                client_info['send_guard'].send(client_info['socket'], notify_msg)
             except Exception as e:
                 self.log_message.emit(f"通知 {client_id} 文件可用失败: {e}")
 
@@ -1035,13 +1041,19 @@ class SyncServer(QObject):
     def _send_file_in_memory(self, sock: socket.socket, client_id: str, filename: str, content: bytes, mtime: float, stop_event: threading.Event = None):
         """用内存中的 content 重新发送整个文件给单个客户端（用于广播失败后重试，流式传输）"""
         file_size = len(content)
+        # 解析该客户端的发送守卫（含 socket 引用），统一走持锁发送
+        with self._lock:
+            client_info = self.clients.get(client_id)
+        if not client_info:
+            self.log_message.emit(f"重新发送失败: {filename} -> {client_id}（客户端已断开）")
+            return
         try:
             if stop_event and stop_event.is_set():
                 return
 
             # 发送 FILE_BEGIN
             begin_msg = Protocol.pack_message(MessageType.FILE_BEGIN, filename, file_size, False, b'', mtime)
-            if not self._send_with_cancel(sock, begin_msg, stop_event):
+            if not self._send_with_cancel(client_info, begin_msg, stop_event):
                 self.log_message.emit(f"重新发送失败: {filename} -> {client_id}")
                 return
 
@@ -1050,16 +1062,16 @@ class SyncServer(QObject):
             for i in range(0, file_size, self.CHUNK_SIZE):
                 if stop_event and stop_event.is_set():
                     try:
-                        sock.sendall(Protocol.create_file_cancel(filename))
+                        self._socket_send(client_info, Protocol.create_file_cancel(filename))
                     except Exception:
                         pass
                     return
                 chunk = content[i:i + self.CHUNK_SIZE]
                 chunk_msg = Protocol.create_file_data_message(filename, i // self.CHUNK_SIZE, chunk)
-                if not self._send_with_cancel(sock, chunk_msg, stop_event):
+                if not self._send_with_cancel(client_info, chunk_msg, stop_event):
                     # 中途失败，通知接收端清理
                     try:
-                        sock.sendall(Protocol.create_file_cancel(filename))
+                        self._socket_send(client_info, Protocol.create_file_cancel(filename))
                     except Exception:
                         pass
                     self.log_message.emit(f"重新发送失败: {filename} -> {client_id}")
@@ -1073,10 +1085,10 @@ class SyncServer(QObject):
 
             # 发送 FILE_END
             end_msg = Protocol.create_file_end_message(filename, file_size, mtime)
-            if not self._send_with_cancel(sock, end_msg, stop_event):
+            if not self._send_with_cancel(client_info, end_msg, stop_event):
                 # 中途失败，通知接收端清理
                 try:
-                    sock.sendall(Protocol.create_file_cancel(filename))
+                    self._socket_send(client_info, Protocol.create_file_cancel(filename))
                 except Exception:
                     pass
                 self.log_message.emit(f"重新发送失败: {filename} -> {client_id}")
@@ -1119,10 +1131,18 @@ class SyncServer(QObject):
         except Exception as e:
             self.log_message.emit(f"发送文件失败: {e}")
     
-    @staticmethod
-    def _send_with_cancel(sock: socket.socket, data: bytes, stop_event: threading.Event = None) -> bool:
+    def _socket_send(self, client_info: dict, data: bytes):
+        """持发送锁将一条完整消息写入某客户端的 socket（串行化，避免并发写交错）。
+
+        返回 True；发送异常向上抛出，由调用方处理（与直接 sendall 语义一致）。
         """
-        发送数据，支持取消。
+        client_info['send_guard'].send(client_info['socket'], data)
+        return True
+
+    @staticmethod
+    def _send_with_cancel(client_info: dict, data: bytes, stop_event: threading.Event = None) -> bool:
+        """
+        发送数据给某客户端，支持取消（内部经其 send_guard 持锁发送，保证一条消息不被并发写交错）。
 
         socket 为阻塞模式带 1 秒超时。sendall 最多阻塞 1 秒。
         - stop_event 被设置：立即返回 False
@@ -1138,7 +1158,7 @@ class SyncServer(QObject):
             if stop_event and stop_event.is_set():
                 return False
             try:
-                sock.sendall(data)
+                client_info['send_guard'].send(client_info['socket'], data)
                 return True
             except socket.timeout:
                 # 背压超时：接收端处理慢导致发送缓冲区满
@@ -1178,10 +1198,10 @@ class SyncServer(QObject):
             begin_msg = Protocol.pack_message(
                 MessageType.FILE_BEGIN, filename, file_size, False, b'', mtime
             )
-            if not self._send_with_cancel(client_socket, begin_msg, stop_event):
+            if not self._send_with_cancel(client_info, begin_msg, stop_event):
                 # 被取消或连接异常，通知接收端清理
                 try:
-                    client_socket.sendall(Protocol.create_file_cancel(filename))
+                    self._socket_send(client_info, Protocol.create_file_cancel(filename))
                 except Exception:
                     pass
                 self.log_message.emit(f"取消发送大文件: {filename}")
@@ -1197,7 +1217,7 @@ class SyncServer(QObject):
                     if stop_event and stop_event.is_set():
                         # 发送取消消息给接收端
                         try:
-                            client_socket.sendall(Protocol.create_file_cancel(filename))
+                            self._socket_send(client_info, Protocol.create_file_cancel(filename))
                         except Exception:
                             pass
                         self.log_message.emit(f"取消发送大文件: {filename}")
@@ -1209,10 +1229,10 @@ class SyncServer(QObject):
                         break
 
                     chunk_msg = Protocol.create_file_data_message(filename, chunk_index, chunk)
-                    if not self._send_with_cancel(client_socket, chunk_msg, stop_event):
+                    if not self._send_with_cancel(client_info, chunk_msg, stop_event):
                         # 被取消或连接异常，通知接收端清理
                         try:
-                            client_socket.sendall(Protocol.create_file_cancel(filename))
+                            self._socket_send(client_info, Protocol.create_file_cancel(filename))
                         except Exception:
                             pass
                         self.log_message.emit(f"取消发送大文件: {filename}")
@@ -1234,9 +1254,9 @@ class SyncServer(QObject):
 
             # 发送文件结束消息
             end_msg = Protocol.create_file_end_message(filename, file_size, mtime)
-            if not self._send_with_cancel(client_socket, end_msg, stop_event):
+            if not self._send_with_cancel(client_info, end_msg, stop_event):
                 try:
-                    client_socket.sendall(Protocol.create_file_cancel(filename))
+                    self._socket_send(client_info, Protocol.create_file_cancel(filename))
                 except Exception:
                     pass
                 self.log_message.emit(f"取消发送大文件: {filename}")
@@ -1500,10 +1520,10 @@ class SyncServer(QObject):
         Returns:
             True 表示发送完成（或无目标），False 表示被 stop_event 取消
         """
-        # 锁内只收集 socket 引用，避免锁内执行 IO 操作
+        # 锁内只收集客户端引用，锁外执行网络IO（符合项目既有「锁内收集、锁外IO」约定）
         with self._lock:
             targets = [
-                (client_id, client_info['socket'])
+                (client_id, client_info)
                 for client_id, client_info in list(self.clients.items())
                 if client_id != exclude_client
                 and client_info['authenticated']
@@ -1514,11 +1534,11 @@ class SyncServer(QObject):
             return True
 
         # 锁外发送，避免阻塞其他线程
-        for client_id, sock in targets:
+        for client_id, client_info in targets:
             if stop_event and stop_event.is_set():
                 return False
             try:
-                if not self._send_with_cancel(sock, data, stop_event):
+                if not self._send_with_cancel(client_info, data, stop_event):
                     # stop_event 触发导致发送失败，中断广播
                     if stop_event and stop_event.is_set():
                         return False
@@ -1527,12 +1547,12 @@ class SyncServer(QObject):
                         failed_clients.add(client_id)
                     # 发送 FILE_CANCEL 清理接收端状态，避免残留临时文件
                     if cancel_filename:
-                        self._send_with_cancel(sock, Protocol.create_file_cancel(cancel_filename), None)
+                        self._send_with_cancel(client_info, Protocol.create_file_cancel(cancel_filename), None)
                     self.log_message.emit(f"发送给 {client_id} 失败，已取消该客户端传输")
             except Exception as e:
                 if failed_clients is not None:
                     failed_clients.add(client_id)
                 if cancel_filename:
-                    self._send_with_cancel(sock, Protocol.create_file_cancel(cancel_filename), None)
+                    self._send_with_cancel(client_info, Protocol.create_file_cancel(cancel_filename), None)
                 self.log_message.emit(f"发送给 {client_id} 失败: {e}")
         return True
