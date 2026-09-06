@@ -1433,7 +1433,10 @@ class SyncServer(QObject):
                 if failed_client_id not in self.clients or not self.clients[failed_client_id].get('authenticated'):
                     continue
             self.log_message.emit(f"重新发送文件给失败客户端: {failed_client_id}")
-            self._send_file_to_client(failed_client_id, filename, filepath, stop_event)
+            # 补发语义与转发完全等价：必须传 is_forward=True。
+            # 否则走非转发路径重建"发送"进度条，而其失败时 _notify_forward_cancelled 不发布取消信号，
+            # 会导致重发的进度条永久残留（与历史 0-FIN 进度条问题同源）。
+            self._send_file_to_client(failed_client_id, filename, filepath, stop_event, is_forward=True)
 
     def _format_size(self, size: int) -> str:
         """格式化文件大小"""
