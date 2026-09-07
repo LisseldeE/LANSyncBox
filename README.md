@@ -11,10 +11,17 @@
 <p align="center">
   <a href="https://github.com/LisseldeE/LANSyncBox/releases"><img src="https://img.shields.io/github/v/release/LisseldeE/LANSyncBox" alt="最新版本"></a>
   <a href="https://github.com/LisseldeE/LANSyncBox/releases"><img src="https://img.shields.io/github/release-date/LisseldeE/LANSyncBox" alt="发布时间"></a>
-  <a href="https://github.com/LisseldeE/LANSyncBox/releases"><img src="https://img.shields.io/github/downloads/LisseldeE/LANSyncBox/total" alt="下载总量"></a>
   <a href="LICENSE"><img src="https://img.shields.io/github/license/LisseldeE/LANSyncBox" alt="开源协议"></a>
   <img src="https://img.shields.io/badge/platform-Windows-blue?logo=windows" alt="支持平台">
   <img src="https://img.shields.io/badge/platform-Linux-orange?logo=linux" alt="支持平台">
+</p>
+
+<p align="center">
+  <a href="#功能特性">功能特性</a> |
+  <a href="#系统支持">下载</a> |
+  <a href="#使用方法">使用方法</a> |
+  <a href="#同步逻辑">同步逻辑</a> |
+  <a href="#开源声明">补充声明</a>
 </p>
 
 ## 项目简介

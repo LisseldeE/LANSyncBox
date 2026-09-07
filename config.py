@@ -256,7 +256,8 @@ class UserConfig:
             "language": "zh_CN",
             "fixed_room_code_enabled": False,
             "fixed_room_code": "",
-            "clean_cache_enabled": False
+            "clean_cache_enabled": False,
+            "room_history": []
         }
 
         # 首次加载时尝试从旧路径迁移配置
@@ -368,4 +369,46 @@ class UserConfig:
         data["exe_path"] = exe_path
         data["app_name"] = Config.APP_NAME
 
+        cls.save()
+
+    @classmethod
+    def get_room_history(cls) -> list:
+        """获取历史房间记录列表（最新在前）
+        Returns:
+            每条为 {"room_code": str, "ip": str}，容量上限 3 条。
+        """
+        data = cls.load()
+        history = data.get("room_history", [])
+        # 兼容脏数据：过滤非法条目
+        return [h for h in history if isinstance(h, dict) and h.get("room_code") and h.get("ip")][:3]
+
+    @classmethod
+    def add_room_history(cls, room_code: str, ip: str):
+        """记录一条成功连接过的房间历史（上限 3 条，超出丢弃最旧）
+        Args:
+            room_code: 房间号
+            ip: 主机地址
+        """
+        if not room_code or not ip:
+            return
+        data = cls.load()
+        history = data.get("room_history", [])
+        # 去重：若同房间号+IP 已存在，先移除，再作为最新插入
+        filtered = [h for h in history if not (h.get("room_code") == room_code and h.get("ip") == ip)]
+        filtered.insert(0, {"room_code": room_code, "ip": ip})
+        data["room_history"] = filtered[:3]  # 只保留最新 3 条
+        cls.save()
+
+    @classmethod
+    def remove_room_history(cls, room_code: str, ip: str):
+        """从历史记录中移除指定条目
+        Args:
+            room_code: 房间号
+            ip: 主机地址
+        """
+        data = cls.load()
+        history = data.get("room_history", [])
+        data["room_history"] = [
+            h for h in history if not (h.get("room_code") == room_code and h.get("ip") == ip)
+        ]
         cls.save()

@@ -82,6 +82,10 @@ class I18n:
             "rooms_found_count": "发现 {count} 个房间",
             "refresh_scan": "刷新",
 
+            # 最近连接历史
+            "recent_rooms_title": "最近连接",
+            "recent_rooms_empty": "暂无最近连接",
+
             # 同步界面
             "host_mode": "主机端",
             "client_mode": "连接端",
@@ -292,6 +296,10 @@ class I18n:
             "no_rooms_found": "No rooms found",
             "rooms_found_count": "Found {count} rooms",
             "refresh_scan": "Refresh",
+
+            # Recent rooms history
+            "recent_rooms_title": "Recent Connections",
+            "recent_rooms_empty": "No recent connections",
 
             # Sync window
             "host_mode": "Host",
