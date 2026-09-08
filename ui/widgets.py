@@ -3,9 +3,9 @@
 Copyright (c) 2026 Lisselde_E <Lisselde.E@outlook.com>.
 Licensed under the GNU General Public License v3.0.
 """
-from PySide6.QtWidgets import QPushButton, QLabel, QFrame, QGraphicsOpacityEffect, QWidget, QApplication
-from PySide6.QtCore import Qt, QTimer, QPropertyAnimation, QByteArray, QPoint, QEvent, Signal, Property, QRectF, QEasingCurve
-from PySide6.QtGui import QFont, QEnterEvent, QPainter, QColor, QPen, QBrush, QPalette
+from PySide6.QtWidgets import QPushButton, QLabel, QFrame, QGraphicsOpacityEffect, QWidget, QApplication, QLineEdit
+from PySide6.QtCore import Qt, QTimer, QPropertyAnimation, QByteArray, QPoint, QEvent, Signal, Property, QRectF, QEasingCurve, QObject
+from PySide6.QtGui import QFont, QEnterEvent, QPainter, QColor, QPen, QBrush, QPalette, QMouseEvent
 from functools import partial
 from math import ceil, floor
 
@@ -766,3 +766,130 @@ class ToggleSwitch(QWidget):
     
     # 定义动画属性
     animationProgress = Property(float, getAnimationProgress, setAnimationProgress)
+
+
+class UnderlineEdit(QLineEdit):
+    """下划线输入框（聚焦底线从中间平滑展开）
+
+    无外框、透明背景，仅在底部绘制一条下划线，聚焦/失焦时以缓动动画
+    从中间向两侧展开/收起主题色高亮线，获得精致丝滑的输入反馈。
+
+    设计要点：
+    - 文字与底线分离：通过加大最小高度 + 底部 text margins 预留专用底线
+      区域，确保底线与文字下端不重叠。
+    - 只读场景（如路径显示框）：聚焦不展开高亮，保持静态底线。
+    - 颜色全部取自 palette()，明暗主题自动适配。
+    """
+
+    ANIM_MS = 260       # 展开/收起动画时长
+    MIN_HEIGHT = 34     # 最小高度，为底线预留空间
+
+    def __init__(self, text="", parent=None):
+        super().__init__(text, parent)
+        self.setFrame(False)
+        # 仅清除外框/背景，文字与选中色跟随 palette；占位符沿用 pal.placeholder
+        self.setStyleSheet(
+            "QLineEdit { background: transparent; border: none; color: palette(text);"
+            " selection-background-color: palette(highlight); selection-color: palette(highlighted-text); }"
+        )
+        self._progress = 0.0         # 0 收起 -> 1 展开
+        self._anim = QPropertyAnimation(self, QByteArray(b"underlineProgress"), self)
+        self._anim.setDuration(self.ANIM_MS)
+        self._anim.setEasingCurve(QEasingCurve.OutCubic)
+
+        # 为文字与底线预留间隙：上 6 / 下 10，底线画在底部专用区域，不与文字重叠
+        self.setTextMargins(2, 6, 2, 10)
+        self.setMinimumHeight(self.MIN_HEIGHT)
+
+    # ------------------------------------------------ 动画进度属性
+
+    def get_underline_progress(self) -> float:
+        return self._progress
+
+    def set_underline_progress(self, value: float):
+        self._progress = value
+        self.update()
+
+    underlineProgress = Property(float, get_underline_progress, set_underline_progress)
+
+    # ------------------------------------------------ 焦点/悬浮
+
+    def focusInEvent(self, event):
+        if self.isReadOnly():
+            self._progress = 0.0
+            self.update()
+        else:
+            self._anim.stop()
+            self._anim.setStartValue(self._progress)
+            self._anim.setEndValue(1.0)
+            self._anim.start()
+        super().focusInEvent(event)
+
+    def focusOutEvent(self, event):
+        if self.isReadOnly():
+            pass
+        else:
+            self._anim.stop()
+            self._anim.setStartValue(self._progress)
+            self._anim.setEndValue(0.0)
+            self._anim.start()
+        super().focusOutEvent(event)
+
+    def setReadOnly(self, read_only: bool):
+        # 切到只读时收起高亮底线
+        super().setReadOnly(read_only)
+        if read_only:
+            self._progress = 0.0
+            self.update()
+
+    # ------------------------------------------------ 绘制
+
+    def paintEvent(self, event):
+        # 文字/光标/占位符由基类绘制
+        super().paintEvent(event)
+
+        p = QPainter(self)
+        p.setRenderHint(QPainter.Antialiasing, True)
+        pal = self.palette()
+        hi = pal.color(QPalette.Highlight)
+        base = pal.color(QPalette.Mid)
+
+        # 底线位于底部专用区域（避开文字下方内容区）
+        line_y = self.height() - 2
+
+        # 常态底线（会话态不随悬浮变化）
+        p.setPen(QPen(base, 1.0))
+        p.drawLine(0, line_y, self.width(), line_y)
+
+        # 聚焦高亮线：从中间向两侧展开
+        if not self.isReadOnly() and self._progress > 0:
+            half = int(self.width() / 2.0 * self._progress)
+            p.setPen(QPen(QColor(hi), 2.0))
+            p.drawLine(self.width() // 2 - half, line_y,
+                       self.width() // 2 + half + 1, line_y)
+        p.end()
+
+
+class ClickAwayFocusFilter(QObject):
+    """点击输入框以外的任意位置时，取消当前输入框焦点。
+
+    全局默认交互：鼠标在非编辑框区域按下（或点击其他输入框）时，
+    让当前聚焦的 UnderlineEdit 失焦收起，体验更自然。
+    """
+
+    def eventFilter(self, obj, event):
+        if event.type() == QEvent.MouseButtonPress and isinstance(event, QMouseEvent):
+            focus_widget = QApplication.focusWidget()
+            if isinstance(focus_widget, UnderlineEdit) and not focus_widget.isReadOnly():
+                global_point = event.globalPosition().toPoint()
+                # 点击仍落在该输入框内部（含清除按钮）则不取消
+                local = focus_widget.mapFromGlobal(global_point)
+                if not focus_widget.rect().contains(local):
+                    focus_widget.clearFocus()
+        return False
+
+
+def install_click_away_focus(app):
+    """在全局安装“点击外部取消输入框焦点”的过滤器，返回过滤器实例。"""
+    app.installEventFilter(ClickAwayFocusFilter(app))
+    return app

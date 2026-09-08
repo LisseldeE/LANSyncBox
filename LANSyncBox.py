@@ -57,6 +57,10 @@ def main():
     app.setApplicationName(Config.APP_NAME)
     app.setApplicationVersion(Config.APP_VERSION)
     app.setOrganizationName(Config.APP_AUTHOR)
+
+    # 全局：点击输入框以外位置自动取消输入焦点
+    from ui.widgets import install_click_away_focus
+    install_click_away_focus(app)
     
     # 设置默认字体（按平台选择，配合手动切换平台时自动匹配中文显示字体）
     font_family = {

@@ -74,6 +74,11 @@ class I18n:
             "version_mismatch": "版本不一致（本机 {local} / 主机 {remote}），请升级后连接",
             "version_match": "版本一致，可连接",
 
+            # 密码输入对话框（点击连接后按需弹出）
+            "password_dialog_title": "输入房间密码",
+            "password_dialog_hint": "房间 {code} 需要密码才能进入",
+            "password_confirm": "确定",
+
             # 发现房间板块
             "discover_rooms": "发现房间",
             "discover_rooms_hint": "扫描局域网内的房间",
@@ -85,6 +90,11 @@ class I18n:
             # 最近连接历史
             "recent_rooms_title": "最近连接",
             "recent_rooms_empty": "暂无最近连接",
+
+            # 房间状态图例
+            "legend_scanned": "发现房间",
+            "legend_history_online": "历史在线",
+            "legend_history_offline": "历史离线",
 
             # 同步界面
             "host_mode": "主机端",
@@ -289,6 +299,11 @@ class I18n:
             "version_mismatch": "Version mismatch (local {local} / host {remote}), please upgrade before connecting",
             "version_match": "Version matches, ready to connect",
 
+            # Password dialog (shown on demand after clicking connect)
+            "password_dialog_title": "Enter Room Password",
+            "password_dialog_hint": "Room {code} requires a password",
+            "password_confirm": "Confirm",
+
             # Discover rooms section
             "discover_rooms": "Discover Rooms",
             "discover_rooms_hint": "Scan for rooms in local network",
@@ -300,6 +315,11 @@ class I18n:
             # Recent rooms history
             "recent_rooms_title": "Recent Connections",
             "recent_rooms_empty": "No recent connections",
+
+            # Room status legend
+            "legend_scanned": "Discovered",
+            "legend_history_online": "History Online",
+            "legend_history_offline": "History Offline",
 
             # Sync window
             "host_mode": "Host",

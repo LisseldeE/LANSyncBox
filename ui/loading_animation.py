@@ -108,12 +108,11 @@ class ScannerWidget(QWidget):
     def set_animation_progress(self, progress):
         """设置动画进度 (0-1)，与拖尾同步"""
         if self._is_intermediate_mode:
-            # 中间状态：左右循环来回扫描
-            # 使用三角函数实现平滑的来回运动
+            # 中间状态：左右循环来回扫描，从左侧开始
             # progress 从 0 到 1 对应一个完整的来回周期
-            # 使用 sin 函数，让光束在 0-100 之间来回移动
-            # sin 的范围是 -1 到 1，映射到 0-100
-            self._scan_position = (math.sin(progress * math.pi * 2) + 1) * 50
+            # 使用 1-cos 让光束在 progress=0 时位于最左端(0)，再向右扫到右端(100)后折返
+            # cos 的范围是 -1 到 1，映射到 0-100 的回程
+            self._scan_position = (1 - math.cos(progress * math.pi * 2)) * 50
         else:
             # 运行中状态：从左到右单向扫描
             # progress 从 0 到 1，对应扫描位置从 -30 到 130
@@ -345,10 +344,33 @@ class PageLoader(QWidget):
         return self._state
 
     def start_animation(self):
-        """启动统一动画定时器"""
-        self.animation_timer = QTimer(self)
-        self.animation_timer.timeout.connect(self._update_animation)
-        self.animation_timer.start(16)  # 约60fps，1.2秒周期
+        """启动统一动画定时器（幂等：避免重复创建多个定时器）"""
+        if not hasattr(self, 'animation_timer') or self.animation_timer is None:
+            self.animation_timer = QTimer(self)
+            self.animation_timer.timeout.connect(self._update_animation)
+        if not self.animation_timer.isActive():
+            self.animation_timer.start(16)  # 约60fps，1.2秒周期
+
+    def stop_animation(self):
+        """停止动画定时器（隐藏时调用，避免 60fps 空转占用主线程）"""
+        if hasattr(self, 'animation_timer') and self.animation_timer is not None:
+            self.animation_timer.stop()
+
+    def showEvent(self, event):
+        super().showEvent(event)
+        # 显示时自动恢复动画
+        self.start_animation()
+
+    def hideEvent(self, event):
+        # 隐藏时停止动画定时器，避免不可见状态下仍每帧重绘拖累主线程
+        self.stop_animation()
+        super().hideEvent(event)
+
+    def reset_animation(self):
+        """重置扫描动画，让光束从左侧重新开始"""
+        self.animation_progress = 0.0
+        self.scanner.set_animation_progress(0.0)
+        self.trails.set_animation_progress(0.0)
 
     def _update_animation(self):
         """统一更新扫描器和拖尾的动画进度"""

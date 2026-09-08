@@ -9,14 +9,14 @@ import random
 from pathlib import Path
 from PySide6.QtWidgets import (
     QDialog, QVBoxLayout, QHBoxLayout, QLabel,
-    QLineEdit, QPushButton, QFrame, QMessageBox, QWidget, QCheckBox
+    QLineEdit, QPushButton, QMessageBox, QWidget, QCheckBox
 )
 from PySide6.QtCore import Qt, QEvent, QTimer
 from PySide6.QtGui import QPalette, QFont, QShowEvent
 
 from i18n import I18n
 from config import Config, UserConfig
-from ui.widgets import AnimatedButton, SnapOutlineButton, BUTTON_STYLES
+from ui.widgets import AnimatedButton, SnapOutlineButton, BUTTON_STYLES, UnderlineEdit
 from ui.join_room_dialog import RoomCodeInput
 from network.discovery import RoomDiscovery
 from ui.loading_animation import PageLoader, LoaderState
@@ -136,29 +136,17 @@ class CreateRoomDialog(QDialog):
 
         layout.addLayout(room_code_layout)
         
-        # 分隔线
-        line = QFrame()
-        line.setFrameShape(QFrame.HLine)
-        line.setFrameShadow(QFrame.Sunken)
-        layout.addWidget(line)
-        
         # 密码输入
         password_layout = QVBoxLayout()
         password_label = QLabel(I18n.tr('password'))
         password_layout.addWidget(password_label)
         
-        self.password_edit = QLineEdit()
+        self.password_edit = UnderlineEdit()
         self.password_edit.setPlaceholderText(I18n.tr('password_hint'))
         self.password_edit.setEchoMode(QLineEdit.Password)
         password_layout.addWidget(self.password_edit)
         
         layout.addLayout(password_layout)
-        
-        # 分隔线
-        line2 = QFrame()
-        line2.setFrameShape(QFrame.HLine)
-        line2.setFrameShadow(QFrame.Sunken)
-        layout.addWidget(line2)
         
         # 同步文件夹信息
         folder_layout = QVBoxLayout()

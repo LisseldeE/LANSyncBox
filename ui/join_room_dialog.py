@@ -6,17 +6,26 @@ import threading
 from PySide6.QtWidgets import (
     QDialog, QVBoxLayout, QHBoxLayout, QLabel,
     QLineEdit, QPushButton, QFrame, QMessageBox, QWidget,
-    QGraphicsOpacityEffect, QApplication, QListWidget, QListWidgetItem
+    QGraphicsOpacityEffect, QApplication, QListWidgetItem,
+    QSizePolicy
 )
-from PySide6.QtCore import Qt, Signal, QTimer, QPropertyAnimation, QByteArray, QEventLoop
+from PySide6.QtCore import Qt, Signal, QTimer, QPropertyAnimation, QByteArray, QEventLoop, QSize
 from PySide6.QtGui import QFont, QValidator, QKeyEvent, QShowEvent, QColor, QPalette
 
 from i18n import I18n
 from config import Config, UserConfig
 from network.discovery import RoomDiscovery, RoomProbe
 from network.client import SyncClient
-from ui.widgets import AnimatedButton, SnapOutlineButton, BUTTON_STYLES, fade_widget
+from ui.widgets import AnimatedButton, SnapOutlineButton, BUTTON_STYLES, UnderlineEdit
 from ui.loading_animation import PageLoader, LoaderState
+from ui.smooth_scroll import SmoothScrollList
+
+
+def _hover_gray():
+    """返回适配当前明暗模式的浅灰悬浮色：深色用亮灰叠层，浅色用浅灰叠层"""
+    base = QApplication.palette().color(QPalette.Window)
+    luminance = base.red() * 0.299 + base.green() * 0.587 + base.blue() * 0.114
+    return "rgba(255, 255, 255, 0.10)" if luminance < 128 else "rgba(0, 0, 0, 0.08)"
 
 
 class DigitValidator(QValidator):
@@ -202,6 +211,12 @@ class RoomRowWidget(QWidget):
     remove_requested = Signal()  # 点击『×』删除该历史
 
     INDICATOR_WIDTH = 3  # 指示条宽度（px）
+    ROW_HEIGHT = 34      # 行高（固定，保证指示条顶满整行）
+
+    # 状态色常量：扫描行/历史行的指示条与左下角图例共用同一来源，避免颜色漂移
+    COLOR_SCANNED = "#339af0"   # 扫描发现的房间（固定主题蓝）
+    COLOR_ONLINE = "#69db7c"    # 历史房间在线
+    COLOR_OFFLINE = "#ffd43b"   # 历史房间离线
 
     def __init__(self, room_code: str, ip: str, indicator_color: str = "",
                  show_delete: bool = True, parent=None):
@@ -213,19 +228,23 @@ class RoomRowWidget(QWidget):
 
     def _init_ui(self, show_delete: bool):
         self.setCursor(Qt.PointingHandCursor)
+        # 固定行高：让 widget 与 item 高度一致，指示条才能顶满，杜绝下方空隙
+        self.setFixedHeight(self.ROW_HEIGHT)
         layout = QHBoxLayout(self)
-        layout.setContentsMargins(0, 0, 0, 0)
+        # 右边缘留与上下垂直居中相同的空闲（右侧删除叉号不再贴边）
+        layout.setContentsMargins(0, 0, 6, 0)
         layout.setSpacing(6)
 
         # 左侧细竖指示条：历史默认黄色（探测后变绿），扫描固定主题蓝
-        default_color = self._fixed_color or "#ffd43b"
+        # 垂直拉伸顶满整行高度（状态边条式），不依赖外部行高
+        default_color = self._fixed_color or self.COLOR_OFFLINE
         self._bar_background = QFrame()
         self._bar_background.setFixedWidth(self.INDICATOR_WIDTH)
-        self._bar_background.setFixedHeight(30)
+        self._bar_background.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Expanding)
         self._bar_background.setStyleSheet(
-            f"background: {default_color}; border-radius: 1px;"
+            f"background: {default_color};"
         )
-        layout.addWidget(self._bar_background, 0, Qt.AlignVCenter)
+        layout.addWidget(self._bar_background, 0)
 
         # 文字：房间号 (IP)（使用调色板默认文本色，自适应明暗）
         self._label = QLabel(f"{self.room_code} ({self.ip})")
@@ -257,9 +276,9 @@ class RoomRowWidget(QWidget):
         """更新指示条状态：绿=找到，黄=未找到（仅动态指示条的历史行生效）"""
         if self._fixed_color:
             return  # 固定色行不受探测影响
-        color = "#69db7c" if reachable else "#ffd43b"
+        color = self.COLOR_ONLINE if reachable else self.COLOR_OFFLINE
         self._bar_background.setStyleSheet(
-            f"background: {color}; border-radius: 1px;"
+            f"background: {color};"
         )
 
     def set_matched(self, matched: bool):
@@ -292,7 +311,6 @@ class JoinRoomDialog(QDialog):
         self.discovered_host = ""  # 发现的主机地址
         self.host_port = Config.DEFAULT_PORT  # 发现的主机端口（默认9527）
         self._fade_animations = {}  # 动画字典
-        self._room_requires_password = False  # 房间是否需要密码
         self._room_checked = False  # 房间是否已检测
         self._is_checking = False  # 是否正在检测中
         self._is_verifying = False  # 是否正在验证密码
@@ -394,38 +412,16 @@ class JoinRoomDialog(QDialog):
         
         layout.addLayout(room_code_layout)
         
-        # 密码输入（默认隐藏）
-        self.password_widget = QWidget()
-        password_layout = QVBoxLayout(self.password_widget)
-        password_layout.setContentsMargins(0, 0, 0, 0)
-        
-        password_label = QLabel(I18n.tr('password'))
-        password_layout.addWidget(password_label)
-        
-        self.password_edit = QLineEdit()
-        self.password_edit.setPlaceholderText(I18n.tr('password_hint'))
-        self.password_edit.setEchoMode(QLineEdit.Password)
-        password_layout.addWidget(self.password_edit)
-
-        self.password_widget.setVisible(False)  # 默认隐藏
-        layout.addWidget(self.password_widget)
-
         # 主机地址输入（可选）
         host_layout = QVBoxLayout()
         host_label = QLabel(I18n.tr('host_address_optional'))
         host_layout.addWidget(host_label)
 
-        self.host_edit = QLineEdit()
+        self.host_edit = UnderlineEdit()
         self.host_edit.setPlaceholderText(I18n.tr('host_address_hint'))
         host_layout.addWidget(self.host_edit)
 
         layout.addLayout(host_layout)
-
-        # 分隔线
-        line2 = QFrame()
-        line2.setFrameShape(QFrame.HLine)
-        line2.setFrameShadow(QFrame.Sunken)
-        layout.addWidget(line2)
 
         # 发现房间板块
         discover_layout = QVBoxLayout()
@@ -446,32 +442,52 @@ class JoinRoomDialog(QDialog):
         # 扫描状态标签
         self.scan_status_label = QLabel(I18n.tr('discover_rooms_hint'))
         self.scan_status_label.setStyleSheet("color: #868e96; font-size: 12px;")
-        discover_layout.addWidget(self.scan_status_label)
 
-        # 发现的房间列表
-        self.rooms_list_widget = QListWidget()
+        # 扫描提示文字 + 加载动画同一行（动画靠右）
+        scan_status_row = QHBoxLayout()
+        scan_status_row.setSpacing(6)
+        scan_status_row.addWidget(self.scan_status_label)
+
+        # 加载动画容器（固定宽度避免水平跳动，高度贴合内容避免上下空白）
+        loader_container = QWidget()
+        loader_container.setFixedWidth(90)
+        loader_layout = QHBoxLayout(loader_container)
+        loader_layout.setContentsMargins(0, 0, 0, 0)
+
+        # 加载动画（状态二：中间状态）
+        self._loader = PageLoader()
+        self._loader.set_state(LoaderState.INTERMEDIATE)
+        loader_layout.addWidget(self._loader)
+        self._loader.hide()  # 初始隐藏
+
+        scan_status_row.addStretch()
+        scan_status_row.addWidget(loader_container, 0, Qt.AlignRight | Qt.AlignVCenter)
+        discover_layout.addLayout(scan_status_row)
+
+        # 发现的房间列表（平滑滚动控件：滚轮带缓动动画与惯性手感）
+        self.rooms_list_widget = SmoothScrollList()
         self.rooms_list_widget.setMaximumHeight(150)
-        self.rooms_list_widget.setStyleSheet("""
-            QListWidget {
+        _hover = _hover_gray()
+        self.rooms_list_widget.setStyleSheet(f"""
+            QListWidget {{
                 border: 1px solid palette(mid);
                 border-radius: 4px;
                 background-color: palette(base);
                 outline: none;
-            }
-            QListWidget::item {
+            }}
+            QListWidget::item {{
                 padding: 0px;
-                border-bottom: 1px solid palette(mid);
-            }
-            QListWidget::item:selected {
-                background-color: #339af0;
-                color: white;
+            }}
+            QListWidget::item:selected {{
+                background-color: {_hover};
+                color: palette(text);
                 border: none;
-            }
-            QListWidget::item:hover:!disabled {
-                background-color: #339af0;
-                color: white;
+            }}
+            QListWidget::item:hover:!disabled {{
+                background-color: {_hover};
+                color: palette(text);
                 border: none;
-            }
+            }}
         """)
         self.rooms_list_widget.itemClicked.connect(self._on_room_item_clicked)
         discover_layout.addWidget(self.rooms_list_widget)
@@ -497,35 +513,42 @@ class JoinRoomDialog(QDialog):
         self.cancel_btn.clicked.connect(self.reject)
         self.cancel_btn.setStyleSheet(BUTTON_STYLES['secondary'])
 
-        # 加载动画容器（固定尺寸，避免界面跳动）
-        loader_container = QWidget()
-        loader_container.setFixedSize(90, 36)
-        loader_layout = QHBoxLayout(loader_container)
-        loader_layout.setContentsMargins(0, 0, 0, 0)
+        # 左下角状态图例：竖排三项，每行色块+文字并排，整体缩小紧凑
+        legend_layout = QVBoxLayout()
+        legend_layout.setSpacing(1)
+        for _color, _text in (
+            (RoomRowWidget.COLOR_SCANNED, I18n.tr('legend_scanned')),
+            (RoomRowWidget.COLOR_ONLINE, I18n.tr('legend_history_online')),
+            (RoomRowWidget.COLOR_OFFLINE, I18n.tr('legend_history_offline')),
+        ):
+            _item_row = QHBoxLayout()
+            _item_row.setSpacing(5)
+            _dot = QFrame()
+            _dot.setFixedSize(8, 8)
+            _dot.setStyleSheet(f"background: {_color}; border-radius: 2px;")
+            _item_row.addWidget(_dot)
+            _lbl = QLabel(_text)
+            _lbl.setStyleSheet("color: #868e96; font-size: 10px;")
+            _item_row.addWidget(_lbl)
+            _item_row.addStretch()
+            legend_layout.addLayout(_item_row)
+        button_layout.addLayout(legend_layout)
 
-        # 加载动画（状态二：中间状态）
-        self._loader = PageLoader()
-        self._loader.set_state(LoaderState.INTERMEDIATE)
-        loader_layout.addWidget(self._loader)
-        self._loader.hide()  # 初始隐藏
-
-        button_layout.addStretch()
-        button_layout.addWidget(loader_container, 0, Qt.AlignHCenter)  # 水平居中
-        button_layout.addStretch()  # 右侧弹性空间，让按钮靠右
+        button_layout.addStretch()  # 弹性空间，让按钮靠右
         button_layout.addWidget(self.connect_btn)
         button_layout.addWidget(self.cancel_btn)
 
         layout.addLayout(button_layout)
     
     def _on_code_completed(self):
-        """输入完成时自动检测房间"""
+        """输入完成时自动检测房间（探测确认存在后才可点连接）"""
         # 如果正在检测中，则不触发
         if self._is_checking:
             return
-        
-        # 重新启用连接按钮（可能因版本不一致被禁用）
-        self.connect_btn.setEnabled(True)
-        
+
+        # 探测期间保持连接按钮禁用，可否点击交由探测结果判定（存在才可点）
+        self.connect_btn.setEnabled(False)
+
         # 添加一个小延迟，让用户看到输入完成
         QTimer.singleShot(300, self._check_room_exists)
     
@@ -619,13 +642,11 @@ class JoinRoomDialog(QDialog):
             self._is_checking = False
             return
         
-        # 版本一致：显示已找到房间
+        # 版本一致：显示已找到房间，探测确认存在 → 连接按钮才可点击
         self._show_status(I18n.tr('room_found', ip=host_ip), color='#51cf66')
         self._room_checked = True
         self._is_checking = False
-        
-        # 显示密码输入框
-        self._show_password_input()
+        self.connect_btn.setEnabled(True)
     
     def on_discovery_finished(self, rooms: list):
         """发现完成"""
@@ -642,18 +663,8 @@ class JoinRoomDialog(QDialog):
         self._room_checked = False
         self._is_checking = False
     
-    def _show_password_input(self):
-        """显示密码输入框（淡入动画）"""
-        self._room_requires_password = True
-        fade_widget(self, self.password_widget, True, duration=200)
-    
-    def _hide_password_input(self):
-        """隐藏密码输入框（淡出动画）"""
-        self._room_requires_password = False
-        fade_widget(self, self.password_widget, False, duration=150)
-    
     def on_connect(self):
-        """连接房间（先预验证密码，成功后 accept；失败则在对话框内显示错误）"""
+        """连接房间：先以空密码尝试，无密码房间直接进入；被拒（需要密码）则弹出密码对话框"""
         # 防止重复点击
         if self._is_verifying:
             return
@@ -672,7 +683,6 @@ class JoinRoomDialog(QDialog):
 
         # 设置房间信息
         self.room_code = room_code
-        self.password = self.password_edit.text()
 
         # 如果用户指定了主机地址，使用它
         host_address = self.host_edit.text().strip()
@@ -680,11 +690,22 @@ class JoinRoomDialog(QDialog):
             self.host_address = host_address
             self.discovered_host = host_address
 
-        # 预验证：连接主机并验证密码
-        self._verify_password()
+        # 先以空密码预验证：无密码的房间直接进入；有密码的房间会被拒而进入密码对话框
+        status, message = self._attempt_connect("")
 
-    def _verify_password(self):
-        """预验证密码：创建临时 Client 连接 + 验证，成功后保留 client 并 accept"""
+        if status == 'success':
+            # 无密码房间：无需密码对话框，直接进入同步界面
+            self.password = ""
+            self.accept()
+        elif status == 'failed':
+            # 空密码被拒：该房间需要密码，弹出密码对话框由它负责输入与验证
+            self._open_password_dialog()
+        else:
+            # 超时 / 连接错误：已在 _attempt_connect 中显示错误，保持对话框打开
+            self._show_status(message or I18n.tr('connection_failed'), color='#ff6b6b')
+
+    def _attempt_connect(self, password: str):
+        """以指定密码预验证连接，返回 (status, message)；不负责 accept"""
         self._is_verifying = True
         self.connect_btn.setEnabled(False)
         self.cancel_btn.setEnabled(False)
@@ -694,7 +715,7 @@ class JoinRoomDialog(QDialog):
         port = self.host_port or Config.DEFAULT_PORT
 
         # 创建临时 Client 进行验证
-        client = SyncClient(self.room_code, self.password)
+        client = SyncClient(self.room_code, password)
         self._verified_client = client
 
         # 用事件循环等待验证结果
@@ -735,22 +756,19 @@ class JoinRoomDialog(QDialog):
         # 尝试连接（放到后台线程，避免 socket.connect 同步阻塞冻结界面）
         # 成功/失败均通过上述信号驱动 QEventLoop 退出，不在此同步等待返回值
         def _connect_task():
+            # 本函数运行在后台线程：只写共享 result，绝不操作主线程 Qt 对象
+            # （timeout_timer / loop）。事件循环退出由 on_* 信号或超时兜底完成。
             try:
                 ok = client.connect_to_server(host, port)
                 if not ok and result['status'] is None:
-                    # 同步建立连接失败（connect_to_server 内部已 emit error_occurred）
-                    # 兜底：若信号未触发退出，此处手动置超限退出
-                    if result['status'] is None:
-                        result['status'] = 'error'
-                        result['message'] = I18n.tr('connection_failed')
-                        timeout_timer.stop()
-                        loop.quit()
-            except Exception as e:
+                    # 同步建立连接失败：connect_to_server 内部已 emit error_occurred，
+                    # 由 on_error 在主线程退出循环；此处仅记录结果
+                    result['status'] = 'error'
+                    result['message'] = I18n.tr('connection_failed')
+            except Exception:
                 if result['status'] is None:
                     result['status'] = 'error'
                     result['message'] = I18n.tr('connection_failed')
-                    timeout_timer.stop()
-                    loop.quit()
 
         threading.Thread(target=_connect_task, daemon=True).start()
 
@@ -758,9 +776,8 @@ class JoinRoomDialog(QDialog):
         timeout_timer.start(10000)
         loop.exec()
 
-        # 处理结果
+        # 成功：保留 client 实例，断开临时信号连接供 SyncWindow 复用
         if result['status'] == 'success':
-            # 验证成功：断开临时信号连接（避免 SyncWindow 复用时闭包被意外调用），保留 client 实例
             try:
                 client.connected.disconnect(on_connected)
                 client.auth_failed.disconnect(on_auth_failed)
@@ -772,10 +789,9 @@ class JoinRoomDialog(QDialog):
             # 记录历史：仅当用户手动指定了 IP（host_edit 有文本）时写入；扫描发现的房间不入历史
             if self.host_edit.text().strip():
                 UserConfig.add_room_history(self.room_code, host)
-            self.accept()
-            return
+            return 'success', ''
 
-        # 验证失败 / 超时 / 错误：断开 client，显示错误，保持对话框打开
+        # 失败 / 超时 / 错误：断开 client，恢复按钮，交还原对话框判断后续走向
         self._is_verifying = False
         self.connect_btn.setEnabled(True)
         self.cancel_btn.setEnabled(True)
@@ -786,21 +802,23 @@ class JoinRoomDialog(QDialog):
         except Exception:
             pass
 
-        # 移除房间号输入框的焦点（QEventLoop 退出后 QDialog 会自动聚焦第一个可聚焦控件）
-        for edit in self.room_code_input.digit_edits:
-            edit.clearFocus()
-        # 将焦点设置到密码输入框，方便用户直接修改密码重试
-        if self._room_requires_password:
-            self.password_edit.setFocus()
-            self.password_edit.selectAll()
-
         if result['status'] == 'failed':
-            # 验证失败：直接显示服务器返回的错误信息（如 "密码错误"、"房间号错误"）
-            self._show_status(result['message'] or I18n.tr('auth_failed'), color='#ff6b6b')
-        elif result['status'] == 'timeout':
-            self._show_status(I18n.tr('connection_failed'), color='#ff6b6b')
-        elif result['status'] == 'error':
-            self._show_status(result['message'] or I18n.tr('connection_failed'), color='#ff6b6b')
+            return 'failed', (result['message'] or I18n.tr('auth_failed'))
+        if result['status'] == 'timeout':
+            return 'timeout', I18n.tr('connection_failed')
+        return 'error', (result['message'] or I18n.tr('connection_failed'))
+
+    def _open_password_dialog(self):
+        """弹出独立密码对话框；验证通过后回填 password/client 并进入同步界面"""
+        from ui.password_dialog import PasswordDialog
+
+        host = self.host_address or "127.0.0.1"
+        port = self.host_port or Config.DEFAULT_PORT
+        dlg = PasswordDialog(self.room_code, host, port, self)
+        if dlg.exec():
+            self.password = dlg.get_password()
+            self._verified_client = dlg.get_verified_client()
+            self.accept()
 
     def get_verified_client(self):
         """获取预验证成功的 Client 实例（供 SyncWindow 复用，避免重复连接）"""
@@ -842,8 +860,9 @@ class JoinRoomDialog(QDialog):
         self.scan_status_label.setText(I18n.tr('scanning_rooms'))
         self.scan_status_label.setStyleSheet("color: #339af0; font-size: 12px;")
 
-        # 显示加载动画
+        # 显示加载动画（重置进度，让光束从左侧重新开始）
         if self._loader:
+            self._loader.reset_animation()
             self._loader.show()
 
         # 创建扫描发现服务
@@ -876,10 +895,11 @@ class JoinRoomDialog(QDialog):
         self._discovered_rooms_list.append(room_info)
 
         # 添加到列表控件：使用统一 RoomRowWidget（固定主题蓝指示条、无删除按钮）
-        widget = RoomRowWidget(room_code, host_ip, indicator_color="#339af0", show_delete=False)
+        widget = RoomRowWidget(room_code, host_ip, indicator_color=RoomRowWidget.COLOR_SCANNED, show_delete=False)
         item = QListWidgetItem()
         item.setData(Qt.UserRole, room_info)
-        item.setSizeHint(widget.sizeHint())
+        # 显式固定高度：不用 sizeHint（它只是文字撑出的窄高度），保证单元格/悬浮/点击范围与行视觉一致
+        item.setSizeHint(QSize(0, RoomRowWidget.ROW_HEIGHT))
         self.rooms_list_widget.addItem(item)
         self.rooms_list_widget.setItemWidget(item, widget)
         # 点击该扫描行填充输入框（与历史行一致，保证 setItemWidget 下点击可靠）
@@ -956,8 +976,6 @@ class JoinRoomDialog(QDialog):
         # 更新状态
         self._show_status(I18n.tr('room_found', ip=room_info['ip']), color='#51cf66')
         self._room_checked = True
-        # 显示密码输入框
-        self._show_password_input()
 
     def _update_matching_room_style(self):
         """更新列表项样式：匹配当前输入的房间号时灰色不可点击"""
@@ -1063,7 +1081,8 @@ class JoinRoomDialog(QDialog):
         widget.remove_requested.connect(lambda c=room_code, d=ip: self._on_history_remove(c, d))
 
         item = QListWidgetItem()
-        item.setSizeHint(widget.sizeHint())
+        # 显式固定高度：保证单元格/悬浮/点击范围与行视觉一致（不依赖文字 sizeHint）
+        item.setSizeHint(QSize(0, RoomRowWidget.ROW_HEIGHT))
         # 插入到顶部（历史上方为历史，下方为扫描结果）
         self.rooms_list_widget.insertItem(0, item)
         self.rooms_list_widget.setItemWidget(item, widget)

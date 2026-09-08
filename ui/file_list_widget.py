@@ -15,7 +15,7 @@ from datetime import datetime
 from PySide6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QTableWidget, 
     QTableWidgetItem, QHeaderView, QMenu, QMessageBox, 
-    QFileDialog, QAbstractItemView, QLabel, QPushButton, QLineEdit,
+    QFileDialog, QAbstractItemView, QLabel, QPushButton,
     QRubberBand, QGraphicsOpacityEffect
 )
 from PySide6.QtCore import (Qt, Signal, QMimeData, QUrl, QPoint, QThread,
@@ -27,7 +27,7 @@ from PySide6.QtWidgets import QApplication
 
 from i18n import I18n
 from config import Config
-from ui.widgets import BUTTON_STYLES
+from ui.widgets import BUTTON_STYLES, UnderlineEdit
 
 
 class WarnSyncButton(QPushButton):
@@ -664,7 +664,7 @@ class FileListWidget(QWidget):
         toolbar_layout.addWidget(self.back_btn)
         
         # 当前路径
-        self.path_edit = QLineEdit()
+        self.path_edit = UnderlineEdit()
         self.path_edit.setReadOnly(True)
         toolbar_layout.addWidget(self.path_edit)
 
@@ -1501,7 +1501,7 @@ class FileListWidget(QWidget):
 
         # 预填默认名"新建文件夹"，全选便于直接输入替换
         default_name = I18n.tr('new_folder')
-        name_edit = QLineEdit(default_name)
+        name_edit = UnderlineEdit(default_name)
         layout.addWidget(name_edit)
 
         button_box = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
@@ -1594,7 +1594,7 @@ class FileListWidget(QWidget):
         layout.addWidget(label)
 
         # 文件名输入框
-        name_edit = QLineEdit(old_name)
+        name_edit = UnderlineEdit(old_name)
         layout.addWidget(name_edit)
 
         # 按钮
