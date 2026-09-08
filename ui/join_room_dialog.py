@@ -9,12 +9,12 @@ from PySide6.QtWidgets import (
     QGraphicsOpacityEffect, QApplication, QListWidgetItem,
     QSizePolicy
 )
-from PySide6.QtCore import Qt, Signal, QTimer, QPropertyAnimation, QByteArray, QEventLoop, QSize
-from PySide6.QtGui import QFont, QValidator, QKeyEvent, QShowEvent, QColor, QPalette
+from PySide6.QtCore import Qt, Signal, QTimer, QPropertyAnimation, QByteArray, QEventLoop, QSize, QPoint
+from PySide6.QtGui import QFont, QValidator, QKeyEvent, QShowEvent, QColor, QPalette, QPainter, QPen
 
 from i18n import I18n
 from config import Config, UserConfig
-from network.discovery import RoomDiscovery, RoomProbe
+from network.discovery import RoomDiscovery
 from network.client import SyncClient
 from ui.widgets import AnimatedButton, SnapOutlineButton, BUTTON_STYLES, UnderlineEdit
 from ui.loading_animation import PageLoader, LoaderState
@@ -300,6 +300,40 @@ class RoomRowWidget(QWidget):
         super().mousePressEvent(event)
 
 
+class LegendHelpIcon(QWidget):
+    """圆形问号图标；悬浮时弹出图例说明浮层。
+
+    代替原先直接排布在按钮行内的整块图例——整块图例会撑高按钮行，
+    导致 150% 缩放下取消按钮顶部 hover 事件丢失。
+    """
+
+    hover_in = Signal()
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setFixedSize(18, 18)
+        self.setCursor(Qt.PointingHandCursor)
+
+    def enterEvent(self, event):
+        self.hover_in.emit()
+        super().enterEvent(event)
+
+    def paintEvent(self, event):
+        p = QPainter(self)
+        p.setRenderHint(QPainter.Antialiasing, True)
+        accent = QColor("#339af0")
+        p.setPen(QPen(accent, 1.2))
+        p.setBrush(Qt.NoBrush)
+        p.drawEllipse(self.rect().adjusted(2, 2, -2, -2))
+        f = self.font()
+        f.setPixelSize(10)
+        f.setBold(True)
+        p.setFont(f)
+        p.setPen(QPen(accent, 1.0))
+        p.drawText(self.rect(), Qt.AlignCenter, "?")
+        p.end()
+
+
 class JoinRoomDialog(QDialog):
     """加入房间对话框"""
 
@@ -313,37 +347,42 @@ class JoinRoomDialog(QDialog):
         self._fade_animations = {}  # 动画字典
         self._room_checked = False  # 房间是否已检测
         self._is_checking = False  # 是否正在检测中
+        self._check_seq = 0  # 探测代号（generation）：新探测自增，旧探测回调凭此失效
         self._is_verifying = False  # 是否正在验证密码
+        self._verify_loop = None  # 验证中的事件循环（用于输入变化时中途取消验证）
+        self._verify_timer = None  # 验证中的超时定时器（取消验证时一并停止）
+        # IP 输入防抖定时器：输入停顿一段时间后才定向探测，避免逐字触发探测导致实例/线程堆积
+        self._ip_probe_timer = QTimer(self)
+        self._ip_probe_timer.setSingleShot(True)
+        self._ip_probe_timer.setInterval(900)
+        self._ip_probe_timer.timeout.connect(self._check_room_exists)
         self._verified_client = None  # 预验证成功的 Client 实例（传递给 SyncWindow 复用）
         self._is_scanning = False  # 是否正在扫描所有房间
         self._scan_discovery = None  # 扫描发现服务
+        self._history_probes = []  # 扫描期间对历史行的定向探测服务（每条历史一个 RoomDiscovery）
         self._discovered_rooms_list = []  # 扫描发现的房间列表
         self._first_show = True  # 是否首次显示
         self._loader = None  # 加载动画组件
-        self._history_items = []  # 历史行控件列表 [RoomRowWidget, ...]
-        self._room_probe = None  # 历史可达性探测服务
+        self._history_items = []  # 历史行控件列表
+        self._history_status = {}  # 历史行在线状态 {(ip, room_code): online}，扫描结果即时写入
         self._manual_ip = ""  # 手动指定的主机地址（定向探测目标）
         self.init_ui()
-        # 周期刷新：每 1s 重新探测历史行与手动目标的可达性，按各自绿/黄状态更新指示条
-        self._refresh_timer = QTimer(self)
-        self._refresh_timer.setInterval(1000)
-        self._refresh_timer.timeout.connect(self._on_periodic_refresh)
+        # 开启对话框级鼠标追踪：用于图例浮层在空白区域的移出隐藏
+        self.setMouseTracking(True)
 
-    def _on_periodic_refresh(self):
-        """周期刷新历史行指示条：按各自最新绿/黄状态刷新列表展示"""
-        self._probe_history()
+    def _set_history_online(self, ip: str, room_code: str, online: bool):
+        """记录历史行在线状态并更新对应指示条（由广播扫描结果即时点亮，无常驻探测）"""
+        self._history_status[(ip, room_code)] = online
+        for row in self._history_items:
+            if row.get('room_code') == room_code and row.get('ip') == ip:
+                row['widget'].set_status(online)
+                break
 
     def _cleanup_background(self):
-        """对话框关闭时清理后台活动：停止周期定时器与所有探测/扫描服务"""
-        if self._refresh_timer is not None and self._refresh_timer.isActive():
-            self._refresh_timer.stop()
-        # 停止历史可达性探测
-        if self._room_probe is not None:
-            try:
-                self._room_probe.stop_probing()
-            except Exception:
-                pass
-            self._room_probe = None
+        """对话框关闭时清理后台活动：停止所有探测/扫描服务"""
+        # 停止房间号/IP 输入的防抖探测定时器
+        if hasattr(self, '_ip_probe_timer'):
+            self._ip_probe_timer.stop()
         # 停止房间发现服务（手动/扫描共用 self.discovery 会在各自结束点清理，此处兜底）
         for probe in (getattr(self, 'discovery', None), getattr(self, '_scan_discovery', None)):
             if probe is not None:
@@ -351,9 +390,10 @@ class JoinRoomDialog(QDialog):
                     probe.stop_discovery()
                 except Exception:
                     pass
+        self._stop_history_probes()
 
     def accept(self):
-        """连接成功：关闭前清理后台活动（定时器/探测/扫描）"""
+        """连接成功：关闭前清理后台活动（扫描/房间探测）"""
         self._cleanup_background()
         super().accept()
 
@@ -374,9 +414,6 @@ class JoinRoomDialog(QDialog):
             self._first_show = False
             # 加载历史房间记录到列表顶部
             self._load_history()
-            # 启动周期刷新定时器（不重复开启）
-            if not self._refresh_timer.isActive():
-                self._refresh_timer.start()
             # 延迟启动扫描（等待对话框完全显示）
             QTimer.singleShot(100, self._start_scan_all_rooms)
     
@@ -419,6 +456,8 @@ class JoinRoomDialog(QDialog):
 
         self.host_edit = UnderlineEdit()
         self.host_edit.setPlaceholderText(I18n.tr('host_address_hint'))
+        # 手动修改 IP：使此前“已探测/已锚定”结论失效，需按新 IP 重新确认才可连接
+        self.host_edit.textChanged.connect(self._on_host_edit_text_changed)
         host_layout.addWidget(self.host_edit)
 
         layout.addLayout(host_layout)
@@ -513,63 +552,179 @@ class JoinRoomDialog(QDialog):
         self.cancel_btn.clicked.connect(self.reject)
         self.cancel_btn.setStyleSheet(BUTTON_STYLES['secondary'])
 
-        # 左下角状态图例：竖排三项，每行色块+文字并排，整体缩小紧凑
-        legend_layout = QVBoxLayout()
-        legend_layout.setSpacing(1)
-        for _color, _text in (
-            (RoomRowWidget.COLOR_SCANNED, I18n.tr('legend_scanned')),
-            (RoomRowWidget.COLOR_ONLINE, I18n.tr('legend_history_online')),
-            (RoomRowWidget.COLOR_OFFLINE, I18n.tr('legend_history_offline')),
-        ):
-            _item_row = QHBoxLayout()
-            _item_row.setSpacing(5)
-            _dot = QFrame()
-            _dot.setFixedSize(8, 8)
-            _dot.setStyleSheet(f"background: {_color}; border-radius: 2px;")
-            _item_row.addWidget(_dot)
-            _lbl = QLabel(_text)
-            _lbl.setStyleSheet("color: #868e96; font-size: 10px;")
-            _item_row.addWidget(_lbl)
-            _item_row.addStretch()
-            legend_layout.addLayout(_item_row)
-        button_layout.addLayout(legend_layout)
+        # 左下角图例入口：圆形问号图标，悬浮弹出图例说明浮层。
+        # （整块图例会撑高按钮行，导致 150% 缩放下取消按钮顶部 hover 丢失，故改为图标+浮层）
+        self.legend_help_btn = LegendHelpIcon()
+        self.legend_help_btn.hover_in.connect(self._show_legend_popup)
+        self.legend_popup = self._build_legend_popup()
+        button_layout.addWidget(self.legend_help_btn)
 
         button_layout.addStretch()  # 弹性空间，让按钮靠右
         button_layout.addWidget(self.connect_btn)
         button_layout.addWidget(self.cancel_btn)
 
         layout.addLayout(button_layout)
-    
+
+    def _build_legend_popup(self) -> "QFrame":
+        """构建图例说明浮层（悬浮问号图标弹出），明暗主题自适应配色。"""
+        popup = QFrame(self)
+        popup.setObjectName("LegendPopup")
+        popup.setAttribute(Qt.WA_TransparentForMouseEvents, True)  # 不拦截鼠标，避免浮层抢占悬浮
+        base = QApplication.palette().color(QPalette.Window)
+        luminance = base.red() * 0.299 + base.green() * 0.587 + base.blue() * 0.114
+        if luminance < 128:
+            bg, border = "rgba(50, 50, 56, 235)", "rgba(255, 255, 255, 60)"
+        else:
+            bg, border = "rgba(255, 255, 255, 240)", "rgba(0, 0, 0, 60)"
+        popup.setStyleSheet(
+            f"QFrame#LegendPopup {{ background-color: {bg}; border: 1px solid {border}; border-radius: 8px; }}"
+        )
+        lay = QVBoxLayout(popup)
+        lay.setContentsMargins(10, 8, 10, 8)
+        lay.setSpacing(5)
+        for _color, _text in (
+            (RoomRowWidget.COLOR_SCANNED, I18n.tr('legend_scanned')),
+            (RoomRowWidget.COLOR_ONLINE, I18n.tr('legend_history_online')),
+            (RoomRowWidget.COLOR_OFFLINE, I18n.tr('legend_history_offline')),
+        ):
+            row = QHBoxLayout()
+            row.setSpacing(6)
+            _dot = QFrame()
+            _dot.setFixedSize(8, 8)
+            _dot.setStyleSheet(f"background: {_color}; border-radius: 2px;")
+            row.addWidget(_dot)
+            _lbl = QLabel(_text)
+            _lbl.setStyleSheet("color: palette(text); font-size: 11px;")
+            row.addWidget(_lbl)
+            row.addStretch()
+            lay.addLayout(row)
+        popup.adjustSize()
+        popup.hide()
+        return popup
+
+    def _show_legend_popup(self):
+        """在问号图标上方弹出图例浮层（与图标轻微交叠，保证悬浮转移连续）。"""
+        popup = self.legend_popup
+        icon = self.legend_help_btn
+        popup.adjustSize()
+        plt = icon.mapTo(self, QPoint(0, 0))
+        x = plt.x()
+        y = plt.y() - popup.height() + 4  # 与图标顶部交叠 4px，避免移动时悬停跳变
+        # 保持浮层在对话框内
+        x = max(3, min(x, self.width() - popup.width() - 3))
+        y = max(3, y)
+        popup.move(x, y)
+        popup.show()
+        popup.raise_()
+
+    def mouseMoveEvent(self, event):
+        # 光标离开图标与浮层区域时隐藏浮层
+        if getattr(self, 'legend_popup', None) is not None and self.legend_popup.isVisible():
+            gp = event.globalPosition().toPoint()
+            _ir = self.legend_help_btn.rect()
+            icon_rect = _ir.translated(self.legend_help_btn.mapToGlobal(_ir.topLeft()))
+            _pr = self.legend_popup.rect()
+            pop_rect = _pr.translated(self.legend_popup.mapToGlobal(_pr.topLeft()))
+            if not icon_rect.contains(gp) and not pop_rect.contains(gp):
+                self.legend_popup.hide()
+        super().mouseMoveEvent(event)
+
+    def leaveEvent(self, event):
+        if getattr(self, 'legend_popup', None) is not None:
+            self.legend_popup.hide()
+        super().leaveEvent(event)
+
     def _on_code_completed(self):
         """输入完成时自动检测房间（探测确认存在后才可点连接）"""
-        # 如果正在检测中，则不触发
+        # 用户换了个新房间号：取消仍在进行中的连接验证，让新探测接管
+        self._cancel_verifying()
+        # 若旧探测还未结束，先取消旧的再重新调度，否则新房间号会被防重入吞掉
         if self._is_checking:
-            return
+            self._cancel_checking()
 
         # 探测期间保持连接按钮禁用，可否点击交由探测结果判定（存在才可点）
         self.connect_btn.setEnabled(False)
 
         # 添加一个小延迟，让用户看到输入完成
         QTimer.singleShot(300, self._check_room_exists)
+
+    def _cancel_checking(self):
+        """取消正在进行的房间探测，避免旧探测结果污染新输入"""
+        self._check_seq += 1  # 使本代旧探测的回调全部失效
+        d = getattr(self, 'discovery', None)
+        if d is not None:
+            try:
+                d.stop_discovery()
+            except Exception:
+                pass
+            self.discovery = None
+        self._is_checking = False
+        self._pending_room_code = None
     
+    def _cancel_verifying(self):
+        """取消正在进行的连接验证（用户在中途修改 IP/房间号时调用，解堵『验证中』状态）
+
+        通过停止超时定时器并退出阻塞事件循环，让 _attempt_connect 即刻返回；
+        _is_verifying 复位与按钮恢复由 _attempt_connect 的退出清理完成。
+        """
+        if not self._is_verifying:
+            return
+        timer = self._verify_timer
+        if timer is not None:
+            try:
+                timer.stop()
+            except Exception:
+                pass
+        loop = self._verify_loop
+        if loop is not None:
+            loop.quit()
+
+    def _on_host_edit_text_changed(self, text: str = ""):
+        """手动修改主机 IP：使此前针对旧 IP 的『已探测/已锚定』结论失效
+
+        取消在途的验证与探测，并（房间号已填满时）针对新 IP 自动重新探测确认，
+        存在才启用连接按钮——避免用旧锚点去连错误 IP 而长时间卡在验证中。
+        """
+        self._cancel_verifying()
+        self._cancel_checking()
+        self._room_checked = False
+        self.connect_btn.setEnabled(False)
+        # 房间号已填满且 IP 形如地址（含小数点）时：启动/重置防抖定时器，输入停顿约 900ms 后才定向探测
+        if self.room_code_input.is_complete() and '.' in text:
+            self._ip_probe_timer.start()
+        else:
+            # 房间号不完整或 IP 尚不像地址：停止防抖探测，避免中途触发
+            self._ip_probe_timer.stop()
+
     def _on_room_code_input_changed(self):
         """房间号输入变化时更新连接按钮状态，并清除"已找到"等历史状态"""
+        # 用户正在改房间号：若此刻有进行中的连接验证，取消它解堵 UI
+        self._cancel_verifying()
         if not self.room_code_input.is_complete():
             self.connect_btn.setEnabled(False)
-            # 房间号不完整时清除"已找到房间"等先前结果
+            # 房间号不完整：立即取消正在进行的探测（stop + 使旧回调失效），
+            # 后台扫描逻辑到此停止，等待用户输满新房间号
+            self._cancel_checking()
+            self._ip_probe_timer.stop()
             self._room_checked = False
-            if not self._is_checking:
-                self._show_status('', color='#868e96')
-    
+            # 界面回到"等待输入"默认状态
+            self._show_status(I18n.tr('ready_waiting'), color='#868e96')
+
     def _check_room_exists(self):
         """检测房间是否存在"""
+        # 若已有探测在途（如 300ms 调度叠加/重复触发），先取消旧的，保证只保留最新一次探测
+        if self._is_checking:
+            self._cancel_checking()
+        # 本代探测开始：自增代号，旧探测（如已取消/被替换的）回调凭此失效
+        self._check_seq += 1
+        seq = self._check_seq
         self._is_checking = True
         room_code = self.room_code_input.get_room_code()
         
-        # 验证房间号
+        # 验证房间号：调度在途期间用户删位到不完整时静默复位（不弹窗，弹窗由 on_connect 负责）
         if not self.room_code_input.is_complete():
             self._is_checking = False
-            QMessageBox.warning(self, I18n.tr('join_room_title'), I18n.tr('invalid_room_code'))
+            self._show_status(I18n.tr('ready_waiting'), color='#868e96')
             return
         
         # 用户指定了主机地址：定向探测该 IP 上是否存在该房间号（真实验证，不盲信）
@@ -580,9 +735,9 @@ class JoinRoomDialog(QDialog):
 
             # 创建房间发现服务，定向探测
             self.discovery = RoomDiscovery(self)
-            self.discovery.room_found.connect(self.on_room_found)
-            self.discovery.discovery_finished.connect(self.on_discovery_finished)
-            self.discovery.error_occurred.connect(self.on_discovery_error)
+            self.discovery.room_found.connect(lambda ip, code, port, ver="", seq=seq: self.on_room_found(ip, code, port, ver, seq))
+            self.discovery.discovery_finished.connect(lambda rooms, seq=seq: self.on_discovery_finished(rooms, seq))
+            self.discovery.error_occurred.connect(lambda err, seq=seq: self.on_discovery_error(err, seq))
 
             # 保存房间号与目标 IP
             self._pending_room_code = room_code
@@ -598,9 +753,9 @@ class JoinRoomDialog(QDialog):
         
         # 创建房间发现服务
         self.discovery = RoomDiscovery(self)
-        self.discovery.room_found.connect(self.on_room_found)
-        self.discovery.discovery_finished.connect(self.on_discovery_finished)
-        self.discovery.error_occurred.connect(self.on_discovery_error)
+        self.discovery.room_found.connect(lambda ip, code, port, ver="", seq=seq: self.on_room_found(ip, code, port, ver, seq))
+        self.discovery.discovery_finished.connect(lambda rooms, seq=seq: self.on_discovery_finished(rooms, seq))
+        self.discovery.error_occurred.connect(lambda err, seq=seq: self.on_discovery_error(err, seq))
         
         # 保存房间号
         self._pending_room_code = room_code
@@ -613,14 +768,21 @@ class JoinRoomDialog(QDialog):
         self.status_label.setText(text)
         self.status_label.setStyleSheet(f"color: {color}; font-size: 12px;")
     
-    def on_room_found(self, host_ip: str, room_code: str, port: int, version: str = ""):
+    def on_room_found(self, host_ip: str, room_code: str, port: int, version: str = "", seq: int = None):
         """发现房间
         Args:
             host_ip: 主机IP
             room_code: 房间号
             port: 端口
             version: 主机版本号
+            seq: 触发本回调的探测代号（None 表示未代际校验的旧调用点，仍放行）
         """
+        # 代际守卫：回调来自已被取消/替换的旧探测时，直接丢弃
+        if seq is not None and seq != self._check_seq:
+            return
+        # 房间号守卫：回调房间号与当前输入不一致（旧房间号的残留结果）时丢弃
+        if self._pending_room_code is not None and room_code != self._pending_room_code:
+            return
         # 找到房间，停止发现
         self.discovery.stop_discovery()
         
@@ -648,8 +810,11 @@ class JoinRoomDialog(QDialog):
         self._is_checking = False
         self.connect_btn.setEnabled(True)
     
-    def on_discovery_finished(self, rooms: list):
+    def on_discovery_finished(self, rooms: list, seq: int = None):
         """发现完成"""
+        # 代际守卫：丢弃来自已取消/替换旧探测的结束回调
+        if seq is not None and seq != self._check_seq:
+            return
         self._is_checking = False
         if not rooms:
             # 没有找到房间
@@ -657,8 +822,11 @@ class JoinRoomDialog(QDialog):
             self._room_checked = False
             self.connect_btn.setEnabled(False)
     
-    def on_discovery_error(self, error: str):
+    def on_discovery_error(self, error: str, seq: int = None):
         """发现错误"""
+        # 代际守卫：丢弃来自已取消/替换旧探测的错误回调
+        if seq is not None and seq != self._check_seq:
+            return
         self._show_status(error, color='#ff6b6b')
         self._room_checked = False
         self._is_checking = False
@@ -676,8 +844,9 @@ class JoinRoomDialog(QDialog):
             QMessageBox.warning(self, I18n.tr('join_room_title'), I18n.tr('invalid_room_code'))
             return
 
-        # 如果没有检测过房间，先检测
-        if not self._room_checked and not self.host_edit.text().strip():
+        # 锚未建立（含修改 IP 后已失效）：先探测确认房间存在于当前输入再连接，
+        # 避免用旧锚点直接连错 IP 而卡在验证中
+        if not self._room_checked:
             self._check_room_exists()
             return
 
@@ -700,6 +869,9 @@ class JoinRoomDialog(QDialog):
         elif status == 'failed':
             # 空密码被拒：该房间需要密码，弹出密码对话框由它负责输入与验证
             self._open_password_dialog()
+        elif status == 'cancel':
+            # 用户中途修改输入取消了验证：界面已复位，等待新输入，无需提示
+            pass
         else:
             # 超时 / 连接错误：已在 _attempt_connect 中显示错误，保持对话框打开
             self._show_status(message or I18n.tr('connection_failed'), color='#ff6b6b')
@@ -722,6 +894,9 @@ class JoinRoomDialog(QDialog):
         loop = QEventLoop(self)
         timeout_timer = QTimer(self)
         timeout_timer.setSingleShot(True)
+        # 记录到实例，供输入变化时 _cancel_verifying 中途取消本验证
+        self._verify_loop = loop
+        self._verify_timer = timeout_timer
 
         result = {'status': None, 'message': ''}  # None / 'success' / 'failed' / 'timeout' / 'error'
 
@@ -776,37 +951,46 @@ class JoinRoomDialog(QDialog):
         timeout_timer.start(10000)
         loop.exec()
 
-        # 成功：保留 client 实例，断开临时信号连接供 SyncWindow 复用
-        if result['status'] == 'success':
+        try:
+            # 成功：保留 client 实例，断开临时信号连接供 SyncWindow 复用
+            if result['status'] == 'success':
+                try:
+                    client.connected.disconnect(on_connected)
+                    client.auth_failed.disconnect(on_auth_failed)
+                    client.error_occurred.disconnect(on_error)
+                except Exception:
+                    pass
+                self._is_verifying = False
+                self._show_status(I18n.tr('room_found', ip=host), color='#51cf66')
+                # 记录历史：host_edit 有 IP（手动指定 / 扫描 / 历史填充都会填充）时写入；
+                # 无 IP 的纯广播连接不入历史
+                if self.host_edit.text().strip():
+                    UserConfig.add_room_history(self.room_code, host)
+                return 'success', ''
+
+            # 失败 / 超时 / 错误 / 取消：断开 client，恢复按钮，交还原对话框判断后续走向
+            self._is_verifying = False
+            self.connect_btn.setEnabled(True)
+            self.cancel_btn.setEnabled(True)
+            self._verified_client = None
+
             try:
-                client.connected.disconnect(on_connected)
-                client.auth_failed.disconnect(on_auth_failed)
-                client.error_occurred.disconnect(on_error)
+                client.disconnect()
             except Exception:
                 pass
-            self._is_verifying = False
-            self._show_status(I18n.tr('room_found', ip=host), color='#51cf66')
-            # 记录历史：仅当用户手动指定了 IP（host_edit 有文本）时写入；扫描发现的房间不入历史
-            if self.host_edit.text().strip():
-                UserConfig.add_room_history(self.room_code, host)
-            return 'success', ''
 
-        # 失败 / 超时 / 错误：断开 client，恢复按钮，交还原对话框判断后续走向
-        self._is_verifying = False
-        self.connect_btn.setEnabled(True)
-        self.cancel_btn.setEnabled(True)
-        self._verified_client = None
-
-        try:
-            client.disconnect()
-        except Exception:
-            pass
-
-        if result['status'] == 'failed':
-            return 'failed', (result['message'] or I18n.tr('auth_failed'))
-        if result['status'] == 'timeout':
-            return 'timeout', I18n.tr('connection_failed')
-        return 'error', (result['message'] or I18n.tr('connection_failed'))
+            if result['status'] is None:
+                # 用户中途修改输入主动取消了验证（非真实失败），界面已复位，不在此提示
+                return 'cancel', ''
+            if result['status'] == 'failed':
+                return 'failed', (result['message'] or I18n.tr('auth_failed'))
+            if result['status'] == 'timeout':
+                return 'timeout', I18n.tr('connection_failed')
+            return 'error', (result['message'] or I18n.tr('connection_failed'))
+        finally:
+            # 无论结果如何清空引用，避免下轮验证残留旧 loop/timer
+            self._verify_loop = None
+            self._verify_timer = None
 
     def _open_password_dialog(self):
         """弹出独立密码对话框；验证通过后回填 password/client 并进入同步界面"""
@@ -857,6 +1041,9 @@ class JoinRoomDialog(QDialog):
         self.scan_btn.setEnabled(False)
         self._clear_scan_rows()
         self._discovered_rooms_list.clear()
+        # 每次扫描为新评估：先把历史行全部重置为黄，本次未响应的保持黄，响应的由 _on_scan_room_found 点亮绿
+        for row in self._history_items:
+            self._set_history_online(row['ip'], row['room_code'], False)
         self.scan_status_label.setText(I18n.tr('scanning_rooms'))
         self.scan_status_label.setStyleSheet("color: #339af0; font-size: 12px;")
 
@@ -871,8 +1058,14 @@ class JoinRoomDialog(QDialog):
         self._scan_discovery.discovery_finished.connect(self._on_scan_finished)
         self._scan_discovery.error_occurred.connect(self._on_scan_error)
 
-        # 开始扫描所有房间（超时2秒）
-        self._scan_discovery.discover_all_rooms(timeout=2)
+        # 扫描窗口（秒）
+        self._scan_timeout = 2
+
+        # 开始广播扫描所有房间
+        self._scan_discovery.discover_all_rooms(timeout=self._scan_timeout)
+        # 同时对每条历史行按其 IP 定向探测：广播扫不到跨网段主机，定向单播可直达，
+        # 响应即点亮绿，超时无响应保持黄（黄=该 IP 定向探测未见响应，更准确）
+        self._start_history_directed_probes(self._scan_timeout)
 
     def _on_scan_room_found(self, host_ip: str, room_code: str, port: int, version: str = ""):
         """扫描发现单个房间"""
@@ -883,6 +1076,14 @@ class JoinRoomDialog(QDialog):
         # 检查是否已存在（避免重复）
         for room in self._discovered_rooms_list:
             if room['ip'] == host_ip:
+                return
+
+        # 去重：该房间已存在于历史（同房间号+IP）时，隐藏扫描项、保留历史条目
+        # （历史条目带在线绿/离线黄状态与删除按钮，信息更完整）
+        # 同时用扫描结果即时点亮对应历史行（无常驻探测，扫描到即视为在线）
+        for row in self._history_items:
+            if row.get('room_code') == room_code and row.get('ip') == host_ip:
+                self._set_history_online(host_ip, room_code, True)
                 return
 
         # 添加到列表
@@ -927,9 +1128,31 @@ class JoinRoomDialog(QDialog):
         if self._scan_discovery:
             self._scan_discovery.stop_discovery()
             self._scan_discovery = None
+        self._stop_history_probes()
 
-        # 扫描完成后重新探测历史行可达性（刷新绿/黄指示条）
-        self._probe_history()
+    def _start_history_directed_probes(self, timeout: int):
+        """扫描期间按历史行 IP 定向探测（每条历史起一个定向发现，响应到达即点亮绿）"""
+        self._stop_history_probes()
+        for row in self._history_items:
+            ip = row.get('ip')
+            code = row.get('room_code')
+            if not ip or not code:
+                continue
+            disc = RoomDiscovery(self)
+            disc.room_found.connect(
+                lambda r_ip, r_code, port, ver, c=code, i=ip: self._set_history_online(i, c, True)
+            )
+            if disc.discover_room_at(ip, code, timeout=timeout):
+                self._history_probes.append(disc)
+
+    def _stop_history_probes(self):
+        """停止并释放扫描期间的历史行定向探测服务"""
+        for disc in self._history_probes:
+            try:
+                disc.stop_discovery()
+            except Exception:
+                pass
+        self._history_probes.clear()
 
     def _on_scan_error(self, error: str):
         """扫描错误"""
@@ -947,6 +1170,7 @@ class JoinRoomDialog(QDialog):
         if self._scan_discovery:
             self._scan_discovery.stop_discovery()
             self._scan_discovery = None
+        self._stop_history_probes()
 
     def _on_room_item_clicked(self, item: QListWidgetItem):
         """点击发现的房间项，自动填充房间号（自定义渲染行由 widget.clicked 处理）"""
@@ -958,24 +1182,22 @@ class JoinRoomDialog(QDialog):
             self._fill_from_room(room_info)
 
     def _fill_from_room(self, room_info: dict):
-        """根据扫描到的房间信息填充输入框并启用连接按钮"""
+        """根据扫描到的房间信息填充输入框，随后定向探测确认存在才启用连接按钮"""
         current_code = self.room_code_input.get_room_code()
         if room_info['room_code'] == current_code:
             return  # 匹配项不可点击，直接返回
 
         # 填充房间号到输入框（不触发检测，避免重复刷新）
         self.room_code_input.set_room_code(room_info['room_code'], trigger_check=False)
-        # 启用连接按钮
-        self.connect_btn.setEnabled(True)
         # 记录主机信息（连接时使用）
         self.discovered_host = room_info['ip']
         self.host_port = room_info['port']
         self.host_address = room_info['ip']  # 同时设置 host_address，确保连接时使用正确地址
-        # 清空手动输入的主机地址（使用扫描发现的）
-        self.host_edit.clear()
-        # 更新状态
-        self._show_status(I18n.tr('room_found', ip=room_info['ip']), color='#51cf66')
-        self._room_checked = True
+        # 将扫描到的 IP 填入地址框，使后续探测走定向探测（确认该 IP 上房间仍在线）
+        self.host_edit.setText(room_info['ip'])
+        # 探测确认存在前保持连接按钮禁用（setText 触发 textChanged，由 _on_host_edit_text_changed 调度定向探测）
+        self.connect_btn.setEnabled(False)
+        self._room_checked = False
 
     def _update_matching_room_style(self):
         """更新列表项样式：匹配当前输入的房间号时灰色不可点击"""
@@ -1016,7 +1238,7 @@ class JoinRoomDialog(QDialog):
                 self.rooms_list_widget.takeItem(i)
 
     def _load_history(self):
-        """加载历史房间记录到列表顶部，并异步探测可达性（默认黄，可达变绿）"""
+        """加载历史房间记录到列表顶部（默认黄，扫描到后由 _set_history_online 点亮绿）"""
         self._clear_history_rows()
         history = UserConfig.get_room_history()
         if not history:
@@ -1032,35 +1254,6 @@ class JoinRoomDialog(QDialog):
                 continue
             self._history_items.append(row)
 
-        # 启动可达性探测
-        self._probe_history()
-
-    def _probe_history(self):
-        """对全部历史行重新探测可达性：默认黄，定向探测到可达变绿（周期刷新复用）"""
-        # 若已有探测在运行，跳过本次，避免 1s 定时器叠加并发探测
-        if self._room_probe is not None:
-            return
-        # 确保有历史行
-        if not self._history_items:
-            return
-        # 构建探测目标（仅针对仍存在于列表中的历史行）
-        probes = [
-            {"ip": row.get('ip'), "room_code": row.get('room_code'), "port": self.host_port}
-            for row in self._history_items
-            if row.get('ip') and row.get('room_code')
-        ]
-        if not probes:
-            return
-        # 启动新的可达性探测（定向探测，若不在运行才创建）
-        self._room_probe = RoomProbe(self)
-        self._room_probe.probed.connect(self._on_history_probed)
-        self._room_probe.finished.connect(self._on_probe_finished)
-        self._room_probe.start_probing(probes)
-
-    def _on_probe_finished(self):
-        """历史探测全部完成：释放探测服务，允许下一轮周期刷新"""
-        self._room_probe = None
-
     def _clear_history_rows(self):
         """移除现有历史行控件并清空缓存"""
         # 逐个移除（从列表反向，避免索引偏移）
@@ -1069,16 +1262,16 @@ class JoinRoomDialog(QDialog):
             if item is not None and self.rooms_list_widget.row(item) >= 0:
                 self.rooms_list_widget.takeItem(self.rooms_list_widget.row(item))
         self._history_items.clear()
-        # 若存在探测服务，停止并释放
-        if self._room_probe:
-            self._room_probe.stop_probing()
-            self._room_probe = None
+        self._history_status.clear()
 
     def _add_history_row(self, room_code: str, ip: str):
         """向列表顶部插入一条历史行，返回记录字典或 None"""
         widget = RoomRowWidget(room_code, ip)
         widget.clicked.connect(lambda c=room_code, d=ip: self._on_history_clicked(c, d))
         widget.remove_requested.connect(lambda c=room_code, d=ip: self._on_history_remove(c, d))
+        # 复用已记录状态：重建该行时按字典恢复绿/黄
+        if self._history_status.get((ip, room_code)):
+            widget.set_status(True)
 
         item = QListWidgetItem()
         # 显式固定高度：保证单元格/悬浮/点击范围与行视觉一致（不依赖文字 sizeHint）
@@ -1087,13 +1280,6 @@ class JoinRoomDialog(QDialog):
         self.rooms_list_widget.insertItem(0, item)
         self.rooms_list_widget.setItemWidget(item, widget)
         return {'item': item, 'widget': widget, 'room_code': room_code, 'ip': ip}
-
-    def _on_history_probed(self, ip: str, room_code: str, reachable: bool):
-        """历史行探测完成：更新对应指示条绿/黄"""
-        for row in self._history_items:
-            if row.get('room_code') == room_code and row.get('ip') == ip:
-                row['widget'].set_status(reachable)
-                break
 
     def _on_history_clicked(self, room_code: str, ip: str):
         """点击历史行：填充房间号+IP，触发原有房间号自动检测，并从列表移除该行（不从 config 移除）"""
@@ -1104,8 +1290,9 @@ class JoinRoomDialog(QDialog):
         self.host_address = ip
         self.discovered_host = ip
         self.host_port = Config.DEFAULT_PORT
-        # 历史房间号完整，直接启用连接按钮
-        self.connect_btn.setEnabled(True)
+        # 探测确认存在前保持连接按钮禁用（setText 触发 textChanged，由 _on_host_edit_text_changed 调度定向探测）
+        self.connect_btn.setEnabled(False)
+        self._room_checked = False
         # 从历史列表移除该行（仅显示，保留 config 历史记录）
         for row in list(self._history_items):
             if row.get('room_code') == room_code and row.get('ip') == ip:
@@ -1115,8 +1302,6 @@ class JoinRoomDialog(QDialog):
                 if row in self._history_items:
                     self._history_items.remove(row)
                 break
-        # 触发原有房间号逻辑自动检测一次（双重保险）
-        QTimer.singleShot(0, self._check_room_exists)
 
     def _on_history_remove(self, room_code: str, ip: str):
         """删除一条历史记录"""

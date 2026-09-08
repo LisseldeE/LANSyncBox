@@ -66,14 +66,14 @@ class PasswordDialog(QDialog):
         self.password_edit.textChanged.connect(self._on_password_changed)
         layout.addWidget(self.password_edit)
 
-        # 校验状态（默认隐藏；错误时红色提示）
+        # 校验状态：固定高度占位（始终占位、不参与高度变化），错误时红色提示。
+        # 固定高度避免文字出现/消失导致布局挤压、界面高度跳变。
         self.status_label = QLabel()
         self.status_label.setStyleSheet("color: #ff6b6b; font-size: 11px;")
-        self.status_label.setWordWrap(True)
-        self.status_label.hide()
+        self.status_label.setAlignment(Qt.AlignLeft | Qt.AlignVCenter)
+        self.status_label.setFixedHeight(20)
+        self.status_label.setText("")  # 占位，无错误时保持空白
         layout.addWidget(self.status_label)
-
-        layout.addSpacing(4)
 
         # 按钮
         button_row = QHBoxLayout()
@@ -102,8 +102,9 @@ class PasswordDialog(QDialog):
     def _on_password_changed(self, text):
         """密码内容变化：无内容时禁用确认，并清除上一次的错误提示"""
         self.confirm_btn.setEnabled(bool(text.strip()))
-        if self.status_label.isVisible():
-            fade_widget(self, self.status_label, False, duration=150)
+        # 直接清空文本（label 固定占位高度，不触发布局变化）
+        if self.status_label.text():
+            self.status_label.clear()
 
     def on_confirm(self):
         """确认并验证密码"""

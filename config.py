@@ -393,6 +393,8 @@ class UserConfig:
             return
         data = cls.load()
         history = data.get("room_history", [])
+        # 兼容脏数据：仅保留 dict 条目，避免残留的畸形数据导致崩溃
+        history = [h for h in history if isinstance(h, dict)]
         # 去重：若同房间号+IP 已存在，先移除，再作为最新插入
         filtered = [h for h in history if not (h.get("room_code") == room_code and h.get("ip") == ip)]
         filtered.insert(0, {"room_code": room_code, "ip": ip})
@@ -408,6 +410,8 @@ class UserConfig:
         """
         data = cls.load()
         history = data.get("room_history", [])
+        # 兼容脏数据：仅保留 dict 条目，避免残留的畸形数据导致崩溃
+        history = [h for h in history if isinstance(h, dict)]
         data["room_history"] = [
             h for h in history if not (h.get("room_code") == room_code and h.get("ip") == ip)
         ]

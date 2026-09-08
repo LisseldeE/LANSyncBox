@@ -10,10 +10,14 @@ import ctypes
 from PySide6.QtWidgets import QApplication
 from PySide6.QtCore import Qt
 from PySide6.QtGui import QIcon, QFont, QPalette, QGuiApplication
+from PySide6.QtNetwork import QLocalSocket, QLocalServer
 
 from ui.main_window import MainWindow
 from i18n import I18n
 from config import Config, UserConfig
+
+# 单实例命名（Windows 命名管道 / Linux、macOS 域套接字，按登录会话隔离）
+SINGLE_INSTANCE_NAME = Config.APP_NAME
 
 
 def get_resource_path(relative_path):
@@ -23,6 +27,47 @@ def get_resource_path(relative_path):
     except AttributeError:
         base_path = os.path.dirname(os.path.abspath(__file__))
     return os.path.join(base_path, relative_path)
+
+
+def _activate_existing_instance() -> bool:
+    """请求已有实例唤出主窗口；返回 True 表示已有实例在运行（本进程应退出）。"""
+    sock = QLocalSocket()
+    sock.connectToServer(SINGLE_INSTANCE_NAME)
+    if sock.waitForConnected(400):
+        sock.write(b"show")
+        sock.flush()
+        sock.waitForBytesWritten(400)
+        sock.disconnectFromServer()
+        return True
+    return False
+
+
+def _setup_single_instance(window):
+    """作为首个实例监听单实例消息，收到 'show' 时唤出主窗口。
+
+    返回监听中的 QLocalServer；返回 None 表示已有实例占用（调用方应退出）。
+    """
+    # 清理上次异常退出可能残留的域套接字文件（Windows 上无副作用）
+    QLocalServer.removeServer(SINGLE_INSTANCE_NAME)
+    server = QLocalServer()
+    if not server.listen(SINGLE_INSTANCE_NAME):
+        # 竞态：已有实例刚完成监听。再尝试一次激活；仍失败则保守继续以当前实例运行
+        if _activate_existing_instance():
+            return None
+        return server  # listen 失败但无法激活：继续运行（回退多开，避免锁死）
+    else:
+        def _on_new_connection():
+            conn = server.nextPendingConnection()
+            if conn:
+                conn.waitForReadyRead(400)
+                data = bytes(conn.readAll())
+                conn.disconnectFromServer()
+                if data == b"show":
+                    window.showNormal()  # 若最小化则还原
+                    window.raise_()
+                    window.activateWindow()
+        server.newConnection.connect(_on_new_connection)
+        return server
 
 
 def main():
@@ -57,6 +102,10 @@ def main():
     app.setApplicationName(Config.APP_NAME)
     app.setApplicationVersion(Config.APP_VERSION)
     app.setOrganizationName(Config.APP_AUTHOR)
+
+    # 单实例保护：已有实例在运行时唤出其主窗口，本进程直接退出
+    if _activate_existing_instance():
+        return 0
 
     # 全局：点击输入框以外位置自动取消输入焦点
     from ui.widgets import install_click_away_focus
@@ -98,6 +147,12 @@ def main():
     if os.path.exists(icon_path):
         window.setWindowIcon(QIcon(icon_path))
     window.show()
+
+    # 单实例服务：监听后续启动的唤出请求（须持有引用防 GC）
+    single_instance_server = _setup_single_instance(window)
+    if single_instance_server is None:
+        # 竞态下已被其他实例占用且已成功唤出：本进程退出
+        return 0
     
     # Windows任务栏图标设置
     if Config.IS_WINDOWS and os.path.exists(icon_path):

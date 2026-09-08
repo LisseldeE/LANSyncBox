@@ -33,6 +33,8 @@ class RoomDiscovery(QObject):
         self.running = False
         self.discovered_rooms: Dict[str, dict] = {}  # {ip: {room_code, port, version, timestamp}}
         self._lock = threading.Lock()
+        self._timer = None  # 超时定时器（stop_discovery 时需 cancel，避免取消探测后仍触发 _finish_discovery）
+        self._receive_thread = None  # 接收线程（stop_discovery 时须回收，避免线程堆积）
     
     def discover_room(self, room_code: str, timeout: int = None) -> bool:
         """
@@ -57,8 +59,8 @@ class RoomDiscovery(QObject):
             self.running = True
 
             # 启动接收线程
-            receive_thread = threading.Thread(target=self._receive_loop, daemon=True)
-            receive_thread.start()
+            self._receive_thread = threading.Thread(target=self._receive_loop, daemon=True)
+            self._receive_thread.start()
 
             # 发送发现请求（room_code 为空表示扫描所有房间）
             discovery_msg = json.dumps({
@@ -83,8 +85,8 @@ class RoomDiscovery(QObject):
                     pass
 
             # 设置超时结束
-            timer = threading.Timer(timeout, self._finish_discovery)
-            timer.start()
+            self._timer = threading.Timer(timeout, self._finish_discovery)
+            self._timer.start()
 
             return True
 
@@ -125,8 +127,8 @@ class RoomDiscovery(QObject):
             self.running = True
 
             # 启动接收线程
-            receive_thread = threading.Thread(target=self._receive_loop, daemon=True)
-            receive_thread.start()
+            self._receive_thread = threading.Thread(target=self._receive_loop, daemon=True)
+            self._receive_thread.start()
 
             # 发送定向发现请求至该 IP 的所有发现端口
             discovery_msg = json.dumps({
@@ -141,8 +143,8 @@ class RoomDiscovery(QObject):
                     continue
 
             # 设置超时结束
-            timer = threading.Timer(timeout, self._finish_discovery)
-            timer.start()
+            self._timer = threading.Timer(timeout, self._finish_discovery)
+            self._timer.start()
 
             return True
 
@@ -162,14 +164,39 @@ class RoomDiscovery(QObject):
             return "127.0.0.1"
     
     def stop_discovery(self):
-        """停止发现"""
+        """停止发现
+
+        取消超时定时器并回收接收线程——仅在关 socket 无法阻止：
+        Timer 到点仍会触发 _finish_discovery、接收线程短暂存活，
+        快速连续取消/探测时会残留堆积导致卡死。故此处一并回收。
+        """
         self.running = False
+
+        # 取消超时定时器，避免取消探测后到点仍触发 _finish_discovery
+        timer = self._timer
+        if timer is not None:
+            try:
+                timer.cancel()
+            except Exception:
+                pass
+            self._timer = None
+
+        # 关闭 socket，解除阻塞在 recvfrom 的接收线程
         if self.socket:
             try:
                 self.socket.close()
             except Exception:
                 pass
-        self.socket = None
+            self.socket = None
+
+        # 回收接收线程（socket 已关闭，recvfrom 会立即返回异常退出循环）
+        thread = self._receive_thread
+        if thread is not None and thread is not threading.current_thread():
+            try:
+                thread.join(timeout=0.2)
+            except Exception:
+                pass
+            self._receive_thread = None
     
     def _receive_loop(self):
         """接收响应循环"""
@@ -238,80 +265,6 @@ class RoomDiscovery(QObject):
                 }
                 for ip, info in self.discovered_rooms.items()
             ]
-
-
-class RoomProbe(QObject):
-    """历史房间可达性探测服务（客户端运行）
-
-    复用 UDP 发现机制（RoomDiscovery/RoomResponder）探测历史房间是否存在，
-    每个历史记录发起一次针对该 room_code 的发现请求，能收到响应即认为可达。
-    **不使用 TCP 直连**，避免在主机端产生无意义的加入/断开连接。
-    """
-    PROBE_TIMEOUT = 1.5  # 单条探测超时（秒）
-
-    # 信号
-    probed = Signal(str, str, bool)   # (ip, room_code, reachable)
-    finished = Signal()                # 全部探测完成
-
-    def __init__(self, parent=None):
-        super().__init__(parent)
-        self._discoveries = []
-        self._done = set()  # 已完成的 target id（防重复回调）
-        self._remaining = 0
-
-    def start_probing(self, targets: list):
-        """并行定向探测一组目标（每条针对其 IP 发定向发现请求）
-        Args:
-            targets: 每条为 {"ip": str, "room_code": str}
-        """
-        self._discoveries.clear()
-        self._done.clear()
-        self._remaining = 0
-        for t in targets:
-            if not t.get("room_code"):
-                continue
-            self._remaining += 1
-            disc = RoomDiscovery(self)
-            code = t.get("room_code")
-            ip = t.get("ip", "")
-            # 定向探测：verify room_code 在该 IP 上是否存在（广播会互相干扰，定向可隔离）
-            disc.discover_room_at(ip, code, timeout=self.PROBE_TIMEOUT)
-
-            def on_found(f_ip, f_code, port, version, code=code, ip=ip, disc=disc):
-                self._emit_if_done(code, ip, True, disc)
-
-            def on_finished(rooms, code=code, ip=ip, disc=disc):
-                # 定向探测：只有目标 IP 会响应，收到即视为可达；无响应则不可达
-                hit = any(r.get("ip") == ip and r.get("room_code") == code for r in rooms)
-                self._emit_if_done(code, ip, hit, disc)
-
-            disc.room_found.connect(on_found)
-            disc.discovery_finished.connect(on_finished)
-            self._discoveries.append(disc)
-
-        if self._remaining == 0:
-            self.finished.emit()
-
-    def _emit_if_done(self, room_code, ip, reachable, disc):
-        """对每个 target 只结算一次，防止 found/finished 重复触发"""
-        key = (room_code, ip)
-        if key in self._done:
-            return
-        self._done.add(key)
-        disc.stop_discovery()
-        self.probed.emit(ip, room_code, reachable)
-        self._remaining -= 1
-        if self._remaining <= 0:
-            self.finished.emit()
-
-    def stop_probing(self):
-        """停止所有探测（清理发现服务）"""
-        for disc in self._discoveries:
-            try:
-                disc.stop_discovery()
-            except Exception:
-                pass
-        self._discoveries.clear()
 
 
 class RoomResponder(QObject):
