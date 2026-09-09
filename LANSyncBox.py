@@ -63,9 +63,8 @@ def _setup_single_instance(window):
                 data = bytes(conn.readAll())
                 conn.disconnectFromServer()
                 if data == b"show":
-                    window.showNormal()  # 若最小化则还原
-                    window.raise_()
-                    window.activateWindow()
+                    # 唤起当前可见的活动窗口（同步界面优先，避免空白主窗口再次呼出）
+                    window.activate_visible_window()
         server.newConnection.connect(_on_new_connection)
         return server
 

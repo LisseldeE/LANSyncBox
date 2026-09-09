@@ -351,11 +351,6 @@ class JoinRoomDialog(QDialog):
         self._is_verifying = False  # 是否正在验证密码
         self._verify_loop = None  # 验证中的事件循环（用于输入变化时中途取消验证）
         self._verify_timer = None  # 验证中的超时定时器（取消验证时一并停止）
-        # IP 输入防抖定时器：输入停顿一段时间后才定向探测，避免逐字触发探测导致实例/线程堆积
-        self._ip_probe_timer = QTimer(self)
-        self._ip_probe_timer.setSingleShot(True)
-        self._ip_probe_timer.setInterval(900)
-        self._ip_probe_timer.timeout.connect(self._check_room_exists)
         self._verified_client = None  # 预验证成功的 Client 实例（传递给 SyncWindow 复用）
         self._is_scanning = False  # 是否正在扫描所有房间
         self._scan_discovery = None  # 扫描发现服务
@@ -380,9 +375,6 @@ class JoinRoomDialog(QDialog):
 
     def _cleanup_background(self):
         """对话框关闭时清理后台活动：停止所有探测/扫描服务"""
-        # 停止房间号/IP 输入的防抖探测定时器
-        if hasattr(self, '_ip_probe_timer'):
-            self._ip_probe_timer.stop()
         # 停止房间发现服务（手动/扫描共用 self.discovery 会在各自结束点清理，此处兜底）
         for probe in (getattr(self, 'discovery', None), getattr(self, '_scan_discovery', None)):
             if probe is not None:
@@ -689,12 +681,22 @@ class JoinRoomDialog(QDialog):
         self._cancel_checking()
         self._room_checked = False
         self.connect_btn.setEnabled(False)
-        # 房间号已填满且 IP 形如地址（含小数点）时：启动/重置防抖定时器，输入停顿约 900ms 后才定向探测
+        # 房间号已填满且 IP 形如地址（含小数点）：立即定向重新探测，无防抖延迟。
+        # 探测取消/线程回收已健硕（取消即回收线程+定时器，回调用 seq 失效），逐字触发不会堆积。
         if self.room_code_input.is_complete() and '.' in text:
-            self._ip_probe_timer.start()
-        else:
-            # 房间号不完整或 IP 尚不像地址：停止防抖探测，避免中途触发
-            self._ip_probe_timer.stop()
+            self._check_room_exists()
+
+    def _schedule_host_probe(self):
+        """中断旧探测并针对『当前房间号 + 当前 IP』立即重新定向探测
+
+        用于点击列表项填充（发现/历史）后显式触发——host 文本可能因切换到
+        同 IP 的另一房间号而不变化，此时 textChanged 不会激活探测，必须显式调用。
+        """
+        self._cancel_checking()    # 中断在途的旧扫描/探测（回收线程与定时器）
+        self._room_checked = False
+        self.connect_btn.setEnabled(False)  # 探测确认存在前保持禁用
+        # 立即定向探测（无防抖延迟）；房间号不完整时 _check_room_exists 会静默复位
+        self._check_room_exists()
 
     def _on_room_code_input_changed(self):
         """房间号输入变化时更新连接按钮状态，并清除"已找到"等历史状态"""
@@ -705,7 +707,6 @@ class JoinRoomDialog(QDialog):
             # 房间号不完整：立即取消正在进行的探测（stop + 使旧回调失效），
             # 后台扫描逻辑到此停止，等待用户输满新房间号
             self._cancel_checking()
-            self._ip_probe_timer.stop()
             self._room_checked = False
             # 界面回到"等待输入"默认状态
             self._show_status(I18n.tr('ready_waiting'), color='#868e96')
@@ -1195,9 +1196,9 @@ class JoinRoomDialog(QDialog):
         self.host_address = room_info['ip']  # 同时设置 host_address，确保连接时使用正确地址
         # 将扫描到的 IP 填入地址框，使后续探测走定向探测（确认该 IP 上房间仍在线）
         self.host_edit.setText(room_info['ip'])
-        # 探测确认存在前保持连接按钮禁用（setText 触发 textChanged，由 _on_host_edit_text_changed 调度定向探测）
-        self.connect_btn.setEnabled(False)
-        self._room_checked = False
+        # 显式中断旧扫描并针对『新房间号 + IP』重新定向探测
+        # ——切换同 IP 的不同房间号时 host 文本不变，textChanged 不会触发，必须显式重扫
+        self._schedule_host_probe()
 
     def _update_matching_room_style(self):
         """更新列表项样式：匹配当前输入的房间号时灰色不可点击"""
@@ -1212,6 +1213,9 @@ class JoinRoomDialog(QDialog):
             if room_info and widget is not None:
                 # 扫描行：使用 RoomRowWidget 置灰/恢复
                 widget.set_matched(room_info['room_code'] == current_code)
+            elif widget is not None:
+                # 历史行：无 data(room_info)，按行的房间号匹配当前输入置灰/恢复
+                widget.set_matched(widget.room_code == current_code)
             elif room_info:
                 # 默认渲染的扫描行（兼容旧路径）
                 if room_info['room_code'] == current_code:
@@ -1282,26 +1286,21 @@ class JoinRoomDialog(QDialog):
         return {'item': item, 'widget': widget, 'room_code': room_code, 'ip': ip}
 
     def _on_history_clicked(self, room_code: str, ip: str):
-        """点击历史行：填充房间号+IP，触发原有房间号自动检测，并从列表移除该行（不从 config 移除）"""
-        # 填充房间号（不触发检测，避免与下方检测重复）
+        """点击历史行：填充房间号+IP，触发定向探测确认
+
+        与扫描发现的房间一致：保留该行，仅置灰选中（匹配态），
+        方便来回切换其他历史/发现项。删除历史需点行右侧『×』。
+        """
+        # 填充房间号（不触发房间号检测，避免与下方探测重复）
         self.room_code_input.set_room_code(room_code, trigger_check=False)
         # 填充主机地址
         self.host_edit.setText(ip)
         self.host_address = ip
         self.discovered_host = ip
         self.host_port = Config.DEFAULT_PORT
-        # 探测确认存在前保持连接按钮禁用（setText 触发 textChanged，由 _on_host_edit_text_changed 调度定向探测）
-        self.connect_btn.setEnabled(False)
-        self._room_checked = False
-        # 从历史列表移除该行（仅显示，保留 config 历史记录）
-        for row in list(self._history_items):
-            if row.get('room_code') == room_code and row.get('ip') == ip:
-                item = row.get('item')
-                if item is not None and self.rooms_list_widget.row(item) >= 0:
-                    self.rooms_list_widget.takeItem(self.rooms_list_widget.row(item))
-                if row in self._history_items:
-                    self._history_items.remove(row)
-                break
+        # 显式中断旧扫描并针对『新房间号 + IP』立即重新定向探测
+        # ——切换同 IP 的不同历史房间时 host 文本不变，textChanged 不会触发，必须显式重扫
+        self._schedule_host_probe()
 
     def _on_history_remove(self, room_code: str, ip: str):
         """删除一条历史记录"""

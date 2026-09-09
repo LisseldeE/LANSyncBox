@@ -385,3 +385,23 @@ class MainWindow(QMainWindow):
 
         # 显示主窗口
         self.show()
+
+    def activate_visible_window(self):
+        """将当前真正可见的活动窗口唤起（同步界面优先，否则主窗口）。
+
+        单实例唤出用：同步界面打开时主窗口已隐藏，若只唤起主窗口会在
+        同步界面之上再次呼出空白主窗口，故须优先唤起同步窗口。
+        """
+        sync = self._sync_window
+        if sync is not None:
+            try:
+                if sync.isVisible():
+                    sync.showNormal()  # 若最小化则还原
+                    sync.raise_()
+                    sync.activateWindow()
+                    return
+            except RuntimeError:
+                pass  # 同步窗口的 C++ 对象已销毁
+        self.showNormal()  # 若最小化则还原
+        self.raise_()
+        self.activateWindow()

@@ -764,7 +764,8 @@ class SyncServer(QObject):
                                 return
                             
                             # 发送文件给客户端（传递 stop_event 以支持中途取消）
-                            self._send_file_to_client(client_id_arg, filename_arg, file_path_arg, stop_event)
+                            # 用带目标IP的转发路径：进度条按 ip:filename 分隔，避免与广播批次共享 filename 键而重叠
+                            self._send_file_to_client_with_target(client_id_arg, filename_arg, file_path_arg, stop_event)
                         except Exception as e:
                             self.log_message.emit(f"发送文件失败: {e}")
                     
@@ -918,7 +919,7 @@ class SyncServer(QObject):
                 try:
                     if stop_event.is_set():
                         return
-                    self._send_file_to_client(client_id_arg, filename_arg, file_path_arg, stop_event)
+                    self._send_file_to_client_with_target(client_id_arg, filename_arg, file_path_arg, stop_event)
                 except Exception as e:
                     self.log_message.emit(f"发送文件失败: {e}")
 
