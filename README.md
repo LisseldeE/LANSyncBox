@@ -61,3 +61,9 @@ Pro版本将会保持**开源**状态，不会转为收费模式。由于Pro版�
 **Beta 测试中，如有问题或新的创意欢迎和我联系！**
 
 欢迎提交 Issue 和 Pull Request！
+
+## 支持我
+
+如果你觉得这个工具还不错，欢迎在爱发电上打赏支持我继续开发，非常感谢你的心意！
+
+- **[爱发电主页](https://ifdian.net/a/lisseldee)** : [https://ifdian.net/a/lisseldee](https://ifdian.net/a/lisseldee)

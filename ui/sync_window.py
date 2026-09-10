@@ -58,8 +58,6 @@ class SyncWindow(QMainWindow):
 
         # 顶部拖拽放置区（快捷添加文件）：仅在房间连接就绪后创建
         self._drop_zone = None
-        self._drag_detector = None   # Win32 全局拖拽会话检测器
-        self._drag_loop = None       # 轮询钩子状态、驱动放置条滑入/滑出的定时器
         
         # 传输进度跟踪
         self._transfer_rows = {}  # 文件名 -> 行号映射
@@ -381,9 +379,12 @@ class SyncWindow(QMainWindow):
                 self._add_record(f"服务器 端口: {self.server.port}", "启动", "")
                 # 更新发现服务的同步端口
                 self.responder.port = self.server.port
+                # 先创建顶部拖拽放置区：不依赖下方 provider/monitor 是否成功
+                self._init_drop_zone()
                 # 房间就绪：开启局域网剪切板分发 + 启动本端目录服务（复制端 serve 用）
                 self._start_provider()
                 self._monitor.set_enabled(True)
+                self._update_sync_btn_state()
             else:
                 self._add_record("启动失败", "错误", "")
                 self.responder.stop()
@@ -935,29 +936,22 @@ class SyncWindow(QMainWindow):
         self._init_drop_zone()
 
     def _init_drop_zone(self):
-        """创建顶部快捷放置条与全局拖拽检测器，启用桌面任意位置拖入文件。
+        """创建屏顶放置条，启用「把文件/文件夹拖到屏幕顶部」快捷添加。
 
-        放置条本身是独立置顶、非穿透的 OLE drop-target；是否弹条由全局低级鼠标钩子
-        （DragDetector）轮询驱动，添加的文件交给当前列表（根目录即房间目录）。
+        放置条是独立置顶的 OLE drop-target：用户把文件拖到屏幕顶部时，系统派发
+        dragEnterEvent，放置条随即展开 visible 胶囊；在胶囊上松手即加入同步列表
+        （根目录即房间目录）。不依赖任何全局钩子。
         """
         if self._drop_zone is not None:
             return
         from ui.drop_zone import DropZone
-        from ui.drag_detector import DragDetector
         self._drop_zone = DropZone(add_callback=self.file_list.add_files)
+        # 同步窗口最小化时，由放置胶囊承接替换确认/复制进度/完成动画
+        self.file_list.set_drop_zone(self._drop_zone)
         # 胶囊若已集成（或测试中注入），传入以便放置条避让悬浮胶囊
         capsule = getattr(self, "_capsule", None)
         self._drop_zone.set_capsule(capsule)
         self._drop_zone.show()
-
-        # 全局拖拽会话检测器 + 轮询驱动
-        self._drag_detector = DragDetector()
-        self._drag_detector.start()
-        from PySide6.QtCore import QTimer
-        self._drag_loop = QTimer(self)
-        self._drag_loop.setInterval(30)
-        self._drag_loop.timeout.connect(lambda: self._drop_zone.pump(self._drag_detector))
-        self._drag_loop.start()
 
     def _perform_full_sync(self):
         """连接端执行一次全量差异同步：上报本地文件列表给主机端仲裁
@@ -2053,16 +2047,11 @@ class SyncWindow(QMainWindow):
         if self.responder:
             self.responder.stop()
 
-        # 关闭顶部快捷放置区：停轮询定时器、卸载全局钩子、关闭放置条，避免残留
-        if self._drag_loop is not None:
-            self._drag_loop.stop()
-            self._drag_loop = None
-        if self._drag_detector is not None:
-            self._drag_detector.finish()
-            self._drag_detector = None
+        # 关闭顶部快捷放置区，避免残留
         if self._drop_zone is not None:
             self._drop_zone.close()
             self._drop_zone = None
+            self.file_list.set_drop_zone(None)
 
         # 清理缓存（如果开关开启）
         if self.clean_cache_switch.isChecked():

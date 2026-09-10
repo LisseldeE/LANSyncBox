@@ -62,3 +62,9 @@ This project does not collect any user data, see [Privacy Policy](https://github
 **In Beta testing — if you have any questions or new ideas, feel free to contact me!**
 
 Issues and Pull Requests are welcome!
+
+## Support Me
+
+If you find this tool useful, feel free to tip me on **ifdian (爱发电)** to support further development. Thank you so much for your kindness!
+
+- **[ifdian Homepage](https://ifdian.net/a/lisseldee)** : [https://ifdian.net/a/lisseldee](https://ifdian.net/a/lisseldee)

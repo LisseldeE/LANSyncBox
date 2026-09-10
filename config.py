@@ -14,8 +14,8 @@ class Config:
 
     # 应用信息
     APP_NAME = "LANSyncBox Pro"
-    APP_VERSION = "R7.1.6.0"
-    APP_SERIAL = "26.9WH"
+    APP_VERSION = "R1.0.0.0"
+    APP_SERIAL = "P269.WH"
     APP_SERIAL_FULL = ".".join(x for x in (APP_NAME, APP_VERSION, APP_SERIAL) if x)
     APP_VERSION_SERIAL = ".".join(x for x in (APP_VERSION, APP_SERIAL) if x)
     APP_AUTHOR = "Lisselde_E"

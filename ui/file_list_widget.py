@@ -584,9 +584,27 @@ class FileListWidget(QWidget):
         
         # 取消传输回调（由 SyncWindow 设置，直接调用避免 Qt 信号异步性问题）
         self._cancel_transfer_callback = None
-        
+
+        # 屏顶放置条（DropZone）。同步窗口最小化时，替换确认/复制进度/完成动画
+        # 由放置胶囊承接，替代本窗口内的确认弹窗与进度对话框。
+        self._drop_zone = None
+        self._capsule_pending = None       # 待确认的 (file_paths, target_dir)
+        self._capsule_current_name = ""    # 胶囊进度状态下的当前文件名
+        self._capsule_copying = False      # 胶囊复制进行中（防重复启动）
+
         self.init_ui()
         self.load_files()
+
+    def set_drop_zone(self, dz):
+        """绑定屏顶放置条。同步窗口最小化时把替换确认/复制进度路由到放置胶囊。"""
+        if self._drop_zone is not None:
+            try:
+                self._drop_zone.confirm_clicked.disconnect(self._on_capsule_confirm)
+            except Exception:
+                pass
+        self._drop_zone = dz
+        if dz is not None:
+            dz.confirm_clicked.connect(self._on_capsule_confirm)
     
     def set_cancel_transfer_callback(self, callback):
         """设置取消传输回调函数
@@ -1989,10 +2007,13 @@ class FileListWidget(QWidget):
         # 刷新文件列表
         self.load_files()
     
-    def add_files(self, file_paths: List[str], target_dir: Path = None):
-        """添加文件到指定目录"""
-        from ui.progress_dialog import CopyProgressDialog
-        
+    def add_files(self, file_paths: List[str], target_dir: Path = None) -> bool:
+        """添加文件到指定目录。
+
+        返回值供屏顶放置条使用：返回 True 表示当前流程接管在放置胶囊中进行
+        （替换确认/复制进度/完成动画持续展开），放置条不随即收起；
+        否则（对话框流程或未启用胶囊）返回 False，放置条正常收起。
+        """
         # 如果没有指定目标目录，使用当前目录
         if target_dir is None:
             target_dir = self.current_path
@@ -2007,6 +2028,17 @@ class FileListWidget(QWidget):
             dst = target_dir / src.name
             if dst.exists():
                 existing_files.append(src.name)
+        
+        # 同步窗口最小化时，由放置胶囊承接替换确认与复制进度
+        if self.window().isMinimized() and self._drop_zone is not None:
+            return self._add_files_capsule(file_paths, target_dir, existing_files)
+
+        return self._add_files_with_dialog(file_paths, target_dir, existing_files)
+
+    def _add_files_with_dialog(self, file_paths: List[str], target_dir: Path,
+                               existing_files: List[str]) -> bool:
+        """窗口可见时的添加流程：确认弹窗 + 进度对话框。"""
+        from ui.progress_dialog import CopyProgressDialog
         
         # 如果有文件已存在，显示确认对话框
         if existing_files:
@@ -2035,7 +2067,7 @@ class FileListWidget(QWidget):
             msg_box.exec()
             
             if msg_box.clickedButton() != ok_btn:
-                return
+                return False
         
         # 创建进度对话框
         progress_dialog = CopyProgressDialog(self)
@@ -2070,6 +2102,84 @@ class FileListWidget(QWidget):
 
         # 启动工作线程
         self._copy_worker.start()
+        return False
+
+    # ============================ 胶囊添加流程（窗口最小化时） ============================
+    def _add_files_capsule(self, file_paths: List[str], target_dir: Path,
+                           existing_files: List[str]) -> bool:
+        """同步窗口最小化时用放置胶囊承接添加文件：替换确认 → 复制进度 → 完成收起。"""
+        dz = self._drop_zone
+        # 有同名文件：先在胶囊弹出替换确认，等待确定/取消
+        if existing_files:
+            self._capsule_pending = (list(file_paths), target_dir)
+            dz.begin_confirm_replace(existing_files)
+            return True  # 保持胶囊展开，等待用户抉择
+        # 无冲突：直接进入胶囊复制
+        self._start_capsule_copy(list(file_paths), target_dir)
+        return True
+
+    def _on_capsule_confirm(self, accepted: bool):
+        """放置胶囊「确定/取消」回调。确定→开始复制；取消→收起胶囊不执行。"""
+        pending = self._capsule_pending
+        self._capsule_pending = None
+        dz = self._drop_zone
+        if dz is None:
+            return
+        if not accepted:
+            dz.dismiss()  # 取消替换：收起，不执行复制
+            return
+        if pending:
+            paths, target = pending
+            self._start_capsule_copy(paths, target)
+
+    def _start_capsule_copy(self, file_paths: List[str], target_dir: Path):
+        """在放置胶囊中运行 FileCopyWorker：文件开始→进度→全部完成→对勾动画→收起。"""
+        dz = self._drop_zone
+        # 条件不再是胶囊（如窗口已恢复/放置条被关闭）：回退到对话框流程
+        if dz is None or not self.window().isMinimized() or self._capsule_copying:
+            if dz is None or not self.window().isMinimized():
+                return self._add_files_with_dialog(file_paths, target_dir, [])
+            return
+        self._capsule_copying = True
+        self._capsule_current_name = ""
+
+        self._copy_worker = FileCopyWorker(file_paths, target_dir)
+        self._copy_worker.file_started.connect(self._on_capsule_file_started)
+        self._copy_worker.progress_updated.connect(self._on_capsule_progress)
+        self._copy_worker.file_finished.connect(lambda path: self._on_file_copied(path))
+        self._copy_worker.all_finished.connect(self._on_capsule_copy_finished)
+        self._copy_worker.error_occurred.connect(self._on_capsule_copy_error)
+        self._copy_worker.cancelled.connect(self._on_capsule_copy_cancelled)
+        self._copy_worker.start()
+
+    def _on_capsule_file_started(self, name: str):
+        self._capsule_current_name = name
+        if self._drop_zone is not None:
+            self._drop_zone.begin_progress(name, 0)
+
+    def _on_capsule_progress(self, idx: int, progress: int, total: int):
+        if self._drop_zone is not None:
+            self._drop_zone.update_progress(self._capsule_current_name, progress)
+
+    def _on_capsule_copy_finished(self):
+        self._capsule_copying = False
+        self.load_files()
+        if self._drop_zone is not None:
+            # 完成对勾动画，结束后放置条自动收起（done_finished→_collapse）
+            self._drop_zone.finish_done()
+
+    def _on_capsule_copy_cancelled(self):
+        self._capsule_copying = False
+        self.load_files()
+        if self._drop_zone is not None:
+            self._drop_zone.dismiss()
+
+    def _on_capsule_copy_error(self, message: str):
+        self._capsule_copying = False
+        self.load_files()
+        if self._drop_zone is not None:
+            self._drop_zone.dismiss()
+        self._show_error(message)
 
     def _on_file_copied(self, file_path: str):
         """文件复制完成回调"""
