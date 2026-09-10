@@ -1,0 +1,2144 @@
+"""
+文件列表组件
+支持拖拽、右键菜单、文件操作
+所有同步信号由 UI 操作触发，不使用文件监听
+Copyright (c) 2026 Lisselde_E <Lisselde.E@outlook.com>.
+Licensed under the GNU General Public License v3.0.
+"""
+import os
+import threading
+import shutil
+from pathlib import Path
+from typing import List, Optional, Set
+from datetime import datetime
+
+from PySide6.QtWidgets import (
+    QWidget, QVBoxLayout, QHBoxLayout, QTableWidget, 
+    QTableWidgetItem, QHeaderView, QMenu, QMessageBox, 
+    QFileDialog, QAbstractItemView, QLabel, QPushButton,
+    QRubberBand, QGraphicsOpacityEffect
+)
+from PySide6.QtCore import (Qt, Signal, QMimeData, QUrl, QPoint, QThread,
+                            QMetaObject, Q_ARG, QRect, QItemSelection,
+                            QItemSelectionModel, QTimer, QPropertyAnimation,
+                            QSequentialAnimationGroup, QEasingCurve)
+from PySide6.QtGui import QAction, QIcon, QDrag, QDropEvent, QDragEnterEvent, QDragMoveEvent, QCursor, QColor, QDesktopServices
+from PySide6.QtWidgets import QApplication
+
+from i18n import I18n
+from config import Config
+from ui.widgets import BUTTON_STYLES, UnderlineEdit
+
+
+class WarnSyncButton(QPushButton):
+    """手动同步按钮：可点击时鼠标悬浮，边框与文字变红（红色仅作人类警示，不拦截点击）。
+
+    - 常态不加任何 QSS，保持原生按钮外观。
+    - 仅"可点击（enabled）"且鼠标悬浮时才临时套红色警示样式，移开立即恢复原生。
+    - 禁用态（灰色）不派发鼠标悬浮事件，天然不触发红色，维持现状。
+    """
+    # 圆角与全应用按钮(6px)一致；不设背景色则 Qt 用调色板 Button 角色绘制并随主题自适应，
+    # 红色边框沿按钮自身圆角裁剪，避免丢失原生圆角变成方形外圈。
+    _HOVER_QSS = "QPushButton { border: 1px solid #d93025; border-radius: 6px; color: #d93025; }"
+
+    def enterEvent(self, event):
+        if self.isEnabled():
+            self.setStyleSheet(self._HOVER_QSS)
+        super().enterEvent(event)
+
+    def leaveEvent(self, event):
+        self.setStyleSheet("")
+        super().leaveEvent(event)
+
+
+class DragableTableWidget(QTableWidget):
+    """支持拖拽和框选的表格控件"""
+
+    files_dragged = Signal(list, str, bool)  # 文件拖拽信号（文件列表，目标路径，是否内部拖拽）
+    empty_area_double_clicked = Signal()  # 空白区域双击信号（用于触发添加文件）
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        # 不启用默认的拖拽功能，我们手动控制
+        self.setDragEnabled(False)
+        self.setAcceptDrops(True)
+        self.setSelectionMode(QAbstractItemView.ExtendedSelection)
+        self.setSelectionBehavior(QAbstractItemView.SelectRows)
+        
+        # 记录拖拽的文件，用于判断是否是拖拽到外部
+        self._drag_files = []
+        
+        # 记录鼠标按下时的状态，用于区分框选和拖拽
+        self._mouse_press_pos = None
+        self._mouse_press_item = None
+        self._is_dragging = False
+        self._is_rubber_band_selecting = False  # 是否正在框选
+        
+        # 框选橡皮筋（设置在 viewport 上）
+        self._rubber_band = QRubberBand(QRubberBand.Rectangle, self.viewport())
+        self._rubber_band_origin = None  # 框选起点（viewport 坐标）
+        
+        # 框选时的初始选中状态（用于 Ctrl+框选）
+        self._initial_selected_rows = set()
+        
+        # 记录按下时项目是否已被选中（用于 mouseMoveEvent 的正确判断）
+        self._was_press_on_selected = False
+
+        # 拖拽目标指示（区别于点击选中的淡灰整行焦点，用半透明蓝高亮 + "放入 XX" 提示）
+        # 高亮块盖在目标文件夹行上，提示标签跟随在其上方，两者都用 viewport 坐标系
+        self._drop_highlight = QLabel(self.viewport())
+        self._drop_highlight.setAttribute(Qt.WA_TransparentForMouseEvents)
+        self._drop_highlight.hide()
+        self._drop_hint = QLabel(self.viewport())
+        self._drop_hint.setAttribute(Qt.WA_TransparentForMouseEvents)
+        self._drop_hint.hide()
+
+        # 主题适配：点击选中是淡灰整行，拖拽高亮用更柔和的浅灰以作区分但不刺眼；
+        # "放入 XX"提示用低饱和蓝色系（蓝色文字、淡底），避免亮蓝高亮
+        win = self.palette().color(self.palette().ColorRole.Window)
+        luminance = 0.299 * win.red() + 0.587 * win.green() + 0.114 * win.blue()
+        if luminance > 128:
+            hl_color = "rgba(148, 151, 158, 0.30)"     # 浅色主题拖拽高亮（浅灰）
+            hint_bg, hint_fg = "#e3edfb", "#1a56a0"    # 淡蓝底 + 蓝色文字
+        else:
+            hl_color = "rgba(120, 124, 134, 0.38)"     # 深色主题拖拽高亮（稍亮的灰）
+            hint_bg, hint_fg = "#1f3a5f", "#a8c7ee"    # 深蓝底 + 浅蓝文字
+        self._drop_highlight.setStyleSheet(f"background-color: {hl_color};")
+        self._drop_hint.setStyleSheet(
+            f"background-color: {hint_bg}; color: {hint_fg}; "
+            "border-radius: 6px; padding: 3px 8px; font-size: 11px;"
+        )
+
+        # 当前拖拽悬停的目标行（-1 表示不落在文件夹行上）
+        self._drop_target_row = -1
+    
+    def mousePressEvent(self, event):
+        """鼠标按下事件"""
+        if event.button() == Qt.LeftButton:
+            self._mouse_press_pos = event.pos()
+            self._mouse_press_item = self.itemAt(event.pos())
+            self._is_dragging = False
+            self._is_rubber_band_selecting = False
+
+            # 记录当前选中状态（用于 Ctrl+框选时保留原有选择）
+            self._initial_selected_rows = set()
+            for row in range(self.rowCount()):
+                if self.selectionModel().isRowSelected(row, self.rootIndex()):
+                    self._initial_selected_rows.add(row)
+
+            # 记录按下时项目是否已被选中（在 super().mousePressEvent 改变选中状态之前）
+            # 后续 mouseMoveEvent 中使用此记录而非实时查询，避免 super 调用改变选中后的误判
+            self._was_press_on_selected = self._mouse_press_item is not None and self._mouse_press_item.isSelected()
+
+            # 如果按下在空白区域，开始框选
+            if self._mouse_press_item is None:
+                # 清除原有选择（除非按住 Ctrl）
+                if not (event.modifiers() & Qt.ControlModifier):
+                    self.clearSelection()
+                self._start_rubber_band(event.pos())
+                return
+
+            # 如果按下在已选中的项目上，不调用父类的 mousePressEvent
+            # 这样可以保持多选状态，避免变成单选
+            if self._mouse_press_item.isSelected():
+                return
+
+        super().mousePressEvent(event)
+    
+    def mouseMoveEvent(self, event):
+        """鼠标移动事件"""
+        if event.buttons() & Qt.LeftButton and self._mouse_press_pos:
+            # 计算移动距离
+            distance = (event.pos() - self._mouse_press_pos).manhattanLength()
+            
+            # 如果移动距离超过阈值
+            if distance > 10 and not self._is_dragging and not self._is_rubber_band_selecting:
+                # 使用按下时记录的选中状态，而非实时查询
+                # 避免 super().mousePressEvent 改变选中状态后导致误判（点击未选中项后拖拽应框选而非拖拽）
+                if self._mouse_press_item and self._was_press_on_selected:
+                    # 开始拖拽
+                    self._is_dragging = True
+                    self._start_drag()
+                    return
+                else:
+                    # 开始框选（按下在未选中项目上或空白区域）
+                    self._start_rubber_band(self._mouse_press_pos)
+            
+            # 如果正在框选，更新选择框
+            if self._is_rubber_band_selecting:
+                self._update_rubber_band(event.pos())
+                return
+            
+            # 左键按下且有 press_pos 记录时，不调用父类 mouseMoveEvent
+            # 避免 Qt 默认的 ExtendedSelection 拖拽选择行为（从当前项到鼠标位置选范围）
+            # 提前污染选中状态，导致后续自定义拖拽/框选拿到错误的选中数据
+            return
+        
+        # 否则调用父类的鼠标移动事件（非左键或未有 press 记录的情况）
+        super().mouseMoveEvent(event)
+    
+    def mouseReleaseEvent(self, event):
+        """鼠标释放事件"""
+        # 如果正在框选，完成框选
+        if self._is_rubber_band_selecting:
+            self._finish_rubber_band()
+        
+        self._mouse_press_pos = None
+        self._mouse_press_item = None
+        self._is_dragging = False
+        self._is_rubber_band_selecting = False
+        self._initial_selected_rows = set()
+        self._was_press_on_selected = False
+        
+        super().mouseReleaseEvent(event)
+    
+    def _start_rubber_band(self, pos):
+        """开始框选
+
+        Args:
+            pos: viewport 坐标系的鼠标位置（event.pos() 在 QTableWidget 中已经是 viewport 坐标）
+        """
+        self._is_rubber_band_selecting = True
+        self._rubber_band_origin = pos
+        self._rubber_band.setGeometry(QRect(pos, pos))
+        self._rubber_band.show()
+    
+    def _update_rubber_band(self, pos):
+        """更新框选区域
+
+        Args:
+            pos: viewport 坐标系的鼠标位置
+        """
+        if self._rubber_band_origin:
+            rect = QRect(self._rubber_band_origin, pos).normalized()
+            self._rubber_band.setGeometry(rect)
+            self._select_rows_in_rubber_band(rect)
+    
+    def _finish_rubber_band(self):
+        """完成框选"""
+        self._rubber_band.hide()
+        self._rubber_band_origin = None
+    
+    def _select_rows_in_rubber_band(self, rect):
+        """选择框选区域内的行
+
+        Args:
+            rect: viewport 坐标系的框选区域
+        """
+        selected_rows = set()
+        
+        for row in range(self.rowCount()):
+            # rowViewportPosition 返回 viewport 坐标系的 y 坐标
+            row_y = self.rowViewportPosition(row)
+            row_height = self.rowHeight(row)
+            
+            # 构建行的 rect（viewport 坐标系）
+            row_rect = QRect(0, row_y, self.viewport().width(), row_height)
+            
+            # 如果框选区域与该行有交集，则选中该行
+            if rect.intersects(row_rect):
+                selected_rows.add(row)
+        
+        # 应用选择（考虑 Ctrl 键）
+        modifiers = QApplication.keyboardModifiers()
+        
+        # 使用 QItemSelection 一次性选择多行
+        selection = QItemSelection()
+        
+        # 如果按住 Ctrl，先添加原有选择的行
+        if modifiers & Qt.ControlModifier:
+            for row in self._initial_selected_rows:
+                if row not in selected_rows:  # 避免重复
+                    index = self.model().index(row, 0)
+                    selection.select(index, index)
+        
+        # 添加框选的行
+        for row in selected_rows:
+            top_left = self.model().index(row, 0)
+            bottom_right = self.model().index(row, self.columnCount() - 1)
+            selection.select(top_left, bottom_right)
+        
+        # 清除所有选择，然后应用新的选择
+        self.selectionModel().clearSelection()
+        self.selectionModel().select(selection, QItemSelectionModel.Select | QItemSelectionModel.Rows)
+
+    def mouseDoubleClickEvent(self, event):
+        """鼠标双击事件
+
+        双击空白区域（无单元格）时发射 empty_area_double_clicked 信号，
+        用于触发"添加文件"操作；双击单元格时交给父类处理（触发 cellDoubleClicked）。
+        """
+        if event.button() == Qt.LeftButton:
+            # itemAt 返回 None 表示双击在空白区域
+            if self.itemAt(event.pos()) is None:
+                self.empty_area_double_clicked.emit()
+                return
+        super().mouseDoubleClickEvent(event)
+
+    def _start_drag(self):
+        """开始拖拽"""
+        # 获取选中的文件
+        files = []
+        for item in self.selectedItems():
+            if item.column() == 0:  # 只处理文件名列
+                path = item.data(Qt.UserRole)
+                if path:
+                    files.append(path)
+        
+        if not files:
+            return
+        
+        # 记录拖拽的文件
+        self._drag_files = files
+        
+        # 创建拖拽对象
+        drag = QDrag(self)
+        mime_data = QMimeData()
+        
+        # 设置文件URL
+        urls = [QUrl.fromLocalFile(str(f)) for f in files]
+        mime_data.setUrls(urls)
+        drag.setMimeData(mime_data)
+        
+        # 执行拖拽（只支持复制操作）
+        drag.exec(Qt.CopyAction)
+        
+        # 清空记录
+        self._drag_files = []
+    
+    def dragEnterEvent(self, event):
+        """拖拽进入事件"""
+        if event.mimeData().hasUrls():
+            self._update_drop_indicator(event.pos())
+            event.acceptProposedAction()
+        else:
+            event.ignore()
+    
+    def dragMoveEvent(self, event):
+        """拖拽移动事件"""
+        if event.mimeData().hasUrls():
+            # 实时更新目标行高亮与提示
+            self._update_drop_indicator(event.pos())
+            event.acceptProposedAction()
+        else:
+            event.ignore()
+    
+    def dragLeaveEvent(self, event):
+        """拖拽离开事件"""
+        self._clear_drop_indicator()
+        event.accept()
+    
+    def dropEvent(self, event):
+        """拖拽放下事件"""
+        if event.mimeData().hasUrls():
+            # 先清理指示，再执行放下逻辑
+            self._clear_drop_indicator()
+            # 获取拖拽的文件
+            urls = event.mimeData().urls()
+            files = [url.toLocalFile() for url in urls]
+            
+            # 获取目标位置
+            target_path = self._get_drop_target(event.pos())
+            
+            # 检查是否是内部拖拽
+            is_internal = event.source() == self
+            
+            # 发送信号，让父控件处理
+            self.files_dragged.emit(files, target_path, is_internal)
+            event.acceptProposedAction()
+        else:
+            event.ignore()
+    
+    def _update_drop_indicator(self, pos):
+        """根据鼠标位置更新拖拽目标指示（蓝高亮 + "放入 XX" 提示）
+
+        悬停文件夹行 -> 高亮该行并提示放入该文件夹；否则提示放入当前目录（不高亮行，
+        因为内部拖拽是"移动进文件夹"，而非重排顺序，插入线会误导）。
+        """
+        item = self.itemAt(pos)
+        target_row = -1
+        hint_text = ""
+
+        if item:
+            path_item = self.item(item.row(), 0)
+            path = path_item.data(Qt.UserRole) if path_item else None
+            try:
+                is_dir = bool(path) and Path(path).is_dir()
+            except Exception:
+                is_dir = False
+            if is_dir:
+                target_row = item.row()
+                hint_text = f"放入 {Path(path).name}"
+            else:
+                # 悬停在文件行上：目标仍是当前目录
+                hint_text = "放入当前目录"
+        else:
+            # 空白区域：目标为当前目录
+            hint_text = "放入当前目录"
+
+        if target_row >= 0:
+            # 更新高亮块，使其覆盖目标文件夹整行
+            row_y = self.rowViewportPosition(target_row)
+            row_h = self.rowHeight(target_row)
+            self._drop_highlight.setGeometry(QRect(0, row_y, self.viewport().width(), row_h))
+            self._drop_highlight.show()
+            self._drop_highlight.raise_()
+            self._drop_target_row = target_row
+        else:
+            # 非文件夹目标，隐藏行高亮
+            self._drop_highlight.hide()
+            self._drop_target_row = -1
+
+        # 更新提示标签（悬停文件夹时显示在其上方，否则固定在列表顶部）
+        self._drop_hint.setText(hint_text)
+        self._drop_hint.adjustSize()
+        if target_row >= 0:
+            hint_y = max(0, row_y - self._drop_hint.height() - 4)
+        else:
+            hint_y = 0
+        self._drop_hint.move(12, hint_y)
+        self._drop_hint.show()
+        self._drop_hint.raise_()
+    
+    def _clear_drop_indicator(self):
+        """清除拖拽目标指示"""
+        self._drop_highlight.hide()
+        self._drop_hint.hide()
+        self._drop_target_row = -1
+    
+    def _get_drop_target(self, pos):
+        """获取拖拽目标路径"""
+        # 获取鼠标位置对应的单元格
+        item = self.itemAt(pos)
+        if item:
+            # 获取该行的文件路径
+            row = item.row()
+            name_item = self.item(row, 0)
+            if name_item:
+                path = name_item.data(Qt.UserRole)
+                if path:
+                    from pathlib import Path
+                    path = Path(path)
+                    # 如果是文件夹，返回该文件夹路径
+                    if path.is_dir():
+                        return str(path)
+        
+        # 如果没有目标或目标不是文件夹，返回空字符串（表示当前目录）
+        return ""
+
+
+class FileCopyWorker(QThread):
+    """文件复制工作线程"""
+
+    # 信号
+    progress_updated = Signal(int, int, int)  # 当前文件索引, 当前进度, 总进度
+    file_started = Signal(str)  # 开始复制文件
+    file_finished = Signal(str)  # 文件复制完成
+    all_finished = Signal()  # 所有文件复制完成
+    error_occurred = Signal(str)  # 发生错误
+    cancelled = Signal()  # 复制被取消
+
+    def __init__(self, file_paths: List[str], dest_path: Path):
+        super().__init__()
+        self.file_paths = file_paths
+        self.dest_path = dest_path
+        self._is_cancelled = False
+        self._partial_files: List[Path] = []  # 记录部分复制的文件
+
+    def run(self):
+        """执行文件复制"""
+        try:
+            for idx, src_path in enumerate(self.file_paths):
+                if self._is_cancelled:
+                    break
+
+                src = Path(src_path)
+                if not src.exists():
+                    continue
+
+                dst = self.dest_path / src.name
+                # 发送开始信号
+                self.file_started.emit(src.name)
+
+                # 兜底：目标为源自身或其子目录（自嵌套）会触发 copytree 自递归/自我覆盖，
+                # 对目录与文件统一跳过该条目，避免崩溃与数据损坏。
+                try:
+                    if dst.resolve() == src.resolve() or dst.resolve().is_relative_to(src.resolve()):
+                        continue
+                except Exception:
+                    pass
+
+                try:
+                    if src.is_dir():
+                        # 复制文件夹（如果目标存在，先删除再复制）
+                        if dst.exists():
+                            from sync.file_manager import safe_rmtree
+                            safe_rmtree(dst)
+                        shutil.copytree(src, dst)
+                    else:
+                        # 复制文件（分块复制以显示进度）
+                        success = self._copy_file_with_progress(src, dst, idx)
+                        if not success:
+                            # 取消了复制，删除部分文件
+                            if dst.exists():
+                                try:
+                                    dst.unlink()
+                                except Exception:
+                                    pass
+                            # 发送取消信号并退出
+                            self.cancelled.emit()
+                            return
+
+                    # 发送完成信号（仅在未取消时）
+                    self.file_finished.emit(str(dst))
+
+                except Exception as e:
+                    # 发生错误，清理部分文件
+                    if dst.exists():
+                        try:
+                            dst.unlink()
+                        except Exception:
+                            pass
+                    self.error_occurred.emit(f"复制 {src.name} 失败: {str(e)}")
+
+            # 发送完成信号（仅在未取消时）
+            if not self._is_cancelled:
+                self.all_finished.emit()
+
+        except Exception as e:
+            self.error_occurred.emit(f"复制过程出错: {str(e)}")
+
+    def _copy_file_with_progress(self, src: Path, dst: Path, file_idx: int) -> bool:
+        """分块复制文件并更新进度，返回是否成功完成"""
+        file_size = src.stat().st_size
+        chunk_size = 1024 * 1024  # 1MB
+        copied = 0
+        last_progress = -1
+
+        try:
+            with open(src, 'rb') as f_src, open(dst, 'wb') as f_dst:
+                while copied < file_size:
+                    if self._is_cancelled:
+                        # 取消复制，返回 False
+                        return False
+
+                    chunk = f_src.read(chunk_size)
+                    if not chunk:
+                        break
+
+                    f_dst.write(chunk)
+                    copied += len(chunk)
+
+                    # 计算进度百分比
+                    progress = int(copied / file_size * 100)
+
+                    # 只在进度变化超过1%时更新
+                    if progress != last_progress:
+                        self.progress_updated.emit(file_idx, progress, 0)
+                        last_progress = progress
+
+            # 复制元数据（仅在成功完成时）
+            shutil.copystat(src, dst)
+            return True
+
+        except Exception as e:
+            # 发生错误，返回 False
+            return False
+
+    def cancel(self):
+        """取消复制"""
+        self._is_cancelled = True
+
+
+class FileListWidget(QWidget):
+    """文件列表组件"""
+
+    # 信号 - 所有同步信号由 UI 操作触发
+    file_added = Signal(str)  # 文件添加信号（本地操作触发）
+    file_deleted = Signal(str)  # 文件删除信号（本地操作触发）
+    file_renamed = Signal(str, str)  # 文件重命名信号（旧名，新名）
+    dir_created = Signal(str)  # 目录创建信号（本地操作触发）
+    manual_sync_requested = Signal()  # 手动同步按钮点击信号
+
+    def __init__(self, folder_path: Path, parent=None):
+        super().__init__(parent)
+        self.folder_path = folder_path
+        self.current_path = folder_path
+
+        # 上次文件对话框使用的目录（实例变量，重启程序后自动重置）
+        self._last_dialog_dir: Optional[str] = None
+
+        # 剪贴板
+        self.clipboard_files: List[Path] = []
+        self.clipboard_is_cut = False
+        
+        # 同步文件集合（正在同步的文件，用于避免循环同步）
+        self._syncing_files: Set[str] = set()
+        self._syncing_lock = threading.Lock()
+        
+        # 标记是否正在接收远程文件（刷新文件列表时不触发同步）
+        self._receiving_remote = False
+
+        # 顶部悬浮提示的停留时长（毫秒），演示/测试时可调慢
+        self._toast_hold_ms = 1500
+        
+        # 取消传输回调（由 SyncWindow 设置，直接调用避免 Qt 信号异步性问题）
+        self._cancel_transfer_callback = None
+        
+        self.init_ui()
+        self.load_files()
+    
+    def set_cancel_transfer_callback(self, callback):
+        """设置取消传输回调函数
+        
+        Args:
+            callback: 回调函数，签名为 callback(rel_path: str)
+        """
+        self._cancel_transfer_callback = callback
+    
+    # ========== 同步标记方法 ==========
+    
+    def mark_syncing(self, path: str):
+        """
+        标记文件正在同步（发送或接收）
+        用于区分本地操作和远程写入
+        
+        Args:
+            path: 文件路径（相对路径或绝对路径）
+        """
+        normalized = str(path).replace('\\', '/')
+        with self._syncing_lock:
+            self._syncing_files.add(normalized)
+    
+    def unmark_syncing(self, path: str):
+        """
+        取消标记文件正在同步
+        
+        Args:
+            path: 文件路径
+        """
+        normalized = str(path).replace('\\', '/')
+        with self._syncing_lock:
+            self._syncing_files.discard(normalized)
+    
+    def is_syncing(self, path: str) -> bool:
+        """
+        检查文件是否正在同步
+        
+        Args:
+            path: 文件路径
+        Returns:
+            True: 正在同步，不应触发同步信号
+            False: 本地操作，应触发同步信号
+        """
+        normalized = str(path).replace('\\', '/')
+        with self._syncing_lock:
+            return normalized in self._syncing_files
+    
+    def set_receiving_remote(self, receiving: bool):
+        """
+        设置是否正在接收远程文件
+        接收远程文件时刷新列表不会触发同步信号
+        
+        Args:
+            receiving: 是否正在接收
+        """
+        self._receiving_remote = receiving
+    
+    def init_ui(self):
+        """初始化界面"""
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(5)
+        
+        # 工具栏
+        toolbar = QWidget()
+        toolbar_layout = QHBoxLayout(toolbar)
+        # 顶部边距为 0：使"返回上级"和"路径框"的上边缘与左侧"房间信息卡片"顶部对齐
+        toolbar_layout.setContentsMargins(5, 0, 5, 5)
+        
+        # 返回上级按钮
+        self.back_btn = QPushButton(I18n.tr('go_up'))
+        self.back_btn.setFixedWidth(80)
+        self.back_btn.clicked.connect(self.go_back)
+        toolbar_layout.addWidget(self.back_btn)
+        
+        # 当前路径
+        self.path_edit = UnderlineEdit()
+        self.path_edit.setReadOnly(True)
+        toolbar_layout.addWidget(self.path_edit)
+
+        # 手动同步按钮（选中状态/禁用状态区分不同用途：连接端拉取、主机端通知所有连接端）
+        # WarnSyncButton：可点击时悬浮边框/文字变红警示（仅人类警示，不拦截点击）
+        self.sync_btn = WarnSyncButton(I18n.tr('manual_sync'))
+        self.sync_btn.setFixedWidth(80)
+        self.sync_btn.clicked.connect(self.manual_sync_requested.emit)
+        toolbar_layout.addWidget(self.sync_btn)
+
+        # 统一"返回上级"按钮与路径框的垂直高度，保证两者一致。
+        # 不使用 QSS 指定 margin（会启用基础样式、压低原生控件外观），以路径框高度为基准对齐
+        _bar_h = self.path_edit.sizeHint().height()
+        self.back_btn.setFixedHeight(_bar_h)
+        self.path_edit.setFixedHeight(_bar_h)
+        self.sync_btn.setFixedHeight(_bar_h)
+        
+        # 刷新按钮（已注释：远程/本地变化均有自动刷新，此手动按钮冗余，暂不删除、保留逻辑）
+        # refresh_btn = QPushButton(I18n.tr('refresh'))
+        # refresh_btn.setFixedWidth(60)
+        # refresh_btn.clicked.connect(self.load_files)
+        # toolbar_layout.addWidget(refresh_btn)
+        
+        layout.addWidget(toolbar)
+        
+        # 文件列表表格
+        self.table = DragableTableWidget()
+        # 整行统一高亮（类似系统文件管理器）：关闭网格线切口，并消掉每格焦点框
+        self.table.setShowGrid(False)
+        win = self.palette().color(self.palette().ColorRole.Window)
+        luminance = 0.299 * win.red() + 0.587 * win.green() + 0.114 * win.blue()
+        if luminance > 128:  # 浅色主题
+            divider, sel_bg, sel_fg = "#ececf0", "#dee2e6", "#212529"
+        else:  # 深色主题
+            divider, sel_bg, sel_fg = "#2b2b2f", "#3a3a3e", "#e9ecef"
+        self.table.setStyleSheet(f"""
+            QTableWidget {{ background: transparent; border: none; }}
+            QTableWidget::item {{ border: none; border-bottom: 1px solid {divider}; padding: 6px; }}
+            QTableWidget::item:focus, QTableWidget:focus {{ outline: none; }}
+            QTableWidget::item:selected {{ background: {sel_bg}; color: {sel_fg}; }}
+        """)
+        self.table.setColumnCount(3)
+        self.table.setHorizontalHeaderLabels([
+            I18n.tr('file_name'),
+            I18n.tr('file_size'),
+            I18n.tr('file_modified')
+        ])
+
+        # 禁用编辑（避免双击时进入编辑模式）
+        self.table.setEditTriggers(QAbstractItemView.NoEditTriggers)
+
+        # 设置表头
+        header = self.table.horizontalHeader()
+        header.setSectionResizeMode(0, QHeaderView.Stretch)
+        header.setSectionResizeMode(1, QHeaderView.ResizeToContents)
+        header.setSectionResizeMode(2, QHeaderView.ResizeToContents)
+        
+        # 连接拖拽信号
+        self.table.files_dragged.connect(self._handle_files_dragged)
+
+        # 双击事件
+        self.table.cellDoubleClicked.connect(self.on_double_click)
+        # 双击空白区域 → 在鼠标位置弹出添加文件/文件夹菜单
+        self.table.empty_area_double_clicked.connect(self.on_add_via_double_click)
+        
+        # 右键菜单
+        self.table.setContextMenuPolicy(Qt.CustomContextMenu)
+        self.table.customContextMenuRequested.connect(self.show_context_menu)
+        
+        layout.addWidget(self.table)
+
+        # 拖拽提示悬浮层（透明，不影响表格操作）
+        self.drag_hint_label = QLabel(I18n.tr('drag_files_hint'))
+        self.drag_hint_label.setAlignment(Qt.AlignCenter)
+        self.drag_hint_label.setStyleSheet("color: #868e96; font-size: 14px; background: transparent;")
+        self.drag_hint_label.setAttribute(Qt.WA_TransparentForMouseEvents)  # 不接收鼠标事件
+        self.drag_hint_label.setParent(self.table)  # 设置父控件为表格
+        self.drag_hint_label.hide()  # 默认隐藏
+
+        # 更新路径显示
+        self.update_path_display()
+    
+    def load_files(self):
+        """加载文件列表"""
+        self.table.setRowCount(0)
+
+        # 当前目录可能已被远程删除/改名：自动回退到最近的仍存在的祖先目录
+        # 以根目录 folder_path 为上限，不越界；根目录自身失效时仅清空显示
+        original = self.current_path
+        target = self.current_path
+        while (not target.exists() or not target.is_dir()) \
+                and target != self.folder_path \
+                and target.parent != target:
+            target = target.parent
+        if target != original and target.exists() and target.is_dir():
+            self.current_path = target
+            self.update_path_display()
+            # 给出顶部悬浮提示
+            self._show_toast(I18n.tr('toast_dir_changed'))
+
+        if not self.current_path.exists() or not self.current_path.is_dir():
+            self.drag_hint_label.hide()
+            return
+
+        # 获取文件列表
+        items = list(self.current_path.iterdir())
+
+        # 排序：文件夹在前，然后按名称排序
+        items.sort(key=lambda x: (not x.is_dir(), x.name.lower()))
+
+        # 根据文件列表显示/隐藏拖拽提示
+        if not items:
+            # 延迟显示悬浮提示（确保表格已渲染）
+            from PySide6.QtCore import QTimer
+            QTimer.singleShot(100, self._show_drag_hint)
+        else:
+            # 隐藏悬浮提示
+            self.drag_hint_label.hide()
+
+        # 添加文件到表格
+        for item in items:
+            # 条目可能在列出后/读取前被并发删除（远程重命名/删除期间的刷新），
+            # 异常时直接跳过该条目，避免整次刷新崩溃。
+            try:
+                # 文件名
+                is_dir = item.is_dir()
+                name_item = QTableWidgetItem(item.name)
+                if is_dir:
+                    name_item.setIcon(QIcon.fromTheme("folder"))
+                else:
+                    name_item.setIcon(QIcon.fromTheme("text-x-generic"))
+
+                # 文件大小/项目数量
+                if is_dir:
+                    try:
+                        size_text = f"{len(list(item.iterdir()))} {I18n.tr('items')}"
+                    except OSError:
+                        size_text = "-"
+                else:
+                    size_text = self.format_size(item.stat().st_size)
+
+                # 修改时间
+                mtime_text = datetime.fromtimestamp(item.stat().st_mtime).strftime("%Y-%m-%d %H:%M:%S")
+
+                # 保存路径信息
+                name_item.setData(Qt.UserRole, str(item))
+
+                row = self.table.rowCount()
+                self.table.insertRow(row)
+                self.table.setItem(row, 0, name_item)
+
+                size_item = QTableWidgetItem(size_text)
+                size_item.setTextAlignment(Qt.AlignRight | Qt.AlignVCenter)
+                self.table.setItem(row, 1, size_item)
+
+                mtime_item = QTableWidgetItem(mtime_text)
+                self.table.setItem(row, 2, mtime_item)
+            except FileNotFoundError:
+                # 该项已被并发删除（远程重命名/删除时刷新），跳过
+                continue
+
+    def _toast_card_style(self) -> str:
+        """根据界面明暗主题自动生成卡片样式：自适应背景 + 1px 深灰描边"""
+        win = self.palette().color(self.palette().ColorRole.Window)
+        luminance = 0.299 * win.red() + 0.587 * win.green() + 0.114 * win.blue()
+        if luminance > 128:  # 浅色主题
+            bg, fg, border = (
+                QColor(255, 255, 255), QColor(34, 38, 42), QColor(140, 140, 146)
+            )
+        else:  # 深色主题
+            bg, fg, border = (
+                QColor(58, 60, 64), QColor(244, 244, 244), QColor(108, 108, 114)
+            )
+        return (
+            f"QLabel {{"
+            f"  background-color: {bg.name()};"
+            f"  color: {fg.name()};"
+            f"  border: 1px solid {border.name()};"
+            f"  border-radius: 8px;"
+            f"  padding: 8px 18px;"
+            f"  font-size: 13px;"
+            f"}}"
+        )
+
+    def show_global_notification(self, message: str):
+        """显示顶部全局通知（复用现有玻璃态 toast 卡片样式）"""
+        self._show_toast(message)
+
+    def set_sync_btn_enabled(self, enabled: bool):
+        """启停手动同步按钮"""
+        if not enabled:
+            # 禁用时清除可能残留的悬浮红色警示，避免灰色态误显红色
+            self.sync_btn.setStyleSheet("")
+        self.sync_btn.setEnabled(enabled)
+
+    def _show_toast(self, message: str):
+        """顶部悬浮提示：淡入→停留→淡出"""
+        if getattr(self, '_toast', None) is None:
+            self._toast = QLabel(self)
+            self._toast.setAlignment(Qt.AlignCenter)
+            self._toast.setWordWrap(False)  # 单行显示
+            self._toast.setAttribute(Qt.WA_TransparentForMouseEvents)
+            self._toast_effect = QGraphicsOpacityEffect(self._toast)
+            self._toast.setGraphicsEffect(self._toast_effect)
+            # 首次触发时套用自适应明暗主题的卡片样式
+            self._toast.setStyleSheet(self._toast_card_style())
+
+        self._toast.setText(message)
+        self._toast.adjustSize()
+        self._center_toast()
+        self._toast.raise_()
+        self._toast.show()
+
+        # 终止上一次动画，避免叠加
+        if getattr(self, '_toast_anim', None) is not None:
+            try:
+                self._toast_anim.stop()
+            except Exception:
+                pass
+
+        self._toast_effect.setOpacity(0.0)
+        fade_in = QPropertyAnimation(self._toast_effect, b'opacity', self._toast)
+        fade_in.setDuration(250)
+        fade_in.setStartValue(0.0)
+        fade_in.setEndValue(1.0)
+        fade_in.setEasingCurve(QEasingCurve.InOutQuad)
+
+        fade_out = QPropertyAnimation(self._toast_effect, b'opacity', self._toast)
+        fade_out.setDuration(250)
+        fade_out.setStartValue(1.0)
+        fade_out.setEndValue(0.0)
+        fade_out.setEasingCurve(QEasingCurve.InOutQuad)
+        fade_out.finished.connect(self._toast.hide)
+
+        self._toast_anim = QSequentialAnimationGroup(self._toast)
+        self._toast_anim.addAnimation(fade_in)
+        self._toast_anim.addPause(self._toast_hold_ms)
+        self._toast_anim.addAnimation(fade_out)
+        self._toast_anim.start()
+
+    def _center_toast(self):
+        """将悬浮提示水平居中于顶部（单行按内容自适应宽度）"""
+        self._toast.adjustSize()
+        w = min(self._toast.width(), self.width() - 24)
+        x = (self.width() - w) // 2
+        self._toast.resize(w, self._toast.height())
+        self._toast.move(x, 10)
+
+    def _show_drag_hint(self):
+        """显示拖拽提示悬浮层"""
+        if not self.table.isVisible():
+            self.drag_hint_label.hide()
+            return
+
+        # 如果表格已有内容（文件可能在定时器触发前到达），不显示提示
+        if self.table.rowCount() > 0:
+            self.drag_hint_label.hide()
+            return
+
+        # 居中显示在表格中央
+        table_rect = self.table.rect()
+        if table_rect.width() == 0 or table_rect.height() == 0:
+            # 表格大小为0，稍后再试
+            from PySide6.QtCore import QTimer
+            QTimer.singleShot(100, self._show_drag_hint)
+            return
+
+        hint_size = self.drag_hint_label.sizeHint()
+
+        # 计算居中位置
+        x = (table_rect.width() - hint_size.width()) // 2
+        y = (table_rect.height() - hint_size.height()) // 2
+
+        # 确保标签有合适的大小
+        self.drag_hint_label.setGeometry(x, y, hint_size.width(), hint_size.height())
+        self.drag_hint_label.show()
+        self.drag_hint_label.raise_()  # 确保在最上层
+
+    def resizeEvent(self, event):
+        """窗口大小改变时重新定位悬浮提示"""
+        super().resizeEvent(event)
+        if getattr(self, '_toast', None) is not None and self._toast.isVisible():
+            self._center_toast()
+        if self.drag_hint_label.isVisible():
+            self._show_drag_hint()
+
+    def format_size(self, size: int) -> str:
+        """格式化文件大小"""
+        for unit in ['B', 'KB', 'MB', 'GB', 'TB']:
+            if size < 1024.0:
+                return f"{size:.1f} {unit}"
+            size /= 1024.0
+        return f"{size:.1f} PB"
+    
+    def update_path_display(self):
+        """更新路径显示"""
+        try:
+            relative_path = self.current_path.relative_to(self.folder_path)
+            self.path_edit.setText(str(relative_path) if str(relative_path) != "." else "/")
+        except ValueError:
+            self.path_edit.setText(str(self.current_path))
+        
+        # 更新返回按钮状态
+        self.back_btn.setEnabled(self.current_path != self.folder_path)
+    
+    def go_back(self):
+        """返回上级目录"""
+        if self.current_path != self.folder_path:
+            self.current_path = self.current_path.parent
+            self.load_files()
+            self.update_path_display()
+    
+    def on_double_click(self, row: int, column: int):
+        """双击事件"""
+        item = self.table.item(row, 0)
+        if not item:
+            return
+        
+        path = Path(item.data(Qt.UserRole))
+        
+        if path.is_dir():
+            # 进入文件夹
+            self.current_path = path
+            self.load_files()
+            self.update_path_display()
+        else:
+            # 双击文件：复制到预览目录后打开（只读预览模式）
+            try:
+                # 获取预览目录（不按房间号分隔）
+                preview_folder = Config.get_preview_folder()
+                
+                # 复制文件到预览目录（保持相对路径结构）
+                relative_path = path.relative_to(self.folder_path)
+                preview_path = preview_folder / relative_path
+                
+                # 确保目标目录存在
+                preview_path.parent.mkdir(parents=True, exist_ok=True)
+
+                # Windows：预览文件已存在时，先移除只读属性以便 shutil.copy2 覆盖
+                if Config.IS_WINDOWS and preview_path.exists():
+                    try:
+                        import ctypes
+                        # 移除只读属性（FILE_ATTRIBUTE_NORMAL = 0x80）
+                        ctypes.windll.kernel32.SetFileAttributesW(str(preview_path), 0x80)
+                    except Exception:
+                        # 移除属性失败（如权限问题），让 shutil.copy2 在覆盖时自然抛出错误
+                        pass
+
+                # 复制文件（覆盖旧的预览文件）
+                # shutil.copy2会直接打开文件写入（不先删除）：
+                # - 普通文件：成功覆盖（Windows允许写入已占用文件）
+                # - 只读文件：抛出PermissionError（外层捕获）
+                shutil.copy2(path, preview_path)
+                
+                # Windows：设置只读属性，防止预览文件被误修改
+                if Config.IS_WINDOWS:
+                    try:
+                        import ctypes
+                        # FILE_ATTRIBUTE_READONLY = 0x1
+                        ctypes.windll.kernel32.SetFileAttributesW(str(preview_path), 0x1)
+                    except Exception:
+                        pass
+                
+                # 用系统默认应用打开预览副本（跨平台，Qt 内部按桌面环境转调 xdg-open 等）
+                QDesktopServices.openUrl(QUrl.fromLocalFile(str(preview_path)))
+                
+            except Exception as e:
+                QMessageBox.warning(
+                    self,
+                    I18n.tr('file'),
+                    f"{I18n.tr('tip_open_file')}\n\n错误: {e}"
+                )
+    
+    def show_context_menu(self, pos: QPoint):
+        """显示右键菜单"""
+        menu = QMenu(self)
+
+        # 是否有选中的文件（用于控制菜单项的启用状态）
+        has_selection = len(self.get_selected_files()) > 0
+
+        # 添加文件（选中文件时禁用）
+        add_file_action = QAction(I18n.tr('drag_add'), self)
+        add_file_action.triggered.connect(self.on_add_files)
+        add_file_action.setEnabled(not has_selection)
+        menu.addAction(add_file_action)
+
+        # 添加文件夹（选中文件时禁用）
+        add_folder_action = QAction(I18n.tr('add_folder'), self)
+        add_folder_action.triggered.connect(self.on_add_folder)
+        add_folder_action.setEnabled(not has_selection)
+        menu.addAction(add_folder_action)
+
+        menu.addSeparator()
+
+        # 新建文件夹（选中文件时禁用）
+        new_folder_action = QAction(I18n.tr('new_folder'), self)
+        new_folder_action.triggered.connect(self.on_new_folder)
+        new_folder_action.setEnabled(not has_selection)
+        menu.addAction(new_folder_action)
+
+        menu.addSeparator()
+
+        # 复制
+        copy_action = QAction(I18n.tr('copy'), self)
+        copy_action.triggered.connect(self.copy_files)
+        copy_action.setEnabled(has_selection)
+        menu.addAction(copy_action)
+
+        # 剪切
+        cut_action = QAction(I18n.tr('cut'), self)
+        cut_action.triggered.connect(self.cut_files)
+        cut_action.setEnabled(has_selection)
+        menu.addAction(cut_action)
+
+        # 粘贴
+        paste_action = QAction(I18n.tr('paste'), self)
+        paste_action.triggered.connect(self.paste_files)
+        paste_action.setEnabled(len(self.clipboard_files) > 0)
+        menu.addAction(paste_action)
+
+        menu.addSeparator()
+
+        # 保存至
+        save_to_action = QAction(I18n.tr('save_to'), self)
+        save_to_action.triggered.connect(self.save_to)
+        save_to_action.setEnabled(has_selection)
+        menu.addAction(save_to_action)
+
+        menu.addSeparator()
+
+        # 删除
+        delete_action = QAction(I18n.tr('delete'), self)
+        delete_action.triggered.connect(self.delete_files)
+        delete_action.setEnabled(has_selection)
+        menu.addAction(delete_action)
+
+        # 重命名 - 检查选中的行数
+        rename_action = QAction(I18n.tr('rename'), self)
+        rename_action.triggered.connect(self.rename_file)
+        selected_rows = self.table.selectionModel().selectedRows()
+        rename_action.setEnabled(len(selected_rows) == 1)
+        menu.addAction(rename_action)
+        
+        menu.exec(self.table.viewport().mapToGlobal(pos))
+    
+    def get_selected_files(self) -> List[Path]:
+        """获取选中的文件列表"""
+        files = []
+        for item in self.table.selectedItems():
+            if item.column() == 0:  # 只处理文件名列
+                path = Path(item.data(Qt.UserRole))
+                files.append(path)
+        return files
+    
+    def copy_files(self):
+        """复制文件"""
+        self.clipboard_files = self.get_selected_files()
+        self.clipboard_is_cut = False
+    
+    def cut_files(self):
+        """剪切文件"""
+        self.clipboard_files = self.get_selected_files()
+        self.clipboard_is_cut = True
+    
+    def paste_files(self):
+        """粘贴文件（使用进度对话框避免界面卡死）"""
+        if not self.clipboard_files:
+            return
+
+        # 同目录粘贴或复制进源自身子树（自嵌套）无实际意义，且 copytree 自递归会崩溃：
+        # 直接提示“无效操作”并返回，不弹替换确认、不复制。
+        all_self = True
+        any_src = False
+        for src_file in self.clipboard_files:
+            if not src_file.exists():
+                continue
+            any_src = True
+            try:
+                s = src_file.resolve()
+                d = (self.current_path / src_file.name).resolve()
+            except Exception:
+                all_self = False
+                break
+            # 目标等于源，或目标位于源自身子树内，均视为“自身复制”
+            if not (d == s or d.is_relative_to(s)):
+                all_self = False
+                break
+        if any_src and all_self:
+            self._show_toast(I18n.tr('toast_invalid_drop'))
+            return
+
+        # 收集需要粘贴的文件
+        files_to_paste = []
+        existing_files = []
+
+        for src_file in self.clipboard_files:
+            if not src_file.exists():
+                continue
+
+            dst_file = self.current_path / src_file.name
+
+            # 检查目标文件是否存在
+            if dst_file.exists():
+                existing_files.append(src_file.name)
+            else:
+                files_to_paste.append(src_file)
+
+        # 如果有已存在的文件，一次性询问是否替换
+        if existing_files:
+            file_list = "\n".join(existing_files[:5])
+            if len(existing_files) > 5:
+                file_list += f"\n... 还有 {len(existing_files) - 5} 个文件"
+
+            # 创建自定义消息框
+            msg_box = QMessageBox(self)
+            msg_box.setWindowTitle(I18n.tr('confirm_replace'))
+            msg_box.setText(f"以下文件已存在，是否全部替换？\n\n{file_list}")
+            msg_box.setIcon(QMessageBox.Question)
+
+            # 添加自定义按钮
+            ok_btn = msg_box.addButton(I18n.tr('ok'), QMessageBox.YesRole)
+            cancel_btn = msg_box.addButton(I18n.tr('cancel'), QMessageBox.RejectRole)
+
+            # 应用全局按钮样式：确定蓝色，取消红色
+            ok_btn.setStyleSheet(BUTTON_STYLES['primary'])
+            cancel_btn.setStyleSheet(BUTTON_STYLES['danger'])
+            # 统一按钮宽度，与“是否退出房间”等确认弹窗保持一致
+            ok_btn.setFixedWidth(80)
+            cancel_btn.setFixedWidth(80)
+
+            msg_box.setDefaultButton(cancel_btn)
+            msg_box.exec()
+
+            if msg_box.clickedButton() == ok_btn:
+                # 用户同意替换，添加所有已存在的文件
+                for src_file in self.clipboard_files:
+                    if src_file.exists() and src_file.name in existing_files:
+                        files_to_paste.append(src_file)
+            else:
+                # 取消：终止整个粘贴操作
+                return
+
+        if not files_to_paste:
+            return
+
+        # 剪切操作：检查是否可以在同分区内快速移动
+        if self.clipboard_is_cut:
+            # 检查所有文件是否都在同一分区
+            same_drive = True
+            for src_file in files_to_paste:
+                src_drive = os.path.splitdrive(str(src_file))[0]
+                dst_drive = os.path.splitdrive(str(self.current_path))[0]
+                if src_drive != dst_drive:
+                    same_drive = False
+                    break
+
+            # 如果都在同一分区，使用快速移动（类似拖拽移动）
+            if same_drive:
+                self._fast_move_files(files_to_paste)
+                return
+
+        # 创建进度对话框
+        from ui.progress_dialog import CopyProgressDialog
+        progress_dialog = CopyProgressDialog(self)
+        progress_dialog.setWindowTitle(I18n.tr('paste') if not self.clipboard_is_cut else I18n.tr('cut'))
+        progress_dialog.show()
+
+        # 创建工作线程
+        self._paste_worker = FileCopyWorker([str(f) for f in files_to_paste], self.current_path)
+
+        # 连接信号
+        self._paste_worker.file_started.connect(
+            lambda name: progress_dialog.set_filename(name)
+        )
+        self._paste_worker.progress_updated.connect(
+            lambda idx, progress, total: progress_dialog.set_progress(progress)
+        )
+        self._paste_worker.file_finished.connect(
+            lambda path: self._on_paste_file_finished(path)
+        )
+        self._paste_worker.all_finished.connect(
+            lambda: self._on_paste_finished(progress_dialog)
+        )
+        self._paste_worker.error_occurred.connect(
+            lambda msg: self._show_error(msg)
+        )
+        self._paste_worker.cancelled.connect(
+            lambda: self._on_paste_cancelled(progress_dialog)
+        )
+        progress_dialog.cancelled.connect(
+            lambda: self._paste_worker.cancel()
+        )
+
+        # 启动工作线程
+        self._paste_worker.start()
+
+    def _on_paste_file_finished(self, file_path: str):
+        """粘贴文件完成回调"""
+        if self.clipboard_is_cut:
+            # 剪切操作：发射重命名信号（本质是移动）
+            # 找到对应的源文件
+            for src_file in self.clipboard_files:
+                if src_file.name == Path(file_path).name:
+                    # 只有本地操作才触发同步信号
+                    if not self.is_syncing(file_path):
+                        self.file_renamed.emit(str(src_file), file_path)
+                    
+                    # 删除源文件
+                    try:
+                        if src_file.exists():
+                            if src_file.is_dir():
+                                from sync.file_manager import safe_rmtree
+                                safe_rmtree(src_file)
+                            else:
+                                src_file.unlink()
+                    except Exception as e:
+                        print(f"删除源文件失败: {e}")
+                    break
+        else:
+            # 复制操作：发射添加信号
+            # 只有本地操作才触发同步信号
+            if not self.is_syncing(file_path):
+                path = Path(file_path)
+                if path.is_dir():
+                    self.file_added.emit(file_path)
+                    self._emit_folder_files(path)
+                else:
+                    self.file_added.emit(file_path)
+
+    def _on_paste_cancelled(self, dialog):
+        """粘贴被取消回调"""
+        dialog.allow_close()
+        dialog.close()
+        # 清空剪贴板（如果是剪切）
+        if self.clipboard_is_cut:
+            self.clipboard_files = []
+            self.clipboard_is_cut = False
+        self.load_files()
+
+    def _on_paste_finished(self, dialog):
+        """所有文件粘贴完成回调"""
+        dialog.allow_close()
+        dialog.close()
+        # 清空剪贴板（如果是剪切）
+        if self.clipboard_is_cut:
+            self.clipboard_files = []
+            self.clipboard_is_cut = False
+        self.load_files()
+
+    def _fast_move_files(self, files: List[Path]):
+        """快速移动文件（同分区内使用 rename）"""
+        success_count = 0
+
+        for src_file in files:
+            if not src_file.exists():
+                continue
+
+            dst_file = self.current_path / src_file.name
+
+            # 检查是否在同一目录
+            if src_file.parent == self.current_path:
+                continue
+
+            # 检查是否移动到自己的子文件夹
+            if src_file.is_dir() and self.current_path.is_relative_to(src_file):
+                self._show_error("不能将文件夹移动到自己的子文件夹中")
+                continue
+
+            try:
+                # 如果目标文件已存在，先删除
+                if dst_file.exists():
+                    if dst_file.is_dir():
+                        from sync.file_manager import safe_rmtree
+                        safe_rmtree(dst_file)
+                    else:
+                        dst_file.unlink()
+
+                # 使用 rename 快速移动
+                src_file.rename(dst_file)
+
+                # 发射重命名信号（本质是移动）
+                if not self.is_syncing(str(dst_file)):
+                    self.file_renamed.emit(str(src_file), str(dst_file))
+
+                success_count += 1
+
+            except Exception as e:
+                self._show_error(f"移动 {src_file.name} 失败: {str(e)}")
+
+        # 清空剪贴板
+        self.clipboard_files = []
+        self.clipboard_is_cut = False
+
+        # 刷新文件列表
+        self.load_files()
+    
+    def delete_files(self):
+        """删除文件"""
+        files = self.get_selected_files()
+        if not files:
+            return
+        
+        # 创建自定义消息框
+        msg_box = QMessageBox(self)
+        msg_box.setWindowTitle(I18n.tr('confirm_delete'))
+        msg_box.setText(I18n.tr('confirm_delete_msg'))
+        msg_box.setIcon(QMessageBox.Question)
+        
+        # 添加自定义按钮
+        yes_btn = msg_box.addButton(I18n.tr('yes'), QMessageBox.YesRole)
+        no_btn = msg_box.addButton(I18n.tr('no'), QMessageBox.NoRole)
+        
+        # 应用全局按钮样式
+        yes_btn.setStyleSheet(BUTTON_STYLES['danger'])
+        no_btn.setStyleSheet(BUTTON_STYLES['secondary'])
+        
+        msg_box.setDefaultButton(no_btn)
+        msg_box.exec()
+        
+        if msg_box.clickedButton() == yes_btn:
+            import shutil
+            import time
+            for file in files:
+                try:
+                    # 删除前先取消该文件的传输任务，避免 Windows 文件锁导致删除失败
+                    try:
+                        rel_path = str(file.relative_to(self.folder_path)).replace('\\', '/')
+                        # 直接调用回调（同步执行），避免 Qt 信号异步性导致主线程阻塞时信号无法处理
+                        if self._cancel_transfer_callback:
+                            self._cancel_transfer_callback(rel_path)
+                    except Exception:
+                        pass
+                    
+                    # 循环尝试删除，覆盖发送任务退出期间的最坏情况：
+                    # sendall(chunk) 超时 1 秒 + sendall(FILE_CANCEL) 超时 1 秒 = 2 秒
+                    # 固定 sleep 无法保证覆盖，改用循环重试，最多 3 秒
+                    from sync.file_manager import safe_rmtree
+                    deleted = False
+                    last_error = None
+                    for attempt in range(30):
+                        try:
+                            if file.is_dir():
+                                safe_rmtree(file)
+                            else:
+                                file.unlink()
+                            deleted = True
+                            break
+                        except PermissionError as pe:
+                            last_error = pe
+                            time.sleep(0.1)
+                        except OSError as oe:
+                            last_error = oe
+                            time.sleep(0.1)
+
+                    if not deleted:
+                        raise last_error if last_error else Exception("删除失败")
+                    
+                    # 只有本地操作才触发同步信号
+                    if not self.is_syncing(str(file)):
+                        self.file_deleted.emit(str(file))
+                except Exception as e:
+                    # 创建自定义错误框
+                    msg_box = QMessageBox(self)
+                    msg_box.setWindowTitle("错误")
+                    msg_box.setText(f"删除失败: {str(e)}")
+                    msg_box.setIcon(QMessageBox.Critical)
+                    
+                    # 添加自定义按钮
+                    ok_btn = msg_box.addButton(I18n.tr('ok'), QMessageBox.AcceptRole)
+                    ok_btn.setStyleSheet(BUTTON_STYLES['primary'])
+
+                    msg_box.exec()
+
+            self.load_files()
+
+    def on_add_via_double_click(self):
+        """双击空白区域：在鼠标位置弹出"添加文件/文件夹"选择菜单"""
+        menu = QMenu(self)
+        file_action = menu.addAction(I18n.tr('drag_add'))
+        folder_action = menu.addAction(I18n.tr('add_folder'))
+
+        # 在鼠标光标位置显示菜单
+        chosen = menu.exec(QCursor.pos())
+
+        if chosen == file_action:
+            self.on_add_files()
+        elif chosen == folder_action:
+            self.on_add_folder()
+
+    def _get_dialog_start_dir(self) -> str:
+        """获取文件对话框的起始目录：优先使用上次记忆的目录，否则用当前路径"""
+        return self._last_dialog_dir or str(self.current_path)
+
+    def on_add_files(self):
+        """添加文件：打开系统文件选择对话框（支持多选），调用 add_files 同步"""
+        files, _ = QFileDialog.getOpenFileNames(
+            self,
+            I18n.tr('drag_add'),
+            self._get_dialog_start_dir()
+        )
+        if files:
+            # 记忆本次选择的目录，下次打开时定位到此
+            self._last_dialog_dir = str(Path(files[0]).parent)
+            self.add_files(files)
+
+    def on_add_folder(self):
+        """添加文件夹：打开系统文件夹选择对话框，调用 add_files 同步"""
+        folder = QFileDialog.getExistingDirectory(
+            self,
+            I18n.tr('add_folder'),
+            self._get_dialog_start_dir()
+        )
+        if folder:
+            # 记忆本次选择的目录，下次打开时定位到此
+            self._last_dialog_dir = folder
+            self.add_files([folder])
+
+    def on_new_folder(self):
+        """新建文件夹
+
+        流程：弹出重命名对话框（预填默认名）→ 确认名称后正式创建并触发同步；
+        对话框阶段按 ESC 或取消则不创建任何文件夹。
+        """
+        from PySide6.QtWidgets import QDialog, QVBoxLayout, QLabel, QDialogButtonBox
+
+        dialog = QDialog(self)
+        dialog.setWindowTitle(I18n.tr('new_folder'))
+        dialog.setMinimumWidth(400)
+
+        layout = QVBoxLayout(dialog)
+
+        label = QLabel(f"{I18n.tr('new_name')}:")
+        layout.addWidget(label)
+
+        # 预填默认名"新建文件夹"，全选便于直接输入替换
+        default_name = I18n.tr('new_folder')
+        name_edit = UnderlineEdit(default_name)
+        layout.addWidget(name_edit)
+
+        button_box = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
+        button_box.accepted.connect(dialog.accept)
+        button_box.rejected.connect(dialog.reject)
+
+        ok_btn = button_box.button(QDialogButtonBox.Ok)
+        if ok_btn:
+            ok_btn.setStyleSheet(BUTTON_STYLES['primary'])
+            ok_btn.setText(I18n.tr('ok'))
+        cancel_btn = button_box.button(QDialogButtonBox.Cancel)
+        if cancel_btn:
+            cancel_btn.setStyleSheet(BUTTON_STYLES['secondary'])
+            cancel_btn.setText(I18n.tr('cancel'))
+
+        layout.addWidget(button_box)
+
+        name_edit.selectAll()
+        name_edit.setFocus()
+
+        # ESC / 取消 → dialog.exec() 返回 Rejected，直接返回不创建
+        if dialog.exec() != QDialog.Accepted:
+            return
+
+        new_name = name_edit.text().strip()
+        if not new_name:
+            return
+
+        # 校验文件名合法性
+        if not self.is_valid_filename(new_name):
+            msg_box = QMessageBox(self)
+            msg_box.setWindowTitle("错误")
+            msg_box.setText(I18n.tr('error_invalid_name'))
+            msg_box.setIcon(QMessageBox.Warning)
+            ok_btn = msg_box.addButton(I18n.tr('ok'), QMessageBox.AcceptRole)
+            ok_btn.setStyleSheet(BUTTON_STYLES['primary'])
+            msg_box.exec()
+            return
+
+        new_path = self.current_path / new_name
+
+        # 检查是否已存在
+        if new_path.exists():
+            msg_box = QMessageBox(self)
+            msg_box.setWindowTitle("错误")
+            msg_box.setText(I18n.tr('error_file_exists'))
+            msg_box.setIcon(QMessageBox.Warning)
+            ok_btn = msg_box.addButton(I18n.tr('ok'), QMessageBox.AcceptRole)
+            ok_btn.setStyleSheet(BUTTON_STYLES['primary'])
+            msg_box.exec()
+            return
+
+        try:
+            # 正式创建文件夹
+            new_path.mkdir(parents=True, exist_ok=False)
+
+            # 触发同步信号（本地操作）
+            self.dir_created.emit(str(new_path))
+
+            # 刷新文件列表
+            self.load_files()
+        except Exception as e:
+            msg_box = QMessageBox(self)
+            msg_box.setWindowTitle("错误")
+            msg_box.setText(f"创建文件夹失败: {str(e)}")
+            msg_box.setIcon(QMessageBox.Critical)
+            ok_btn = msg_box.addButton(I18n.tr('ok'), QMessageBox.AcceptRole)
+            ok_btn.setStyleSheet(BUTTON_STYLES['primary'])
+            msg_box.exec()
+
+    def rename_file(self):
+        """重命名文件"""
+        files = self.get_selected_files()
+        if len(files) != 1:
+            return
+        
+        old_path = files[0]
+        old_name = old_path.name
+        
+        # 创建自定义对话框
+        from PySide6.QtWidgets import QDialog, QVBoxLayout, QLabel, QDialogButtonBox
+        dialog = QDialog(self)
+        dialog.setWindowTitle(I18n.tr('rename'))
+        dialog.setMinimumWidth(400)
+        
+        layout = QVBoxLayout(dialog)
+        
+        # 标签
+        label = QLabel(f"{I18n.tr('new_name')}:")
+        layout.addWidget(label)
+
+        # 文件名输入框
+        name_edit = UnderlineEdit(old_name)
+        layout.addWidget(name_edit)
+
+        # 按钮
+        button_box = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
+        button_box.accepted.connect(dialog.accept)
+        button_box.rejected.connect(dialog.reject)
+
+        # 应用全局按钮样式
+        ok_btn = button_box.button(QDialogButtonBox.Ok)
+        if ok_btn:
+            ok_btn.setStyleSheet(BUTTON_STYLES['primary'])
+            ok_btn.setText(I18n.tr('ok'))
+        cancel_btn = button_box.button(QDialogButtonBox.Cancel)
+        if cancel_btn:
+            cancel_btn.setStyleSheet(BUTTON_STYLES['secondary'])
+            cancel_btn.setText(I18n.tr('cancel'))
+        
+        layout.addWidget(button_box)
+        
+        # 选择文件名部分（不包括扩展名）
+        if '.' in old_name and not old_name.startswith('.'):
+            # 找到最后一个点的位置
+            dot_pos = old_name.rfind('.')
+            name_edit.setSelection(0, dot_pos)
+        else:
+            # 没有扩展名，选择全部
+            name_edit.selectAll()
+        
+        # 显示对话框
+        if dialog.exec() == QDialog.Accepted:
+            new_name = name_edit.text().strip()
+            
+            if new_name and new_name != old_name:
+                new_path = old_path.parent / new_name
+                
+                # 检查文件名是否合法
+                if not self.is_valid_filename(new_name):
+                    # 创建自定义警告框
+                    msg_box = QMessageBox(self)
+                    msg_box.setWindowTitle("错误")
+                    msg_box.setText(I18n.tr('error_invalid_name'))
+                    msg_box.setIcon(QMessageBox.Warning)
+                    
+                    # 添加自定义按钮
+                    ok_btn = msg_box.addButton(I18n.tr('ok'), QMessageBox.AcceptRole)
+                    ok_btn.setStyleSheet(BUTTON_STYLES['primary'])
+                    
+                    msg_box.exec()
+                    return
+                
+                # 检查文件是否已存在
+                if new_path.exists():
+                    # 创建自定义警告框
+                    msg_box = QMessageBox(self)
+                    msg_box.setWindowTitle("错误")
+                    msg_box.setText(I18n.tr('error_file_exists'))
+                    msg_box.setIcon(QMessageBox.Warning)
+                    
+                    # 添加自定义按钮
+                    ok_btn = msg_box.addButton(I18n.tr('ok'), QMessageBox.AcceptRole)
+                    ok_btn.setStyleSheet(BUTTON_STYLES['primary'])
+                    
+                    msg_box.exec()
+                    return
+                
+                try:
+                    # 重命名前先取消该文件的传输任务，避免 Windows 文件锁导致重命名失败
+                    import time
+                    try:
+                        old_rel_path = str(old_path.relative_to(self.folder_path)).replace('\\', '/')
+                        if self._cancel_transfer_callback:
+                            self._cancel_transfer_callback(old_rel_path)
+                    except Exception:
+                        pass
+                    
+                    # 循环尝试重命名，覆盖发送任务退出期间的最坏情况（最多 2 秒阻塞）
+                    renamed = False
+                    last_error = None
+                    for attempt in range(30):
+                        try:
+                            old_path.rename(new_path)
+                            renamed = True
+                            break
+                        except PermissionError as pe:
+                            last_error = pe
+                            time.sleep(0.1)
+                        except OSError as oe:
+                            last_error = oe
+                            time.sleep(0.1)
+                    
+                    if not renamed:
+                        raise last_error if last_error else Exception("重命名失败")
+                    
+                    # 只有本地操作才触发同步信号
+                    if not self.is_syncing(str(old_path)):
+                        self.file_renamed.emit(str(old_path), str(new_path))
+                    self.load_files()
+                except Exception as e:
+                    # 创建自定义错误框
+                    msg_box = QMessageBox(self)
+                    msg_box.setWindowTitle("错误")
+                    msg_box.setText(f"重命名失败: {str(e)}")
+                    msg_box.setIcon(QMessageBox.Critical)
+                    
+                    # 添加自定义按钮
+                    ok_btn = msg_box.addButton(I18n.tr('ok'), QMessageBox.AcceptRole)
+                    ok_btn.setStyleSheet(BUTTON_STYLES['primary'])
+                    
+                    msg_box.exec()
+    
+    def is_valid_filename(self, name: str) -> bool:
+        """检查文件名是否合法"""
+        if not name or len(name) > Config.MAX_FILE_NAME_LENGTH:
+            return False
+        
+        for char in Config.FORBIDDEN_CHARS:
+            if char in name:
+                return False
+        
+        return True
+    
+    def save_to(self):
+        """保存文件到指定位置（将选中的文件复制到外部目录）"""
+        files = self.get_selected_files()
+        if not files:
+            return
+        
+        # 弹出文件夹选择对话框
+        dest_folder = QFileDialog.getExistingDirectory(
+            self,
+            I18n.tr('save_to'),
+            self._get_dialog_start_dir()
+        )
+        
+        if not dest_folder:
+            return
+        
+        # 记忆本次选择的目录
+        self._last_dialog_dir = dest_folder
+        
+        dest_path = Path(dest_folder)
+        
+        # 检查是否有文件已存在
+        existing_files = []
+        for src_file in files:
+            dst = dest_path / src_file.name
+            if dst.exists():
+                existing_files.append(src_file.name)
+        
+        # 如果有文件已存在，显示确认对话框
+        if existing_files:
+            file_list = "\n".join(existing_files[:5])
+            if len(existing_files) > 5:
+                file_list += f"\n... 还有 {len(existing_files) - 5} 个文件"
+            
+            msg_box = QMessageBox(self)
+            msg_box.setWindowTitle(I18n.tr('confirm_replace'))
+            msg_box.setText(f"以下文件已存在，是否替换？\n\n{file_list}")
+            msg_box.setIcon(QMessageBox.Question)
+            
+            ok_btn = msg_box.addButton(I18n.tr('ok'), QMessageBox.YesRole)
+            cancel_btn = msg_box.addButton(I18n.tr('cancel'), QMessageBox.RejectRole)
+            
+            ok_btn.setStyleSheet(BUTTON_STYLES['primary'])
+            cancel_btn.setStyleSheet(BUTTON_STYLES['danger'])
+            # 统一按钮宽度
+            ok_btn.setFixedWidth(80)
+            cancel_btn.setFixedWidth(80)
+            
+            msg_box.setDefaultButton(cancel_btn)
+            msg_box.exec()
+            
+            if msg_box.clickedButton() != ok_btn:
+                return
+        
+        # 使用进度对话框复制文件
+        from ui.progress_dialog import CopyProgressDialog
+        
+        progress_dialog = CopyProgressDialog(self)
+        progress_dialog.setWindowTitle(I18n.tr('save_to'))
+        progress_dialog.show()
+        
+        # 创建工作线程
+        self._copy_worker = FileCopyWorker([str(f) for f in files], dest_path)
+        
+        # 连接信号
+        self._copy_worker.file_started.connect(
+            lambda name: progress_dialog.set_filename(name)
+        )
+        self._copy_worker.progress_updated.connect(
+            lambda idx, progress, total: progress_dialog.set_progress(progress)
+        )
+        self._copy_worker.file_finished.connect(
+            lambda path: None  # 保存至外部不需要触发同步信号
+        )
+        self._copy_worker.all_finished.connect(
+            lambda: self._on_save_to_finished(progress_dialog)
+        )
+        self._copy_worker.error_occurred.connect(
+            lambda msg: self._show_error(msg)
+        )
+        progress_dialog.cancelled.connect(
+            lambda: self._copy_worker.cancel()
+        )
+        
+        self._copy_worker.start()
+    
+    def _on_save_to_finished(self, dialog):
+        """保存至完成回调"""
+        dialog.allow_close()
+        dialog.close()
+    
+    # ========== 拖拽功能 ==========
+    
+    def _handle_files_dragged(self, files: List[str], target_path: str, is_internal: bool):
+        """处理拖拽的文件"""
+        if is_internal:
+            # 内部拖拽：移动或复制文件
+            # 检查是否按住Ctrl键
+            modifiers = QApplication.keyboardModifiers()
+            if modifiers & Qt.ControlModifier:
+                action = Qt.CopyAction
+            else:
+                action = Qt.MoveAction
+            
+            self._handle_internal_drop(files, action, target_path)
+        else:
+            # 外部拖拽：添加文件
+            # 如果有目标文件夹，添加到目标文件夹
+            if target_path:
+                self.add_files(files, Path(target_path))
+            else:
+                self.add_files(files)
+    
+    def _handle_internal_drop(self, files: List[str], action, target_path: str = ""):
+        """处理内部拖拽"""
+        # 检查是否按住Ctrl键（复制）
+        is_copy = (action == Qt.CopyAction)
+
+        # 确定目标目录
+        if target_path:
+            target_dir = Path(target_path)
+        else:
+            target_dir = self.current_path
+
+        # 用于同目录比较的规范化目标（统一大小写/“..”/分隔符，避免比较失效导致多余交互）
+        try:
+            target_resolved = Path(target_dir).resolve()
+        except Exception:
+            target_resolved = Path(target_dir)
+
+        # 收集有效文件和已存在文件
+        valid_files = []
+        existing_files = []
+
+        for src_path in files:
+            src = Path(src_path)
+            if not src.exists():
+                continue
+
+            # 规范化源路径（用于目录场景比较）
+            try:
+                src_resolved = Path(src).resolve()
+            except Exception:
+                src_resolved = Path(src)
+
+            # 拖到文件自身所在目录：静默跳过，不做任何移动，避免多余交互
+            # 包括两类：目标为源所在父目录（同目录），以及目录被拖到其自身（目标==源本身）
+            if src_resolved.parent == target_resolved or (src.is_dir() and src_resolved == target_resolved):
+                continue
+
+            # 拖拽到自己的子文件夹（严格真子目录）才提示，避免把"拖到自身"误判成子目录而误弹
+            try:
+                is_descendant = target_resolved != src_resolved and target_resolved.is_relative_to(src_resolved)
+            except Exception:
+                is_descendant = Path(target_dir) != src and Path(target_dir).is_relative_to(src)
+            if src.is_dir() and is_descendant:
+                # 创建自定义警告框
+                msg_box = QMessageBox(self)
+                msg_box.setWindowTitle("错误")
+                msg_box.setText("不能将文件夹移动到自己的子文件夹中")
+                msg_box.setIcon(QMessageBox.Warning)
+
+                # 添加自定义按钮
+                ok_btn = msg_box.addButton(I18n.tr('ok'), QMessageBox.AcceptRole)
+                ok_btn.setStyleSheet(BUTTON_STYLES['primary'])
+
+                msg_box.exec()
+                continue
+
+            dst = target_dir / src.name
+
+            # 检查目标文件是否存在
+            if dst.exists():
+                existing_files.append(src.name)
+            else:
+                valid_files.append(src)
+
+        # 如果有已存在的文件，一次性询问是否替换
+        if existing_files:
+            file_list = "\n".join(existing_files[:5])
+            if len(existing_files) > 5:
+                file_list += f"\n... 还有 {len(existing_files) - 5} 个文件"
+
+            # 创建自定义消息框
+            msg_box = QMessageBox(self)
+            msg_box.setWindowTitle(I18n.tr('confirm_replace'))
+            msg_box.setText(f"以下文件已存在，是否全部替换？\n\n{file_list}")
+            msg_box.setIcon(QMessageBox.Question)
+
+            # 添加自定义按钮
+            ok_btn = msg_box.addButton(I18n.tr('ok'), QMessageBox.YesRole)
+            cancel_btn = msg_box.addButton(I18n.tr('cancel'), QMessageBox.RejectRole)
+
+            # 应用全局按钮样式：确定蓝色，取消红色
+            ok_btn.setStyleSheet(BUTTON_STYLES['primary'])
+            cancel_btn.setStyleSheet(BUTTON_STYLES['danger'])
+            # 统一按钮宽度，与“是否退出房间”等确认弹窗保持一致
+            ok_btn.setFixedWidth(80)
+            cancel_btn.setFixedWidth(80)
+
+            msg_box.setDefaultButton(cancel_btn)
+            msg_box.exec()
+
+            if msg_box.clickedButton() == ok_btn:
+                # 用户同意替换，添加所有已存在的文件
+                for src_path in files:
+                    src = Path(src_path)
+                    if src.exists() and src.name in existing_files:
+                        valid_files.append(src)
+            else:
+                # 取消：终止整个移动/复制操作
+                return
+
+        # 若既无需要移动/复制的文件，也无已存在的冲突，说明整体为无效/自身移动
+        # 显示"无效操作"悬浮提示，然后返回（不刷新列表，避免多余的交互）
+        if not valid_files and not existing_files:
+            self._show_toast(I18n.tr('toast_invalid_drop'))
+            return
+
+        # 执行文件操作
+        for src in valid_files:
+            dst = target_dir / src.name
+            # 兜底：复制时目标位于源自身子树内（自嵌套）会触发 copytree 自递归崩溃，跳过该条目
+            try:
+                if is_copy and src.is_dir() and (dst.resolve() == src.resolve() or dst.resolve().is_relative_to(src.resolve())):
+                    continue
+            except Exception:
+                pass
+
+            try:
+                if is_copy:
+                    # 复制文件
+                    if src.is_dir():
+                        # 如果目标文件夹已存在，先删除
+                        if dst.exists():
+                            from sync.file_manager import safe_rmtree
+                            safe_rmtree(dst)
+                        shutil.copytree(src, dst)
+                        is_dir_copy = True
+                    else:
+                        # 如果目标文件已存在，先删除
+                        if dst.exists():
+                            dst.unlink()
+                        shutil.copy2(src, dst)
+                        is_dir_copy = False
+
+                    # 触发同步信号
+                    if not self.is_syncing(str(dst)):
+                        self.file_added.emit(str(dst))
+                        # 目录复制需递归发射空子目录，避免复制后空目录被忽略
+                        if is_dir_copy:
+                            self._emit_folder_files(dst)
+                else:
+                    # 移动文件
+                    # 如果目标文件已存在，先删除
+                    if dst.exists():
+                        if dst.is_dir():
+                            from sync.file_manager import safe_rmtree
+                            safe_rmtree(dst)
+                        else:
+                            dst.unlink()
+                    src.rename(dst)
+
+                    # 触发同步信号
+                    if not self.is_syncing(str(src)):
+                        self.file_renamed.emit(str(src), str(dst))
+
+            except Exception as e:
+                self._show_error(f"操作失败: {str(e)}")
+        
+        # 刷新文件列表
+        self.load_files()
+    
+    def add_files(self, file_paths: List[str], target_dir: Path = None):
+        """添加文件到指定目录"""
+        from ui.progress_dialog import CopyProgressDialog
+        
+        # 如果没有指定目标目录，使用当前目录
+        if target_dir is None:
+            target_dir = self.current_path
+        
+        # 检查是否有文件已存在
+        existing_files = []
+        for src_path in file_paths:
+            src = Path(src_path)
+            if not src.exists():
+                continue
+            
+            dst = target_dir / src.name
+            if dst.exists():
+                existing_files.append(src.name)
+        
+        # 如果有文件已存在，显示确认对话框
+        if existing_files:
+            file_list = "\n".join(existing_files[:5])  # 最多显示5个文件
+            if len(existing_files) > 5:
+                file_list += f"\n... 还有 {len(existing_files) - 5} 个文件"
+            
+            # 创建自定义消息框
+            msg_box = QMessageBox(self)
+            msg_box.setWindowTitle(I18n.tr('confirm_replace'))
+            msg_box.setText(f"以下文件已存在，是否替换？\n\n{file_list}")
+            msg_box.setIcon(QMessageBox.Question)
+            
+            # 添加自定义按钮
+            ok_btn = msg_box.addButton(I18n.tr('ok'), QMessageBox.YesRole)
+            cancel_btn = msg_box.addButton(I18n.tr('cancel'), QMessageBox.RejectRole)
+            
+            # 应用全局按钮样式：确定蓝色，取消红色
+            ok_btn.setStyleSheet(BUTTON_STYLES['primary'])
+            cancel_btn.setStyleSheet(BUTTON_STYLES['danger'])
+            # 统一按钮宽度，与“是否退出房间”等确认弹窗保持一致
+            ok_btn.setFixedWidth(80)
+            cancel_btn.setFixedWidth(80)
+            
+            msg_box.setDefaultButton(cancel_btn)
+            msg_box.exec()
+            
+            if msg_box.clickedButton() != ok_btn:
+                return
+        
+        # 创建进度对话框
+        progress_dialog = CopyProgressDialog(self)
+        progress_dialog.setWindowTitle("复制文件")
+        progress_dialog.show()
+        
+        # 创建工作线程
+        self._copy_worker = FileCopyWorker(file_paths, target_dir)
+        
+        # 连接信号
+        self._copy_worker.file_started.connect(
+            lambda name: progress_dialog.set_filename(name)
+        )
+        self._copy_worker.progress_updated.connect(
+            lambda idx, progress, total: progress_dialog.set_progress(progress)
+        )
+        self._copy_worker.file_finished.connect(
+            lambda path: self._on_file_copied(path)
+        )
+        self._copy_worker.all_finished.connect(
+            lambda: self._on_copy_finished(progress_dialog)
+        )
+        self._copy_worker.error_occurred.connect(
+            lambda msg: self._show_error(msg)
+        )
+        self._copy_worker.cancelled.connect(
+            lambda: self._on_copy_cancelled(progress_dialog)
+        )
+        progress_dialog.cancelled.connect(
+            lambda: self._copy_worker.cancel()
+        )
+
+        # 启动工作线程
+        self._copy_worker.start()
+
+    def _on_file_copied(self, file_path: str):
+        """文件复制完成回调"""
+        # 立即发射信号，不等待对话框关闭
+        # 只有本地操作才触发同步信号
+        if not self.is_syncing(file_path):
+            # 检查是否是文件夹
+            path = Path(file_path)
+            if path.is_dir():
+                # 如果是文件夹，先发射文件夹创建信号
+                self.file_added.emit(file_path)
+                # 然后递归发射所有文件的信号
+                self._emit_folder_files(path)
+            else:
+                # 如果是文件，直接发射信号
+                self.file_added.emit(file_path)
+
+    def _emit_folder_files(self, folder_path: Path):
+        """递归发射文件夹内所有文件的信号
+
+        对 `is_dir()` 的子目录也发射 dir_created 信号，
+        否则不含文件的空子目录（不会被文件传输隐式创建）会被忽略，
+        导致复制/粘贴/拖拽导入的文件夹树丢失空目录结构。
+        """
+        try:
+            for item in folder_path.rglob('*'):
+                if item.is_dir():
+                    # 发射目录创建信号，保证空子目录及整棵目录结构都能同步
+                    # 根目录由调用处的 file_added(文件夹) 处理，此处 rglob('*') 不含根目录，不会重复
+                    self.dir_created.emit(str(item))
+                elif item.is_file():
+                    # 发射文件添加信号
+                    self.file_added.emit(str(item))
+        except Exception as e:
+            print(f"发射文件夹文件信号失败: {e}")
+
+    def _on_copy_cancelled(self, dialog):
+        """复制被取消回调"""
+        # 关闭对话框
+        dialog.allow_close()
+        dialog.close()
+        # 刷新文件列表（取消时部分文件已被清理）
+        self.load_files()
+
+    def _on_copy_finished(self, dialog):
+        """所有文件复制完成回调"""
+        # 立即关闭对话框，网络同步会在后台进行
+        dialog.allow_close()
+        dialog.close()
+        # 刷新文件列表
+        self.load_files()
+    
+    def _show_error(self, message: str):
+        """显示错误消息（在主线程中调用）"""
+        # 创建自定义错误框
+        msg_box = QMessageBox(self)
+        msg_box.setWindowTitle("错误")
+        msg_box.setText(message)
+        msg_box.setIcon(QMessageBox.Critical)
+        
+        # 添加自定义按钮
+        ok_btn = msg_box.addButton(I18n.tr('ok'), QMessageBox.AcceptRole)
+        ok_btn.setStyleSheet(BUTTON_STYLES['primary'])
+        
+        msg_box.exec()
+    
+    def refresh(self):
+        """
+        刷新文件列表（用于接收远程文件后）
+        不会触发同步信号
+        """
+        self.load_files()

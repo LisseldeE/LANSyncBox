@@ -1,0 +1,895 @@
+"""
+全局UI组件
+Copyright (c) 2026 Lisselde_E <Lisselde.E@outlook.com>.
+Licensed under the GNU General Public License v3.0.
+"""
+from PySide6.QtWidgets import QPushButton, QLabel, QFrame, QGraphicsOpacityEffect, QWidget, QApplication, QLineEdit
+from PySide6.QtCore import Qt, QTimer, QPropertyAnimation, QByteArray, QPoint, QEvent, Signal, Property, QRectF, QEasingCurve, QObject
+from PySide6.QtGui import QFont, QEnterEvent, QPainter, QColor, QPen, QBrush, QPalette, QMouseEvent
+from functools import partial
+from math import ceil, floor
+
+
+class AnimatedButton(QPushButton):
+    """
+    带动画效果的按钮类
+    - 点击时有按下效果（向下移动1px模拟下沉）
+    - 释放时恢复原始位置
+    """
+
+    def __init__(self, text="", parent=None):
+        super().__init__(text, parent)
+        self._original_pos = None      # 保存原始位置
+        self._is_pressed = False       # 标记是否处于按下状态
+
+    def event(self, event):
+        """处理所有事件，包括布局改变事件"""
+        # 当布局改变时（窗口大小调整），清除保存的位置
+        if event.type() == QEvent.LayoutRequest:
+            if not self._is_pressed:
+                self._original_pos = None
+        return super().event(event)
+
+    def mousePressEvent(self, event):
+        """鼠标按下 - 向下移动1px模拟按下效果"""
+        if event.button() != Qt.LeftButton:
+            super().mousePressEvent(event)
+            return
+            
+        # 每次点击时重新获取当前位置
+        self._original_pos = self.pos()
+
+        self._is_pressed = True
+        super().mousePressEvent(event)
+        
+        # 在事件处理后移动
+        if self._original_pos:
+            self.move(QPoint(self._original_pos.x(), self._original_pos.y() + 1))
+
+    def mouseReleaseEvent(self, event):
+        """鼠标释放 - 恢复原始位置"""
+        if event.button() != Qt.LeftButton:
+            super().mouseReleaseEvent(event)
+            return
+            
+        self._is_pressed = False
+        if self._original_pos is not None:
+            self.move(self._original_pos)
+        super().mouseReleaseEvent(event)
+
+
+class SnapOutlineButton(AnimatedButton):
+    """
+    设备像素对齐边框按钮
+
+    解决非整数缩放（如125%）下 QSS 1px 边框落在小数设备像素上，
+    导致上/左边框被裁切、显示不完整不圆润的视觉缺陷。
+
+    边框使用 QPainter 手动绘制，并对齐到物理像素网格：
+    - 描边宽度为 1 逻辑像素（与 QSS 1px 视觉一致，不会变细）
+    - 边界取整后描边完全位于控件内，不会被裁切
+    - 悬浮/按下背景与边框共用同一对齐矩形，边缘完全吻合
+    - 任意缩放下四边完整、宽度均匀、圆角锐利
+    """
+
+    def __init__(self, text="", parent=None):
+        super().__init__(text, parent)
+        self._hovered = False
+        self._pressed_state = False
+        # 移除 QSS 边框，避免与自绘边框双重渲染（保留文字颜色与内边距）
+        # padding 保持与 outline 样式一致，避免未显式设置高度时按钮塌缩成胶囊形
+        self.setStyleSheet("""
+            QPushButton {
+                background-color: transparent;
+                color: #339af0;
+                border: none;
+                border-radius: 6px;
+                padding: 8px 16px;
+            }
+            QPushButton:disabled {
+                color: #adb5bd;
+            }
+        """)
+
+    def enterEvent(self, event):
+        self._hovered = True
+        self.update()
+        super().enterEvent(event)
+
+    def leaveEvent(self, event):
+        self._hovered = False
+        self.update()
+        super().leaveEvent(event)
+
+    def mousePressEvent(self, event):
+        if event.button() == Qt.LeftButton:
+            self._pressed_state = True
+            self.update()
+        super().mousePressEvent(event)
+
+    def mouseReleaseEvent(self, event):
+        self._pressed_state = False
+        self.update()
+        super().mouseReleaseEvent(event)
+
+    def paintEvent(self, event):
+        # 1. 背景（悬停/按下状态填充，与边框使用同一对齐矩形 → 边缘完全吻合）
+        #    禁用时不绘制背景，避免禁用态仍出现悬浮高亮
+        if (self._hovered or self._pressed_state) and self.isEnabled():
+            hover_color, pressed_color = self._fill_colors()
+            p = QPainter(self)
+            p.setRenderHint(QPainter.Antialiasing, True)
+            p.setPen(Qt.NoPen)
+            p.setBrush(pressed_color if self._pressed_state else hover_color)
+            p.drawRoundedRect(self._aligned_rect(), 6.0, 6.0)
+            p.end()
+        # 2. 文字（基类绘制，QSS 仅提供文字颜色、无边框）
+        super().paintEvent(event)
+        # 3. 设备像素对齐边框
+        p = QPainter(self)
+        p.setRenderHint(QPainter.Antialiasing, True)
+        p.setPen(self._aligned_pen())
+        p.setBrush(Qt.NoBrush)
+        p.drawRoundedRect(self._aligned_rect(), 6.0, 6.0)
+        p.end()
+
+    def _pen_width(self) -> float:
+        """描边逻辑像素宽度（保证至少 1.25 设备像素，100% 缩放下不过细）
+
+        100% 缩放时若为 1 设备像素会显得过细；与 125% 下的视觉一致，
+        统一按至少 1.25 设备像素渲染，高缩放比例下退化为 1 逻辑像素。
+        """
+        dpr = self.devicePixelRatio()
+        return max(1.0, 1.25 / dpr)
+
+    def _aligned_rect(self) -> QRectF:
+        """返回对齐到设备像素网格的描边中心线矩形（逻辑坐标）
+
+        中心线相对对齐边界内缩 半笔宽（设备像素），
+        使描边恰好从对齐边界起向内铺满、四边完整。
+        """
+        dpr = self.devicePixelRatio()
+        # 控件物理原点（相对于顶层窗口，逻辑坐标 * dpr 后可能为小数）
+        win = self.window()
+        pos = self.mapTo(win, QPoint(0, 0)) if (win is not None and win is not self) else QPoint(0, 0)
+        px0 = pos.x() * dpr
+        py0 = pos.y() * dpr
+        phys_right = px0 + self.width() * dpr
+        phys_bottom = py0 + self.height() * dpr
+        # 边界对齐到整像素：左上取上整、右下取下整，保证描边完全位于控件内
+        al_left = ceil(px0)
+        al_top = ceil(py0)
+        al_right = floor(phys_right)
+        al_bottom = floor(phys_bottom)
+        # 半笔宽（设备像素）：由 _pen_width 决定的实际笔宽折算
+        half = self._pen_width() * dpr / 2.0
+        left = (al_left + half - px0) / dpr
+        top = (al_top + half - py0) / dpr
+        right = (al_right - half - px0) / dpr
+        bottom = (al_bottom - half - py0) / dpr
+        return QRectF(left, top, right - left, bottom - top)
+
+    def _aligned_pen(self) -> QPen:
+        """返回按 _pen_width 加宽的画笔（100% 下加粗、高缩放退化为 1 逻辑像素）"""
+        pen = QPen(QColor("#adb5bd") if not self.isEnabled() else QColor("#339af0"))
+        pen.setWidthF(self._pen_width())
+        pen.setCapStyle(Qt.RoundCap)
+        pen.setJoinStyle(Qt.RoundJoin)
+        return pen
+
+    def _is_dark_mode(self) -> bool:
+        """当前是否为深色模式（依据窗口背景亮度判断，与 loading_animation 一致）
+
+        注意：不能使用 self.palette() —— 本控件 QSS 设置了
+        background-color: transparent，会污染自身调色板的 Window 角色
+        （解析为纯黑），导致深浅模式误判。应使用顶层窗口/应用调色板。
+        """
+        win = self.window()
+        pal = win.palette() if win is not None and win is not self else QApplication.palette()
+        bg = pal.color(QPalette.Window)
+        luminance = bg.red() * 0.299 + bg.green() * 0.587 + bg.blue() * 0.114
+        return luminance < 128
+
+    def _fill_colors(self):
+        """根据深浅模式返回悬浮/按下填充色
+
+        浅色模式使用与原 outline 样式一致的浅蓝实色；
+        深色模式下使用深蓝调，避免浅色填充块在深色背景上刺眼。
+        """
+        if self._is_dark_mode():
+            return QColor("#1e3a5c"), QColor("#274b79")
+        return QColor("#e7f5ff"), QColor("#d0ebff")
+
+
+class ClickableLabel(QLabel):
+    """
+    可点击标签类 - 支持悬浮效果和下划线
+    
+    特性：
+    - 使用 enterEvent/leaveEvent 手动控制 hover 效果，确保稳定性
+    - 使用 QFont 设置下划线，避免 stylesheet 不生效问题
+    - 点击后样式不会丢失
+    """
+    
+    def __init__(self, text="", parent=None, 
+                 normal_color="#339af0", hover_color="#228be6",
+                 underline_on_hover=True):
+        super().__init__(text, parent)
+        
+        self._normal_color = normal_color
+        self._hover_color = hover_color
+        self._underline_on_hover = underline_on_hover
+        self._is_hovering = False
+        
+        # 设置默认样式
+        self.setStyleSheet(f"QLabel {{ font-size: 11px; color: {self._normal_color}; }}")
+        self.setAlignment(Qt.AlignCenter)
+        
+        # 保存原始字体
+        self._original_font = self.font()
+    
+    def enterEvent(self, event):
+        """鼠标进入 - 应用 hover 样式"""
+        if isinstance(event, QEnterEvent):
+            self._is_hovering = True
+            self._apply_hover_style()
+        super().enterEvent(event)
+    
+    def leaveEvent(self, event):
+        """鼠标离开 - 恢复正常样式"""
+        self._is_hovering = False
+        self._apply_normal_style()
+        super().leaveEvent(event)
+    
+    def mousePressEvent(self, event):
+        """鼠标点击 - 打开链接"""
+        if event.button() == Qt.LeftButton and hasattr(self, '_click_callback'):
+            # 执行点击回调
+            if self._click_callback:
+                self._click_callback(event)
+        # 不调用 super().mousePressEvent，避免干扰 hover 状态
+    
+    def mouseReleaseEvent(self, event):
+        """鼠标释放 - 保持 hover 状态"""
+        # 如果鼠标仍在控件上，保持 hover 状态
+        if self._is_hovering:
+            self._apply_hover_style()
+    
+    def set_click_callback(self, callback):
+        """设置点击回调函数"""
+        self._click_callback = callback
+        self.setCursor(Qt.PointingHandCursor)
+    
+    def _apply_hover_style(self):
+        """应用 hover 样式"""
+        self.setStyleSheet(f"QLabel {{ font-size: 11px; color: {self._hover_color}; }}")
+        
+        if self._underline_on_hover:
+            font = QFont(self._original_font)
+            font.setUnderline(True)
+            self.setFont(font)
+    
+    def _apply_normal_style(self):
+        """应用正常样式"""
+        self.setStyleSheet(f"QLabel {{ font-size: 11px; color: {self._normal_color}; }}")
+        
+        if self._underline_on_hover:
+            font = QFont(self._original_font)
+            font.setUnderline(False)
+            self.setFont(font)
+
+
+class NotificationBanner(QFrame):
+    """
+    顶部浮动通知横幅 - 置顶重叠显示，不挤压上方元素
+
+    支持类型:
+        success (绿色) / error (红色) / warning (黄色) / info (蓝色)
+    """
+
+    SUCCESS = 'success'
+    ERROR = 'error'
+    WARNING = 'warning'
+    INFO = 'info'
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        
+        # 定时器：自动隐藏
+        self._timeout_timer = QTimer(self)
+        self._timeout_timer.setSingleShot(True)
+        self._timeout_timer.timeout.connect(self._start_hide_animation)
+
+        # 动画相关
+        self._fade_animation = None
+        self._opacity_effect = None
+        self._is_animating = False
+        self._is_showing = False  # 防止重复显示
+
+        self.setVisible(False)
+        self._init_ui()
+
+    def _init_ui(self):
+        """初始化界面"""
+        self.setFrameShape(QFrame.StyledPanel)
+        
+        layout = QHBoxLayout(self)
+        layout.setContentsMargins(12, 8, 12, 8)
+        layout.setSpacing(8)
+        
+        # 消息标签
+        self.message_label = QLabel()
+        self.message_label.setWordWrap(True)
+        layout.addWidget(self.message_label, 1)
+        
+        # 关闭按钮
+        self.close_btn = QPushButton("×")
+        self.close_btn.setFixedSize(20, 20)
+        self.close_btn.setFlat(True)
+        self.close_btn.setCursor(Qt.PointingHandCursor)
+        self.close_btn.clicked.connect(self.dismiss)
+        layout.addWidget(self.close_btn)
+
+    def show_message(self, message, type='success', duration=3500):
+        """
+        显示通知横幅
+
+        Args:
+            message: 通知文本
+            type: success / error / warning / info
+            duration: 自动隐藏毫秒（0 表示不自动隐藏）
+        """
+        # 防止重复显示
+        if self._is_showing:
+            return
+        self._is_showing = True
+        
+        # 停止旧的动画
+        self._stop_animations()
+
+        # 设置样式和内容
+        self.message_label.setText(message)
+        
+        # 根据类型设置样式
+        styles = {
+            self.SUCCESS: {
+                'bg': '#d3f9d8',
+                'border': '#2b8a3e',
+                'text': '#2b8a3e'
+            },
+            self.ERROR: {
+                'bg': '#ffe3e3',
+                'border': '#c92a2a',
+                'text': '#c92a2a'
+            },
+            self.WARNING: {
+                'bg': '#fff3bf',
+                'border': '#e67700',
+                'text': '#e67700'
+            },
+            self.INFO: {
+                'bg': '#d0ebff',
+                'border': '#1971c2',
+                'text': '#1971c2'
+            }
+        }
+        
+        style = styles.get(type, styles[self.SUCCESS])
+        self.setStyleSheet(f"""
+            QFrame {{
+                background-color: {style['bg']};
+                border: 1px solid {style['border']};
+                border-radius: 6px;
+            }}
+            QLabel {{
+                color: {style['text']};
+                font-size: 13px;
+            }}
+            QPushButton {{
+                color: {style['text']};
+                font-size: 16px;
+                font-weight: bold;
+                border: none;
+            }}
+            QPushButton:hover {{
+                background-color: rgba(0, 0, 0, 0.1);
+                border-radius: 10px;
+            }}
+        """)
+
+        # 淡入动画
+        self._start_show_animation()
+
+        # 定时自动隐藏
+        if duration > 0:
+            self._timeout_timer.start(duration)
+
+    def _start_show_animation(self):
+        """淡入显示"""
+        self._is_animating = True
+
+        # 创建透明度效果
+        if not self._opacity_effect:
+            self._opacity_effect = QGraphicsOpacityEffect(self)
+            self.setGraphicsEffect(self._opacity_effect)
+
+        self._opacity_effect.setOpacity(0.0)
+        self.setVisible(True)
+
+        # 创建动画
+        anim = QPropertyAnimation(self._opacity_effect, QByteArray(b"opacity"))
+        anim.setDuration(200)
+        anim.setStartValue(0.0)
+        anim.setEndValue(1.0)
+        self._fade_animation = anim
+        anim.finished.connect(self._on_show_finished)
+        anim.start()
+
+    def _start_hide_animation(self):
+        """淡出隐藏"""
+        if self._is_animating or not self.isVisible():
+            return
+
+        self._is_animating = True
+        self._timeout_timer.stop()
+
+        # 创建动画
+        anim = QPropertyAnimation(self._opacity_effect, QByteArray(b"opacity"))
+        anim.setDuration(250)
+        anim.setStartValue(self._opacity_effect.opacity())
+        anim.setEndValue(0.0)
+        self._fade_animation = anim
+        anim.finished.connect(self._on_hide_finished)
+        anim.start()
+
+    def _on_show_finished(self):
+        """淡入完成"""
+        self._is_animating = False
+        self._fade_animation = None
+
+    def _on_hide_finished(self):
+        """淡出完成"""
+        self._is_animating = False
+        self._fade_animation = None
+        self._is_showing = False
+        self.setVisible(False)
+
+    def _stop_animations(self):
+        """停止所有动画"""
+        if self._fade_animation:
+            try:
+                self._fade_animation.finished.disconnect()
+            except:
+                pass
+            self._fade_animation.stop()
+            self._fade_animation.deleteLater()
+            self._fade_animation = None
+        self._timeout_timer.stop()
+        self._is_animating = False
+        self._is_showing = False
+
+    def dismiss(self):
+        """手动关闭"""
+        self._start_hide_animation()
+
+
+def fade_widget(parent, widget, visible, duration=150):
+    """
+    控件淡入淡出动画
+    
+    Args:
+        parent: 父对象（需要有 _fade_animations 字典）
+        widget: 要动画的控件
+        visible: True 显示（淡入），False 隐藏（淡出）
+        duration: 动画持续时间（毫秒）
+    """
+    if not hasattr(parent, '_fade_animations'):
+        parent._fade_animations = {}  # 字典存储 {widget: animation}
+
+    # 停止并清理该widget的旧动画
+    old_animation = parent._fade_animations.get(widget)
+    if old_animation:
+        try:
+            # 先停止动画
+            old_animation.stop()
+            # 从字典中移除
+            parent._fade_animations.pop(widget, None)
+            # 延迟删除
+            old_animation.deleteLater()
+        except RuntimeError:
+            # 对象已被删除
+            parent._fade_animations.pop(widget, None)
+
+    # 获取或创建透明度效果
+    effect = widget.graphicsEffect()
+    if not effect or not isinstance(effect, QGraphicsOpacityEffect):
+        effect = QGraphicsOpacityEffect(widget)
+        widget.setGraphicsEffect(effect)
+
+    # 创建动画
+    animation = QPropertyAnimation(effect, QByteArray(b"opacity"))
+    animation.setDuration(duration)
+    parent._fade_animations[widget] = animation
+
+    if visible:
+        # 淡入
+        widget.setVisible(True)
+        animation.setStartValue(0.0)
+        animation.setEndValue(1.0)
+    else:
+        # 淡出
+        animation.setStartValue(1.0)
+        animation.setEndValue(0.0)
+        animation.finished.connect(partial(_on_fade_finished, parent, widget))
+
+    animation.start()
+
+
+def _on_fade_finished(parent, widget):
+    """淡出动画完成回调"""
+    widget.setVisible(False)
+    if hasattr(parent, '_fade_animations'):
+        parent._fade_animations.pop(widget, None)
+
+
+# 按钮样式常量
+BUTTON_STYLES = {
+    'primary': """
+        QPushButton {
+            padding: 8px 16px;
+            font-size: 13px;
+            border-radius: 6px;
+            background-color: #339af0;
+            color: white;
+            border: none;
+        }
+        QPushButton:hover {
+            background-color: #228be6;
+        }
+        QPushButton:pressed {
+            background-color: #1c7ed6;
+        }
+        QPushButton:disabled {
+            background-color: #adb5bd;
+        }
+    """,
+    'success': """
+        QPushButton {
+            padding: 8px 16px;
+            font-size: 13px;
+            border-radius: 6px;
+            background-color: #51cf66;
+            color: white;
+            border: none;
+        }
+        QPushButton:hover {
+            background-color: #40c057;
+        }
+        QPushButton:pressed {
+            background-color: #37b24d;
+        }
+        QPushButton:disabled {
+            background-color: #adb5bd;
+        }
+    """,
+    'danger': """
+        QPushButton {
+            padding: 8px 16px;
+            font-size: 13px;
+            border-radius: 6px;
+            background-color: #ff6b6b;
+            color: white;
+            border: none;
+        }
+        QPushButton:hover {
+            background-color: #fa5252;
+        }
+        QPushButton:pressed {
+            background-color: #f03e3e;
+        }
+        QPushButton:disabled {
+            background-color: #adb5bd;
+        }
+    """,
+    'secondary': """
+        QPushButton {
+            padding: 8px 16px;
+            font-size: 13px;
+            border-radius: 6px;
+            background-color: #868e96;
+            color: white;
+            border: 1px solid transparent;
+        }
+        QPushButton:hover {
+            background-color: #495057;
+        }
+        QPushButton:pressed {
+            background-color: #343a40;
+        }
+        QPushButton:disabled {
+            background-color: #adb5bd;
+        }
+    """,
+    'outline': """
+        QPushButton {
+            padding: 8px 16px;
+            font-size: 13px;
+            border-radius: 6px;
+            background-color: transparent;
+            color: #339af0;
+            border: 1px solid #339af0;
+        }
+        QPushButton:hover {
+            background-color: #e7f5ff;
+        }
+        QPushButton:pressed {
+            background-color: #d0ebff;
+        }
+        QPushButton:disabled {
+            color: #adb5bd;
+            border-color: #adb5bd;
+        }
+    """
+}
+
+
+class ToggleSwitch(QWidget):
+    """
+    滑动开关组件 - 模拟手机开关样式
+    
+    特性：
+    - 支持开/关两种状态
+    - 滑动动画效果
+    - 使用全局蓝色 (#339af0)
+    - 圆形滑块在滑动条上左右滑动
+    - 可点击切换状态
+    - 发出 stateChanged 信号
+    """
+    
+    stateChanged = Signal(bool)  # 状态改变信号
+    
+    def __init__(self, parent=None, checked=False):
+        super().__init__(parent)
+
+        # 状态
+        self._checked = checked
+        self._animation_progress = 1.0 if checked else 0.0  # 动画进度（0.0-1.0）
+
+        # 动画
+        self._animation = QPropertyAnimation(self, QByteArray(b"animationProgress"), self)
+        self._animation.setDuration(250)  # 250ms动画时长，更丝滑
+        self._animation.setStartValue(0.0)
+        self._animation.setEndValue(1.0)
+        self._animation.setEasingCurve(QEasingCurve.OutCubic)  # 使用OutCubic缓动曲线，更丝滑
+
+        # 尺寸
+        self.setFixedSize(32, 18)  # 宽32px，高18px
+        self.setCursor(Qt.PointingHandCursor)
+
+        # 颜色
+        self._active_color = QColor("#339af0")  # 全局蓝色
+        self._inactive_color = QColor("#adb5bd")  # 灰色
+        self._handle_color = QColor("#ffffff")  # 白色滑块
+        
+    def sizeHint(self):
+        """推荐尺寸"""
+        return self.size()
+    
+    def minimumSizeHint(self):
+        """最小尺寸"""
+        return self.size()
+    
+    def isChecked(self):
+        """获取当前状态"""
+        return self._checked
+    
+    def setChecked(self, checked, animate=True):
+        """设置状态
+        
+        Args:
+            checked: True=开启，False=关闭
+            animate: 是否播放动画
+        """
+        if self._checked == checked:
+            return
+            
+        self._checked = checked
+        
+        if animate:
+            # 播放动画
+            self._animation.stop()
+            self._animation.setStartValue(self._animation_progress)
+            self._animation.setEndValue(1.0 if checked else 0.0)
+            self._animation.start()
+        else:
+            # 直接设置
+            self._animation_progress = 1.0 if checked else 0.0
+            self.update()
+        
+        self.stateChanged.emit(checked)
+    
+    def toggle(self):
+        """切换状态"""
+        self.setChecked(not self._checked)
+    
+    def mousePressEvent(self, event):
+        """鼠标点击 - 切换状态"""
+        if event.button() == Qt.LeftButton:
+            self.toggle()
+        super().mousePressEvent(event)
+    
+    def paintEvent(self, event):
+        """绘制开关"""
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.Antialiasing)
+        
+        # 尺寸参数
+        width = self.width()
+        height = self.height()
+        handle_size = height - 4  # 滑块直径（比高度小4px）
+        margin = 2  # 边距
+        
+        # 绘制背景滑动条（圆角矩形）
+        track_rect = QRectF(0, 0, width, height)
+        track_radius = height / 2.0
+        
+        # 背景颜色渐变（根据动画进度）
+        bg_color = self._inactive_color
+        if self._animation_progress > 0:
+            # 从灰色渐变到蓝色
+            bg_color = QColor(
+                int(self._inactive_color.red() + (self._active_color.red() - self._inactive_color.red()) * self._animation_progress),
+                int(self._inactive_color.green() + (self._active_color.green() - self._inactive_color.green()) * self._animation_progress),
+                int(self._inactive_color.blue() + (self._active_color.blue() - self._inactive_color.blue()) * self._animation_progress)
+            )
+        
+        painter.setPen(Qt.NoPen)
+        painter.setBrush(QBrush(bg_color))
+        painter.drawRoundedRect(track_rect, track_radius, track_radius)
+        
+        # 绘制滑块（圆形）
+        handle_x = margin + (width - handle_size - 2 * margin) * self._animation_progress
+        handle_y = margin
+        
+        painter.setBrush(QBrush(self._handle_color))
+        painter.setPen(QPen(QColor("#e0e0e0"), 1))  # 浅灰色边框
+        painter.drawEllipse(QRectF(handle_x, handle_y, handle_size, handle_size))
+    
+    def getAnimationProgress(self):
+        """获取动画进度（用于动画系统）"""
+        return self._animation_progress
+    
+    def setAnimationProgress(self, progress):
+        """设置动画进度（用于动画系统）"""
+        self._animation_progress = progress
+        self.update()
+    
+    # 定义动画属性
+    animationProgress = Property(float, getAnimationProgress, setAnimationProgress)
+
+
+class UnderlineEdit(QLineEdit):
+    """下划线输入框（聚焦底线从中间平滑展开）
+
+    无外框、透明背景，仅在底部绘制一条下划线，聚焦/失焦时以缓动动画
+    从中间向两侧展开/收起主题色高亮线，获得精致丝滑的输入反馈。
+
+    设计要点：
+    - 文字与底线分离：通过加大最小高度 + 底部 text margins 预留专用底线
+      区域，确保底线与文字下端不重叠。
+    - 只读场景（如路径显示框）：聚焦不展开高亮，保持静态底线。
+    - 颜色全部取自 palette()，明暗主题自动适配。
+    """
+
+    ANIM_MS = 260       # 展开/收起动画时长
+    MIN_HEIGHT = 34     # 最小高度，为底线预留空间
+
+    def __init__(self, text="", parent=None):
+        super().__init__(text, parent)
+        self.setFrame(False)
+        # 仅清除外框/背景，文字与选中色跟随 palette；占位符沿用 pal.placeholder
+        self.setStyleSheet(
+            "QLineEdit { background: transparent; border: none; color: palette(text);"
+            " selection-background-color: palette(highlight); selection-color: palette(highlighted-text); }"
+        )
+        self._progress = 0.0         # 0 收起 -> 1 展开
+        self._anim = QPropertyAnimation(self, QByteArray(b"underlineProgress"), self)
+        self._anim.setDuration(self.ANIM_MS)
+        self._anim.setEasingCurve(QEasingCurve.OutCubic)
+
+        # 为文字与底线预留间隙：上 6 / 下 10，底线画在底部专用区域，不与文字重叠
+        self.setTextMargins(2, 6, 2, 10)
+        self.setMinimumHeight(self.MIN_HEIGHT)
+
+    # ------------------------------------------------ 动画进度属性
+
+    def get_underline_progress(self) -> float:
+        return self._progress
+
+    def set_underline_progress(self, value: float):
+        self._progress = value
+        self.update()
+
+    underlineProgress = Property(float, get_underline_progress, set_underline_progress)
+
+    # ------------------------------------------------ 焦点/悬浮
+
+    def focusInEvent(self, event):
+        if self.isReadOnly():
+            self._progress = 0.0
+            self.update()
+        else:
+            self._anim.stop()
+            self._anim.setStartValue(self._progress)
+            self._anim.setEndValue(1.0)
+            self._anim.start()
+        super().focusInEvent(event)
+
+    def focusOutEvent(self, event):
+        if self.isReadOnly():
+            pass
+        else:
+            self._anim.stop()
+            self._anim.setStartValue(self._progress)
+            self._anim.setEndValue(0.0)
+            self._anim.start()
+        super().focusOutEvent(event)
+
+    def setReadOnly(self, read_only: bool):
+        # 切到只读时收起高亮底线
+        super().setReadOnly(read_only)
+        if read_only:
+            self._progress = 0.0
+            self.update()
+
+    # ------------------------------------------------ 绘制
+
+    def paintEvent(self, event):
+        # 文字/光标/占位符由基类绘制
+        super().paintEvent(event)
+
+        p = QPainter(self)
+        p.setRenderHint(QPainter.Antialiasing, True)
+        pal = self.palette()
+        hi = pal.color(QPalette.Highlight)
+        base = pal.color(QPalette.Mid)
+
+        # 底线位于底部专用区域（避开文字下方内容区）
+        line_y = self.height() - 2
+
+        # 常态底线（会话态不随悬浮变化）
+        p.setPen(QPen(base, 1.0))
+        p.drawLine(0, line_y, self.width(), line_y)
+
+        # 聚焦高亮线：从中间向两侧展开
+        if not self.isReadOnly() and self._progress > 0:
+            half = int(self.width() / 2.0 * self._progress)
+            p.setPen(QPen(QColor(hi), 2.0))
+            p.drawLine(self.width() // 2 - half, line_y,
+                       self.width() // 2 + half + 1, line_y)
+        p.end()
+
+
+class ClickAwayFocusFilter(QObject):
+    """点击输入框以外的任意位置时，取消当前输入框焦点。
+
+    全局默认交互：鼠标在非编辑框区域按下（或点击其他输入框）时，
+    让当前聚焦的 UnderlineEdit 失焦收起，体验更自然。
+    """
+
+    def eventFilter(self, obj, event):
+        if event.type() == QEvent.MouseButtonPress and isinstance(event, QMouseEvent):
+            focus_widget = QApplication.focusWidget()
+            if isinstance(focus_widget, UnderlineEdit) and not focus_widget.isReadOnly():
+                global_point = event.globalPosition().toPoint()
+                # 点击仍落在该输入框内部（含清除按钮）则不取消
+                local = focus_widget.mapFromGlobal(global_point)
+                if not focus_widget.rect().contains(local):
+                    focus_widget.clearFocus()
+        return False
+
+
+def install_click_away_focus(app):
+    """在全局安装“点击外部取消输入框焦点”的过滤器，返回过滤器实例。"""
+    app.installEventFilter(ClickAwayFocusFilter(app))
+    return app

@@ -1,0 +1,16 @@
+__pycache__/
+.idea/
+.vs/
+.md/
+output/
+SyncFolder/
+old/
+dist/
+test/
+
+*.exe
+*.bat
+*.sh
+
+1.txt
+config.json

@@ -1,0 +1,372 @@
+"""
+房间发现模块
+使用UDP广播发现局域网内的房间
+Copyright (c) 2026 Lisselde_E <Lisselde.E@outlook.com>.
+Licensed under the GNU General Public License v3.0.
+"""
+import socket
+import threading
+import json
+import time
+from typing import Dict, Optional, List
+from PySide6.QtCore import QObject, Signal
+
+from config import Config
+
+
+class RoomDiscovery(QObject):
+    """房间发现服务（客户端运行，发现房间）"""
+
+    # 信号
+    room_found = Signal(str, str, int, str)  # 发现房间 (ip, room_code, port, version)
+    discovery_finished = Signal(list)  # 发现完成 [(ip, room_code, port, version), ...]
+    error_occurred = Signal(str)  # 错误消息
+
+    # UDP端口范围
+    DISCOVERY_PORT_START = 9528  # 发现端口起始
+    DISCOVERY_PORT_END = 9537    # 发现端口结束（包含）
+    DISCOVERY_TIMEOUT = 3  # 发现超时（秒）
+    
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.socket: Optional[socket.socket] = None
+        self.running = False
+        self.discovered_rooms: Dict[str, dict] = {}  # {ip: {room_code, port, version, timestamp}}
+        self._lock = threading.Lock()
+        self._timer = None  # 超时定时器（stop_discovery 时需 cancel，避免取消探测后仍触发 _finish_discovery）
+        self._receive_thread = None  # 接收线程（stop_discovery 时须回收，避免线程堆积）
+    
+    def discover_room(self, room_code: str, timeout: int = None) -> bool:
+        """
+        发现指定房间
+        Args:
+            room_code: 房间号（空字符串表示扫描所有房间）
+            timeout: 超时时间（秒）
+        Returns:
+            是否启动发现成功
+        """
+        try:
+            timeout = timeout or self.DISCOVERY_TIMEOUT
+            self.discovered_rooms.clear()
+
+            # 创建UDP socket
+            self.socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+            self.socket.setsockopt(socket.SOL_SOCKET, socket.SO_BROADCAST, 1)
+            self.socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+            self.socket.bind(('0.0.0.0', 0))  # 使用随机端口
+            self.socket.settimeout(0.5)
+
+            self.running = True
+
+            # 启动接收线程
+            self._receive_thread = threading.Thread(target=self._receive_loop, daemon=True)
+            self._receive_thread.start()
+
+            # 发送发现请求（room_code 为空表示扫描所有房间）
+            discovery_msg = json.dumps({
+                'type': 'discovery_request',
+                'room_code': room_code or ''  # 空字符串表示扫描所有
+            }).encode('utf-8')
+
+            # 向所有发现端口发送请求
+            for port in range(self.DISCOVERY_PORT_START, self.DISCOVERY_PORT_END + 1):
+                # 发送到广播地址
+                self.socket.sendto(discovery_msg, ('<broadcast>', port))
+
+                # 发送到本机地址（支持同一台机器双开）
+                self.socket.sendto(discovery_msg, ('127.0.0.1', port))
+
+                # 获取本机IP并发送
+                try:
+                    local_ip = self._get_local_ip()
+                    if local_ip and local_ip != '127.0.0.1':
+                        self.socket.sendto(discovery_msg, (local_ip, port))
+                except Exception:
+                    pass
+
+            # 设置超时结束
+            self._timer = threading.Timer(timeout, self._finish_discovery)
+            self._timer.start()
+
+            return True
+
+        except Exception as e:
+            self.error_occurred.emit(f"启动发现失败: {e}")
+            return False
+
+    def discover_all_rooms(self, timeout: int = None) -> bool:
+        """
+        扫描局域网内所有房间
+        Args:
+            timeout: 超时时间（秒）
+        Returns:
+            是否启动扫描成功
+        """
+        return self.discover_room('', timeout)  # 空房间号表示扫描所有
+
+    def discover_room_at(self, ip: str, room_code: str, timeout: int = None) -> bool:
+        """
+        针对指定 IP 定向探测该 room_code 是否存在
+        Args:
+            ip: 目标主机 IP
+            room_code: 房间号（空字符串表示探测该 IP 是否有任何房间）
+            timeout: 超时时间（秒）
+        Returns:
+            是否启动探测成功
+        """
+        try:
+            timeout = timeout or self.DISCOVERY_TIMEOUT
+            self.discovered_rooms.clear()
+
+            # 创建UDP socket
+            self.socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+            self.socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+            self.socket.bind(('0.0.0.0', 0))  # 使用随机端口
+            self.socket.settimeout(0.5)
+
+            self.running = True
+
+            # 启动接收线程
+            self._receive_thread = threading.Thread(target=self._receive_loop, daemon=True)
+            self._receive_thread.start()
+
+            # 发送定向发现请求至该 IP 的所有发现端口
+            discovery_msg = json.dumps({
+                'type': 'discovery_request',
+                'room_code': room_code or ''  # 空字符串表示探测该 IP 上所有房间
+            }).encode('utf-8')
+
+            for port in range(self.DISCOVERY_PORT_START, self.DISCOVERY_PORT_END + 1):
+                try:
+                    self.socket.sendto(discovery_msg, (ip, port))
+                except Exception:
+                    continue
+
+            # 设置超时结束
+            self._timer = threading.Timer(timeout, self._finish_discovery)
+            self._timer.start()
+
+            return True
+
+        except Exception as e:
+            self.error_occurred.emit(f"启动定向探测失败: {e}")
+            return False
+
+    def _get_local_ip(self) -> str:
+        """获取本机IP地址"""
+        try:
+            s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+            s.connect(("8.8.8.8", 80))
+            ip = s.getsockname()[0]
+            s.close()
+            return ip
+        except Exception:
+            return "127.0.0.1"
+    
+    def stop_discovery(self):
+        """停止发现
+
+        取消超时定时器并回收接收线程——仅在关 socket 无法阻止：
+        Timer 到点仍会触发 _finish_discovery、接收线程短暂存活，
+        快速连续取消/探测时会残留堆积导致卡死。故此处一并回收。
+        """
+        self.running = False
+
+        # 取消超时定时器，避免取消探测后到点仍触发 _finish_discovery
+        timer = self._timer
+        if timer is not None:
+            try:
+                timer.cancel()
+            except Exception:
+                pass
+            self._timer = None
+
+        # 关闭 socket，解除阻塞在 recvfrom 的接收线程
+        if self.socket:
+            try:
+                self.socket.close()
+            except Exception:
+                pass
+            self.socket = None
+
+        # 回收接收线程（socket 已关闭，recvfrom 会立即返回异常退出循环）
+        thread = self._receive_thread
+        if thread is not None and thread is not threading.current_thread():
+            try:
+                thread.join(timeout=0.2)
+            except Exception:
+                pass
+            self._receive_thread = None
+    
+    def _receive_loop(self):
+        """接收响应循环"""
+        while self.running:
+            try:
+                data, addr = self.socket.recvfrom(1024)
+                response = json.loads(data.decode('utf-8'))
+                
+                if response.get('type') == 'discovery_response':
+                    host_ip = addr[0]
+                    room_code = response.get('room_code')
+                    port = response.get('port', Config.DEFAULT_PORT)
+                    version = response.get('version', '')
+                    
+                    with self._lock:
+                        self.discovered_rooms[host_ip] = {
+                            'room_code': room_code,
+                            'port': port,
+                            'version': version,
+                            'timestamp': time.time()
+                        }
+                    
+                    # 安全发射信号
+                    try:
+                        self.room_found.emit(host_ip, room_code, port, version)
+                    except RuntimeError:
+                        # 对象已被删除，停止循环
+                        break
+                    
+            except socket.timeout:
+                continue
+            except Exception:
+                continue
+    
+    def _finish_discovery(self):
+        """完成发现"""
+        self.stop_discovery()
+        
+        with self._lock:
+            rooms = [
+                {
+                    'ip': ip,
+                    'room_code': info['room_code'],
+                    'port': info['port'],
+                    'version': info.get('version', '')
+                }
+                for ip, info in self.discovered_rooms.items()
+            ]
+        
+        # 安全发射信号，避免对象已删除的错误
+        try:
+            self.discovery_finished.emit(rooms)
+        except RuntimeError:
+            # 对象已被删除，忽略
+            pass
+    
+    def get_discovered_rooms(self) -> List[dict]:
+        """获取已发现的房间列表"""
+        with self._lock:
+            return [
+                {
+                    'ip': ip,
+                    'room_code': info['room_code'],
+                    'port': info['port'],
+                    'version': info.get('version', '')
+                }
+                for ip, info in self.discovered_rooms.items()
+            ]
+
+
+class RoomResponder(QObject):
+    """房间响应服务（主机端运行，响应发现请求）"""
+
+    # 信号
+    error_occurred = Signal(str)
+
+    DISCOVERY_PORT_START = 9528  # 发现端口起始
+    DISCOVERY_PORT_END = 9537    # 发现端口结束（包含）
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.socket: Optional[socket.socket] = None
+        self.running = False
+        self.room_code = ""
+        self.port = Config.DEFAULT_PORT
+        self.discovery_port = None  # 实际使用的发现端口
+
+    def start(self, room_code: str, port: int = None) -> bool:
+        """
+        启动响应服务
+        Args:
+            room_code: 房间号
+            port: 同步端口
+        Returns:
+            是否启动成功
+        """
+        self.room_code = room_code
+        self.port = port or Config.DEFAULT_PORT
+
+        # 尝试多个发现端口（9528-9537）
+        for try_port in range(self.DISCOVERY_PORT_START, self.DISCOVERY_PORT_END + 1):
+            try:
+                # 创建UDP socket
+                self.socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+                self.socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+                self.socket.bind(('0.0.0.0', try_port))
+                self.socket.settimeout(1.0)
+
+                self.running = True
+                self.discovery_port = try_port  # 记录实际使用的发现端口
+
+                # 启动响应线程
+                response_thread = threading.Thread(target=self._response_loop, daemon=True)
+                response_thread.start()
+
+                return True
+
+            except OSError as e:
+                # 端口被占用，尝试下一个端口
+                if self.socket:
+                    try:
+                        self.socket.close()
+                    except Exception:
+                        pass
+                self.socket = None
+                continue
+            except Exception as e:
+                self.error_occurred.emit(f"启动响应服务失败: {e}")
+                return False
+
+        # 所有发现端口都尝试失败
+        self.error_occurred.emit(f"启动响应服务失败: 发现端口 {self.DISCOVERY_PORT_START}-{self.DISCOVERY_PORT_END} 均被占用")
+        return False
+    
+    def stop(self):
+        """停止响应服务"""
+        self.running = False
+        if self.socket:
+            try:
+                self.socket.close()
+            except Exception:
+                pass
+        self.socket = None
+    
+    def _response_loop(self):
+        """响应发现请求循环"""
+        while self.running:
+            try:
+                data, addr = self.socket.recvfrom(1024)
+                request = json.loads(data.decode('utf-8'))
+
+                if request.get('type') == 'discovery_request':
+                    # 检查是否匹配房间号
+                    # target_room 为空表示扫描所有房间，需要响应
+                    target_room = request.get('room_code', '')
+                    if target_room and target_room != self.room_code:
+                        # 指定了房间号但不匹配，跳过
+                        continue
+
+                    # target_room 为空或匹配时，发送响应（携带版本号供客户端核对）
+                    response = json.dumps({
+                        'type': 'discovery_response',
+                        'room_code': self.room_code,
+                        'port': self.port,
+                        'version': Config.APP_VERSION
+                    }).encode('utf-8')
+
+                    self.socket.sendto(response, addr)
+
+            except socket.timeout:
+                continue
+            except Exception:
+                continue
