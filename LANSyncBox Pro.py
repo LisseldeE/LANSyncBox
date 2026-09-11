@@ -1,5 +1,5 @@
 """
-LANSyncBox 主入口
+LANSyncBox Pro 主入口
 Copyright (c) 2026 Lisselde_E <Lisselde.E@outlook.com>.
 Licensed under the GNU General Public License v3.0.
 """

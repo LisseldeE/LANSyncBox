@@ -2137,6 +2137,9 @@ class FileListWidget(QWidget):
         dz = self._drop_zone
         # 条件不再是胶囊（如窗口已恢复/放置条被关闭）：回退到对话框流程
         if dz is None or not self.window().isMinimized() or self._capsule_copying:
+            # 窗口已恢复：接管权交回主界面，先把胶囊的确认残留收起，避免确认 UI 悬空
+            if dz is not None and not self.window().isMinimized():
+                dz.dismiss()
             if dz is None or not self.window().isMinimized():
                 return self._add_files_with_dialog(file_paths, target_dir, [])
             return

@@ -31,7 +31,7 @@ class TransferQueue:
         # 任务ID到文件名的映射（用于取消任务）
         self.task_id_to_filename: Dict[int, str] = {}
     
-    def add_task(self, task_type: str, task_func: Callable, filename: str, *args, **kwargs):
+    def add_task(self, task_type: str, task_func: Callable, filename: str, *args, **kwargs) -> bool:
         """
         添加传输任务到队列
 
@@ -40,6 +40,9 @@ class TransferQueue:
             task_func: 任务执行函数
             filename: 文件名（用于取消任务）
             *args, **kwargs: 任务参数
+
+        Returns:
+            是否真正入队（已存在同名的活跃/排队任务时返回 False，调用方可据此统计）
         """
         with self.lock:
             # 检查是否已经在队列中或正在传输
@@ -47,14 +50,14 @@ class TransferQueue:
                 # 如果活跃任务已被取消（stop_event 已设置），允许新任务替换
                 if not self.active_tasks[filename].is_set():
                     # 活跃且未取消，不需要重复添加
-                    return
+                    return False
                 # 已取消但尚未清理，允许替换（旧任务退出时不会误删新任务的 stop_event）
             else:
                 # 检查队列中是否已经有该文件
                 for task in self.queue:
                     if task.get('filename') == filename:
                         # 已经在队列中，不需要重复添加
-                        return
+                        return False
 
             # 将任务加入队列
             task = {
@@ -69,6 +72,7 @@ class TransferQueue:
 
             # 尝试启动任务（在锁内部调用，不需要再次获取锁）
             self._try_start_task_internal()
+            return True
     
     def _try_start_task_internal(self):
         """尝试启动队列中的任务（在锁内部调用，不获取锁）"""

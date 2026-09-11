@@ -32,7 +32,7 @@ class MessageType:
     SYNC_RESULT = 0x13    # 同步结果（主机→连接端，告知是否有差异，用于显示"一致/补齐"通知）
     PING = 0x14           # 延迟探测（发起端→对端，content 携带发送时刻，对端收到原样回传为 PONG）
     PONG = 0x15           # 延迟回包（对端→发起端，原样带回 PING 的发送时刻，发起端用于计算 RTT）
-    CLIPBOARD_DATA = 0x16 # 剪切板内容（文本/图片，由主机分发给各端；filename 字段承载类型标识 "text"/"image"）
+    CLIPBOARD_DATA = 0x16 # 剪切板文本内容（仅文本走系统剪贴板广播；图片/文件统一走文件 P2P 链路；filename 字段承载类型标识 "text"）
     CLIPBOARD_FILES_NOTIFY = 0x17  # 剪切板文件会话通知（复制端→主机→其余端；content=JSON 会话元数据）
     CLIPBOARD_FILE_PULL_REQ = 0x18 # 文件拉取请求（接收端→复制端目录端口；content=JSON {session_id,token,name,offset}）
     P2P_FILE_DATA = 0x19 # 分布式文件数据块（复制端→接收端 P2P；content=struct头部+原始字节）
@@ -240,11 +240,11 @@ class Protocol:
 
     @staticmethod
     def create_clipboard_message(mime_type: str, data: bytes) -> bytes:
-        """创建剪切板内容消息（文本/图片，由主机分发给各端）
+        """创建剪切板内容消息（仅文本，由主机分发给各端；图片/文件走文件 P2P 链路）
 
         Args:
-            mime_type: 内容类型标识，约定为 "text" 或 "image"
-            data: 内容字节（文本为 utf-8 编码，图片为 PNG 编码）
+            mime_type: 内容类型标识，约定恒为 "text"
+            data: 内容字节（文本为 utf-8 编码）
 
         Returns:
             消息字节

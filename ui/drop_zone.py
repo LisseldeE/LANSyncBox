@@ -86,7 +86,6 @@ class _Pill(QWidget):
         self._state = self.STATE_IDLE
         self._anim = None
         self._hovered = False
-        self._probe_title = ""     # 目标状态标题（用于宽度计算，避免读取切换前的旧文本）
         self._init_ui()
         self.set_idle(0)
 
@@ -158,20 +157,19 @@ class _Pill(QWidget):
         self._hovered = on
         self.update()
 
+    def is_busy(self) -> bool:
+        """非 idle（确认/进度/完成）即处于执行中，此期间不接收新拖放。"""
+        return self._state != self.STATE_IDLE
+
     def content_width(self) -> int:
-        """按当前状态计算所需最小宽度（用目标标题 _probe_title，避免读到切换前旧文本）。"""
-        fm = QFontMetrics(self._title.font())
-        tw = fm.horizontalAdvance(self._probe_title)
-        pad = 40  # 左右内边距合计
-        spacing = 14  # 项间间距
-        if self._state == self.STATE_IDLE:
-            return max(self._H, pad + _PLUS_W + spacing + tw)
-        if self._state == self.STATE_CONFIRM:
-            return max(self._H, pad + min(tw, 340) + 72 + 72 + spacing + spacing)
-        if self._state == self.STATE_PROGRESS:
-            return max(self._H, _PROGRESS_W)
-        # STATE_DONE：对勾(28) + 间距 + 完成文字
-        return max(self._H, pad + 28 + spacing + min(tw, 240))
+        """当前内容的真实宽度：失效并激活布局后取 sizeHint（同胶囊 _content_size），
+        得到稳定、确定的目标宽度，避免切换瞬间手算字体宽度随布局波动导致的抖动。"""
+        c = self._content
+        c.updateGeometry()
+        lay = c.layout()
+        lay.invalidate()
+        lay.activate()
+        return max(self._H, c.sizeHint().width())
 
     def _elide_text(self, text: str, max_w: int, mode=Qt.ElideRight) -> str:
         """把标题文本按像素宽度收缩为省略形式（默认右省略，可指定模式）。"""
@@ -204,7 +202,6 @@ class _Pill(QWidget):
         self._state = self.STATE_IDLE
         text = _HINT_TEXT if count <= 1 else f"松开以添加 {count} 个文件到同步列表"
         el = self._elide_text(text, 460)
-        self._probe_title = el
 
         self._title.setText(el)
         self._title.setMaximumWidth(460)
@@ -225,7 +222,6 @@ class _Pill(QWidget):
                 I18n.tr('file_exists_replace') % existing_names[0], 340, Qt.ElideMiddle)
         else:
             title = I18n.tr('files_exist_replace') % n
-        self._probe_title = title
 
         self._title.setText(title)
         self._title.setMaximumWidth(420)
@@ -241,7 +237,6 @@ class _Pill(QWidget):
         self._state = self.STATE_PROGRESS
         prog = max(0, min(100, progress))
         name = self._elide_text(filename, _TITLE_MAX_W)
-        self._probe_title = name
 
         self._title.setText(name)
         self._title.setMaximumWidth(_TITLE_MAX_W)
@@ -262,7 +257,6 @@ class _Pill(QWidget):
         """切换到完成：对勾 + "完成"提示文字，随后播放勾选动画。"""
         self._state = self.STATE_DONE
         done_text = I18n.tr('add_done')
-        self._probe_title = done_text
 
         self._title.setText(done_text)
         self._title.setMaximumWidth(360)
@@ -426,19 +420,16 @@ class _ProgressBar(QWidget):
             p.drawRect(QRectF(0.0, 0.0, fw, h))
             p.restore()
 
-        # 居中百分比文字：据文字中心是否落在填充上选择对比色
-        cx = w / 2.0
-        over_fill = cx <= fw
+        # 居中百分比文字：用每主题单一颜色，保证在轨道与填充上都有足够对比，
+        # 不在 50% 文字交界处随填充前沿做颜色硬切（那会在同一像素产生一次观感卡顿）。
+        # 深色主题数字用白、浅色主题用深海军蓝，均可在灰轨道与蓝填充上清晰识读。
         font = QFont(self.font())
         font.setPointSizeF(9.0)
         font.setWeight(QFont.DemiBold)
         p.setFont(font)
         fm = QFontMetrics(font)
         text = fm.elidedText(self._text, Qt.ElideRight, max(10, w - 12))
-        if over_fill:
-            pen = QColor("#0b2a47")
-        else:
-            pen = QColor("#dfe8f2" if dark else "#37475a")
+        pen = QColor("#ffffff") if dark else QColor("#0b2a47")
         p.setPen(pen)
         p.drawText(track, Qt.AlignCenter, text)
         p.end()
@@ -516,19 +507,26 @@ class DropZone(QWidget):
             self._done_timer = None
 
     def _sync_full_w(self):
-        """内容切换应用后：把胶囊宽度平滑伸缩到目标（110ms OutCubic）。
+        """内容切换应用后：把胶囊宽度平滑伸缩到目标。
 
-        由 _Pill.size_changed 触发；已展开则动画伸缩，未展开(起步那次 set_idle)仅更新
-        目标宽度供后续 reveal 用。
+        由 _Pill.size_changed 触发。仅在**完全展开后**才动画伸缩宽度（同胶囊
+        _present 只在 _expand>=0.99 时 _resize_to），否则两个动画抢写宽度会抖动；
+        未完全展开时只更新目标宽度，交给 reveal 一次性长到位。
         """
         new_w = self._pill.content_width()
-        if self._active:
+        revealed = (self._reveal.currentValue() or 0.0) >= 0.98
+        if self._active and revealed:
             self._animate_to_width(new_w)
         else:
             self._full_w = new_w
 
     def _animate_to_width(self, new_w: int):
-        """已展开时，把胶囊宽度从当前值平滑过渡到 new_w。"""
+        """已展开时，把胶囊宽度从当前值平滑过渡到 new_w。
+
+        不要先抢写 _full_w 为终点值——否则在动画首帧插值前，任何读取 _full_w 的
+        路径（_apply_width→_apply_reveal）会瞬间跳到终点宽度再回摆，造成闪烁/抖动。
+        改为让动画逐帧插值驱动 _full_w，结束时精确兜底为 new_w。
+        """
         if self._width_anim is not None:
             self._width_anim.stop()
             self._width_anim = None
@@ -537,13 +535,13 @@ class DropZone(QWidget):
             self._full_w = new_w
             self._apply_reveal(self._reveal.currentValue() or 0.0)
             return
-        self._full_w = new_w
         anim = QVariantAnimation(self)
         anim.setDuration(_WIDTH_MS)
         anim.setEasingCurve(QEasingCurve.OutCubic)
         anim.setStartValue(float(old))
         anim.setEndValue(float(new_w))
         anim.valueChanged.connect(self._apply_width)
+        anim.finished.connect(lambda: setattr(self, '_full_w', float(new_w)))
         anim.start()
         self._width_anim = anim
 
@@ -659,6 +657,10 @@ class DropZone(QWidget):
             self._pill.geometry().contains(event.position().toPoint())
 
     def dragEnterEvent(self, event):
+        # 胶囊正在执行内容（确认/复制/完成）时一律拒绝新拖放，等完成收起后再接
+        if self._active and self._pill.is_busy():
+            event.ignore()
+            return
         paths = _local_file_paths(event.mimeData())
         if paths:
             self._clear_done_hang()
@@ -685,6 +687,10 @@ class DropZone(QWidget):
     def dropEvent(self, event):
         """只要松手落在顶部放置带内就触发添加回调；若回调返回 True（表示要走胶囊流程，
         如替换确认/复制进度），则保持胶囊展开继续承接，否则收回到顶外。"""
+        # 执行中被拒绝的拖放在此兜底拦截，避免绕过 dragEnterEvent 的状态破坏
+        if self._active and self._pill.is_busy():
+            event.ignore()
+            return
         paths = _local_file_paths(event.mimeData())
         keep_open = False
         if paths:

@@ -20,7 +20,7 @@ The Pro edition will remain **open source** and will not become a paid product. 
 
 ## New Highlights (In Progress)
 
-Compared to the old version, the Pro edition is adding the following:
+Compared to the old version, the Pro edition is adding the following features (listed only partially):
 
 | Feature | Description |
 | :--- | :--- |

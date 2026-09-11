@@ -7,6 +7,7 @@ import threading
 import os
 import json
 import uuid
+import time
 
 from PySide6.QtWidgets import (
     QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, 
@@ -38,7 +39,12 @@ class SyncWindow(QMainWindow):
     closed = Signal()
     # 远程文件拉取进度（工作线程发射，经排队连接回主线程更新进度条）
     p2p_progress = Signal(str, int, int)  # (session_key, received_bytes, total_bytes)
-    
+    # 会话内单个文件拉取结束（工作线程发射，供胶囊收尾进度/播放完成对勾）
+    p2p_file_done = Signal(str, bool)     # (session_key, ok)
+
+    # 共享剪贴板回环识别窗口（秒）：本端复制后窗口期内收到同指纹通知视为回声
+    _OWN_COPY_WINDOW = 8.0
+
     def __init__(self, is_host: bool, room_code: str, password: str = "", host_address: str = "", host_port: int = None, existing_client=None):
         super().__init__()
         self.is_host = is_host
@@ -77,6 +83,17 @@ class SyncWindow(QMainWindow):
         self._paste_shortcut = QShortcut(QKeySequence(Qt.CTRL | Qt.Key_V), self)
         self._paste_shortcut.activated.connect(self._paste_remote_files)
 
+        # 智能全局 Ctrl+V 劫持（仅 Windows）：同步窗口非激活且"可用远程文件"
+        # 胶囊悬浮时注册系统级热键，条件不满足立即释放——不做常驻，不影响正常粘贴。
+        self._global_hotkey = None
+        try:
+            from utils.global_hotkey import GlobalPasteHotkey
+            self._global_hotkey = GlobalPasteHotkey()
+            self._global_hotkey.activated = self._on_global_paste
+            QApplication.instance().installNativeEventFilter(self._global_hotkey)
+        except Exception:
+            self._global_hotkey = None
+
         # 关闭确认标志（避免 on_disconnect 确认后 close() 再次弹窗）
         self._close_confirmed = False
 
@@ -97,11 +114,22 @@ class SyncWindow(QMainWindow):
 
         # 局域网剪切板-文件/图片分布式传输
         self._provider = None          # 本机 FileProvider（复制端目录服务）
-        self.p2p_queue = TransferQueue(max_concurrent=5)  # 远程文件拉取队列（并发5）
+        self.p2p_queue = TransferQueue(max_concurrent=1)  # 远程文件拉取队列（串行接收，排队在胶囊显示）
         self._remote_files = None      # 本端"可用远程文件"元信息（最新复制覆盖旧）
         self._clipboard_rows = {}      # session_key -> 剪贴板进度行信息
         self._self_temp_images = []    # 本端复制图片时生成的临时 PNG（下次复制时清理）
+        self._own_copy_fps = []        # 本端最近复制文件指纹 [(指纹, 时间戳)]，识别共享剪贴板回环
         self.p2p_progress.connect(self._update_p2p_progress)
+
+        # 远程文件可用提示胶囊（系统级顶部通告）：图片/文件 P2P 投递的接收端提示
+        from ui.capsule_notification import CapsuleNotification
+        self._capsule = CapsuleNotification()
+        self._capsule.paste_requested.connect(self._paste_remote_files)
+        # 可用胶囊收起/超时 → 释放系统级 Ctrl+V 劫持
+        self._capsule.available_hidden.connect(self._update_global_hotkey)
+        self.p2p_file_done.connect(self._on_p2p_file_done)
+        self._transfer_session = None  # 胶囊传输态当前显示的会话 id
+        self._pull_remaining = 0       # 全局尚未完成的远程拉取数（排队计数用）
 
         self.init_ui()
         self.init_network()
@@ -445,6 +473,8 @@ class SyncWindow(QMainWindow):
         """本端系统剪贴板新增文本：按主机/连接端身份上报分发"""
         if mime_type != "text" or not data:
             return
+        # 本端新复制内容：用户的下一次 Ctrl+V 应留给前台应用，释放全局劫持
+        self._release_global_hotkey()
         if self.is_host:
             if self.server:
                 self.server.send_clipboard(mime_type, data)
@@ -456,6 +486,8 @@ class SyncWindow(QMainWindow):
         """将接收到的剪切板文本写入本端系统剪贴板，并记录摘要以抑制回环。"""
         if mime_type != "text" or not data:
             return False
+        # 远程同步新文字剪贴板：用户的下一次 Ctrl+V 应粘贴该文本，释放全局劫持
+        self._release_global_hotkey()
         # 先记录摘要，使随后的 dataChanged 被识别为本端写回，不重复上报
         self._monitor.set_written_hash(mime_type, data)
         from utils.clipboard_monitor import ClipboardMonitor
@@ -507,6 +539,8 @@ class SyncWindow(QMainWindow):
         """
         if self._provider is None or not entries:
             return
+        # 本端新复制文件：用户的下一次 Ctrl+V 应留给前台应用，释放全局劫持
+        self._release_global_hotkey()
         # 网络未就绪时不投递
         if self.is_host:
             if self.server is None:
@@ -538,6 +572,9 @@ class SyncWindow(QMainWindow):
         if not files_map:
             return
 
+        # 记录本端复制指纹：识别虚拟机共享剪贴板把本端复制回环成"远程可用"的回声
+        self._record_own_copy(files_meta)
+
         # 新会话顶掉旧会话：清理上一轮遗留的临时图片，再登记本轮
         self._remove_temp_self_images()
         self._self_temp_images = new_temp
@@ -557,6 +594,29 @@ class SyncWindow(QMainWindow):
             self.client.send_files_notify(notify)
         self.add_log("剪切板", I18n.tr('clipboard_files_copied', count=len(files_meta)))
 
+    def _record_own_copy(self, files_meta: list):
+        """记录本端最近复制文件的指纹（用于识别共享剪贴板回环，见 _is_own_copy_echo）。"""
+        now = time.time()
+        fp = frozenset((f['name'], int(f.get('size', 0) or 0)) for f in files_meta)
+        self._own_copy_fps.append((fp, now))
+        # 清理过期指纹，控制列表长度
+        self._own_copy_fps = [(f, t) for f, t in self._own_copy_fps
+                              if now - t <= self._OWN_COPY_WINDOW]
+
+    def _is_own_copy_echo(self, notify: dict) -> bool:
+        """通知中的文件与本端最近复制一致 → 是共享剪贴板回环回声，应抑制展示。
+
+        场景：虚拟机共享剪贴板把本端复制的文件同步进宿主机剪贴板，宿主机当成
+        新复制广播回来，导致本端收到自己的复制回环。指纹为 (文件名, 大小) 集合，
+        窗口期内完全一致即判定为回声。
+        """
+        if not self._own_copy_fps:
+            return False
+        now = time.time()
+        fp = frozenset((f.get('name'), int(f.get('size', 0) or 0)) for f in notify['files'])
+        return any(t >= now - self._OWN_COPY_WINDOW and own_fp == fp
+                   for own_fp, t in self._own_copy_fps)
+
     def on_files_notify(self, content: bytes):
         """收到远程文件会话通知（主机/连接端共用）：更新"可用远程文件"（最新为主）。"""
         if not content:
@@ -567,19 +627,75 @@ class SyncWindow(QMainWindow):
             return
         if not notify.get('session_id') or not notify.get('files'):
             return
+        # 共享剪贴板回环抑制：本端刚复制过相同文件，该通知是回声（如虚拟机共享剪贴板同步），不展示
+        if self._is_own_copy_echo(notify):
+            return
         # 最新复制覆盖旧的可用远程文件状态
         self._remote_files = notify
         names = " · ".join(f"{f.get('name')}" for f in notify['files'])
         self.add_log("剪切板", I18n.tr('clipboard_files_available', names=names))
 
+        # 顶部胶囊提示"有可用的远程文件"（最新为主）
+        if self._capsule is not None:
+            total = sum(int(f.get('size', 0) or 0) for f in notify['files'])
+            count = len(notify['files'])
+            if count > 1:
+                name = I18n.tr('clipboard_files_multi', count=count)
+            else:
+                name = str(notify['files'][0].get('name', ''))
+            self._capsule.show_available(name, total)
+        # 窗口非激活时借全局 Ctrl+V 让"按 Ctrl+V 粘贴"在后台也能生效
+        self._update_global_hotkey()
+
+    # ---- 智能全局 Ctrl+V 劫持（窗口非激活时把系统级 Ctrl+V 接回本窗口） ----
+
+    def _on_global_paste(self):
+        """系统级热键触发（窗口非激活时的 Ctrl+V）：先释放劫持再执行粘贴。"""
+        self._release_global_hotkey()
+        self._paste_remote_files()
+
+    def _update_global_hotkey(self):
+        """按当前状态同步全局 Ctrl+V 劫持：
+        - 注册：存在可用远程文件、可用胶囊悬浮中、同步窗口非激活；
+        - 释放：任一条件不满足（窗口激活 / 胶囊收起超时 / 无可用文件等）。
+        """
+        hotkey = self._global_hotkey
+        if hotkey is None:
+            return
+        if (self._remote_files is not None
+                and self._capsule is not None
+                and self._capsule.available_visible()
+                and not self.isActiveWindow()):
+            hotkey.register()
+        else:
+            hotkey.unregister()
+
+    def _release_global_hotkey(self):
+        """立即释放全局 Ctrl+V 劫持（幂等）。
+
+        触发点：本端新复制内容 / 文件、远程文字剪贴板同步、粘贴执行、
+        胶囊收起、窗口关闭——这些时刻用户的下一次 Ctrl+V 应留给前台应用正常粘贴。
+        """
+        if self._global_hotkey is not None:
+            self._global_hotkey.unregister()
+
+    def changeEvent(self, event):
+        super().changeEvent(event)
+        # 窗口激活/失活（含最小化、被其他应用遮挡）都会改变劫持前提
+        if event.type() == QEvent.ActivationChange:
+            self._update_global_hotkey()
+
     def _paste_remote_files(self):
         """Ctrl+V：把"可用远程文件"拉取到当前浏览目录。
 
-        仅当存在可用远程文件且焦点不在文本框时触发；否则放行文本粘贴。
+        仅当存在可用远程文件且焦点不在**可编辑**文本框时触发；否则放行文本粘贴。
+        只读文本框（如路径栏）不拦截，避免 Ctrl+V 静默失效。
         """
+        # 本次粘贴已消费可用会话：释放系统级劫持，后续 Ctrl+V 留给前台应用
+        self._release_global_hotkey()
         focus = QApplication.focusWidget()
         from PySide6.QtWidgets import QLineEdit, QTextEdit
-        if isinstance(focus, (QLineEdit, QTextEdit)):
+        if isinstance(focus, (QLineEdit, QTextEdit)) and not focus.isReadOnly():
             return  # 输入框中正常粘贴文本，不劫持
         notify = self._remote_files
         if not notify or not notify.get('files'):
@@ -589,6 +705,8 @@ class SyncWindow(QMainWindow):
         source_ip = notify.get('source_ip', '127.0.0.1')
         source_port = int(notify.get('source_port', 0) or 0)
         if source_port <= 0:
+            if self._capsule is not None:
+                self._capsule.dismiss()
             return
 
         target_dir = self.file_list.current_path
@@ -596,6 +714,8 @@ class SyncWindow(QMainWindow):
             os.makedirs(target_dir, exist_ok=True)
         except OSError:
             self.add_log("剪切板", I18n.tr('p2p_paste_dir_fail'))
+            if self._capsule is not None:
+                self._capsule.dismiss()
             return
 
         files = notify['files']
@@ -604,14 +724,28 @@ class SyncWindow(QMainWindow):
         self.add_log("剪切板", I18n.tr('clipboard_files_dispatching', count=count))
         self._add_p2p_progress(session_id, count, total_bytes)
 
+        # 胶囊进入传输态：同一会话已在传输（如重复 Ctrl+V）时不重置
+        if self._capsule is not None and not (
+                self._transfer_session == session_id and self._capsule.is_transferring()):
+            first = files[0].get('name', '') if files else ''
+            self._capsule.begin_transfer(first, total_bytes)
+            self._transfer_session = session_id
+
+        added = 0
         for f in files:
             name = os.path.basename(f.get('name', ''))
             if not name:
                 continue
-            self.p2p_queue.add_task(
-                'p2p_pull', self._pull_remote_file, name,
-                notify, name, target_dir, session_id,
-            )
+            if self.p2p_queue.add_task(
+                    'p2p_pull', self._pull_remote_file, name,
+                    notify, name, target_dir, session_id):
+                added += 1
+        if added:
+            self._pull_remaining += added
+
+        # 刷新胶囊排队等待数（全局在途数减去正在传输的 1 个）
+        if self._capsule is not None:
+            self._capsule.set_queue_waiting(max(0, self._pull_remaining - 1))
 
     def _pull_remote_file(self, stop_event, notify: dict, name: str, target_dir: str, session_key: str):
         """远程单文件拉取（TransferQueue 工作线程）。
@@ -619,6 +753,7 @@ class SyncWindow(QMainWindow):
         失败不重发（PRD）：记日志、不做重试；临时文件由 pull_file 内部清理。
         """
         if stop_event.is_set():
+            self.p2p_file_done.emit(session_key, False)
             return
         dest = os.path.join(target_dir, name)
         sid = notify['session_id']
@@ -636,6 +771,21 @@ class SyncWindow(QMainWindow):
             self._log_worker("剪切板", I18n.tr('clipboard_file_received', name=name))
         else:
             self._log_worker("剪切板", I18n.tr('clipboard_file_pull_fail', name=name, msg=err))
+        # 单文件拉取结束（成功/失败都算）：供胶囊收尾本会话进度
+        self.p2p_file_done.emit(session_key, ok)
+
+    def _on_p2p_file_done(self, session_key: str, ok: bool):
+        """单文件拉取结束（成功/失败均计入）：刷新排队等待数，全部完成后胶囊播放对勾。"""
+        self._pull_remaining = max(0, self._pull_remaining - 1)
+        if self._capsule is None:
+            return
+        if self._pull_remaining > 0:
+            self._capsule.set_queue_waiting(max(0, self._pull_remaining - 1))
+        else:
+            self._transfer_session = None
+            # 仅传输态弹完成对勾（若已被更新的"可用"提示顶掉则不打扰）
+            if self._capsule.is_transferring():
+                self._capsule.complete()
 
     def _log_worker(self, section: str, message: str):
         """工作线程中安全地追加日志（排队回主线程）。"""
@@ -671,6 +821,10 @@ class SyncWindow(QMainWindow):
 
     def _update_p2p_progress(self, session_key: str, received: int, total: int):
         """主线程更新淡蓝进度条（来自工作线程的排队信号）。"""
+        # 同步驱动顶部胶囊的传输进度（当前传输态会话，且胶囊确在传输态时）
+        if (self._capsule is not None and session_key == self._transfer_session
+                and self._capsule.is_transferring()):
+            self._capsule.set_progress(received, total)
         info = self._clipboard_rows.get(session_key)
         if not info:
             return
@@ -2025,6 +2179,7 @@ class SyncWindow(QMainWindow):
         self.transfer_queue.clear()
         # 清理局域网剪切板：远程文件拉取队列、目录服务、可用远程文件状态
         self.p2p_queue.clear()
+        self._pull_remaining = 0
         self._remote_files = None
         self._stop_provider()
         self._remove_temp_self_images()
@@ -2052,6 +2207,16 @@ class SyncWindow(QMainWindow):
             self._drop_zone.close()
             self._drop_zone = None
             self.file_list.set_drop_zone(None)
+
+        # 关闭远程文件提示胶囊（独立顶层窗口，须显式关闭）
+        if self._capsule is not None:
+            self._capsule.close()
+
+        # 释放系统级 Ctrl+V 劫持并移除原生事件过滤器
+        if self._global_hotkey is not None:
+            self._global_hotkey.unregister()
+            QApplication.instance().removeNativeEventFilter(self._global_hotkey)
+            self._global_hotkey = None
 
         # 清理缓存（如果开关开启）
         if self.clean_cache_switch.isChecked():
