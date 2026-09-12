@@ -32,10 +32,10 @@ class MessageType:
     SYNC_RESULT = 0x13    # 同步结果（主机→连接端，告知是否有差异，用于显示"一致/补齐"通知）
     PING = 0x14           # 延迟探测（发起端→对端，content 携带发送时刻，对端收到原样回传为 PONG）
     PONG = 0x15           # 延迟回包（对端→发起端，原样带回 PING 的发送时刻，发起端用于计算 RTT）
-    CLIPBOARD_DATA = 0x16 # 剪切板文本内容（仅文本走系统剪贴板广播；图片/文件统一走文件 P2P 链路；filename 字段承载类型标识 "text"）
+    CLIPBOARD_DATA = 0x16 # 剪切板文本内容（仅文本走系统剪贴板广播；图片/文件统一走文件 TCP 直连链路；filename 字段承载类型标识 "text"）
     CLIPBOARD_FILES_NOTIFY = 0x17  # 剪切板文件会话通知（复制端→主机→其余端；content=JSON 会话元数据）
     CLIPBOARD_FILE_PULL_REQ = 0x18 # 文件拉取请求（接收端→复制端目录端口；content=JSON {session_id,token,name,offset}）
-    P2P_FILE_DATA = 0x19 # 分布式文件数据块（复制端→接收端 P2P；content=struct头部+原始字节）
+    P2P_FILE_DATA = 0x19 # 预留常量（投递已改走 FILE_BEGIN/FILE_DATA/FILE_END 端到端 TCP 流式传输，不再使用）
 
 
 class Protocol:
@@ -240,7 +240,7 @@ class Protocol:
 
     @staticmethod
     def create_clipboard_message(mime_type: str, data: bytes) -> bytes:
-        """创建剪切板内容消息（仅文本，由主机分发给各端；图片/文件走文件 P2P 链路）
+        """创建剪切板内容消息（仅文本，由主机分发给各端；图片/文件走文件 TCP 直连链路）
 
         Args:
             mime_type: 内容类型标识，约定恒为 "text"
@@ -256,7 +256,7 @@ class Protocol:
             content=data
         )
 
-    # ---- 分布式文件会话 / P2P 直连 ----
+    # ---- 分布式文件会话 / TCP 直连 ----
 
     @staticmethod
     def create_files_notify(notify_dict: dict) -> bytes:
@@ -278,14 +278,13 @@ class Protocol:
         )
 
     @staticmethod
-    def create_pull_request(session_id: str, token: str, name: str, offset: int = 0) -> bytes:
+    def create_pull_request(session_id: str, token: str, name: str) -> bytes:
         """创建文件拉取请求消息（接收端→复制端）
 
         Args:
             session_id: 会话标识
             token: 会话校验令牌
             name: 会话内的文件条目名
-            offset: 起始字节偏移（断点/续传，阶段A固定为 0）
 
         Returns:
             消息字节
@@ -295,7 +294,6 @@ class Protocol:
             'session_id': session_id,
             'token': token,
             'name': name,
-            'offset': int(offset),
         }, ensure_ascii=False).encode('utf-8')
         return Protocol.pack_message(
             MessageType.CLIPBOARD_FILE_PULL_REQ,
@@ -304,45 +302,7 @@ class Protocol:
             content=content
         )
 
-    # P2P 分块负载的头部格式：offset(8B,有符号) + total_size(8B) + is_last(1B)
-    P2P_HEADER_FORMAT = '!qQ?'
-    P2P_HEADER_SIZE = struct.calcsize(P2P_HEADER_FORMAT)
-
-    @staticmethod
-    def create_p2p_data(name: str, offset: int, total_size: int, chunk: bytes, is_last: bool = False) -> bytes:
-        """创建分布式文件数据块消息（复制端→接收端 P2P）
-
-        Args:
-            name: 会话内的文件条目名
-            offset: 本块起始偏移
-            total_size: 文件总大小
-            chunk: 本块原始字节
-            is_last: 是否最后一块
-
-        Returns:
-            消息字节
-        """
-        header = struct.pack(Protocol.P2P_HEADER_FORMAT, offset, total_size, is_last)
-        content = header + chunk
-        return Protocol.pack_message(
-            MessageType.P2P_FILE_DATA,
-            filename=name,
-            file_size=len(content),  # 含头部：接收端据此读取完整 content 再切分
-            content=content
-        )
-
-    @staticmethod
-    def unpack_p2p_data(content: bytes):
-        """解包 P2P 数据块：返回 (offset, total_size, is_last, payload)
-
-        Args:
-            content: create_p2p_data 的 content 字段
-
-        Returns:
-            (offset, total_size, is_last, payload)
-        """
-        offset, total_size, is_last = struct.unpack(Protocol.P2P_HEADER_FORMAT, content[:Protocol.P2P_HEADER_SIZE])
-        return offset, total_size, is_last, content[Protocol.P2P_HEADER_SIZE:]
+    # 注：P2P_FILE_DATA(0x19) 为预留类型，投递已改走 FILE_BEGIN/FILE_DATA/FILE_END 端到端 TCP 流式传输，不再使用。
 
 
 class MessageReceiver:

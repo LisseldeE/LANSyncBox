@@ -1,7 +1,7 @@
 """剪切板监听与分发组件（局域网剪切板 - 文本部分）
 
 决策：**文本走系统剪贴板广播**；**图片一律作为文件处理**（不写入远程剪切板，
-与复制的文件共用 P2P 链路，属于阶段二，当前阶段不投递）。
+与复制的文件共用 TCP 直连链路，属于阶段二，当前阶段不投递）。
 
 职责：
 - 监听系统剪贴板变化（QClipboard.dataChanged），识别内容类型（文本/图片/文件）。
@@ -68,7 +68,7 @@ class ClipboardMonitor(QObject):
         if mime_data is None:
             return
 
-        # 文件（URL 本地文件）：作为文件 P2P 会话投递
+        # 文件（URL 本地文件）：作为文件投递会话（TCP 直连）
         if mime_data.hasUrls():
             paths = [url.toLocalFile() for url in mime_data.urls()
                      if url.isLocalFile() and url.toLocalFile()]

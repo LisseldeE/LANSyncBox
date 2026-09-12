@@ -1,4 +1,4 @@
-"""分布式文件轻量服务（局域网剪切板 - 文件/图片 P2P 直连）。
+"""分布式文件轻量服务（局域网剪切板 - 文件/图片 端到端 TCP 直连）。
 
 架构约定（与 PRD 分布式微服务一致）：
 - 每台设备在房间就绪后运行一个 FileProvider：绑定临时端口监听，负责向"接收端"提供
@@ -6,7 +6,10 @@
 - 复制端登记一个文件会话（session_id/token/本地绝对路径表）。主机只转发会话元信息，
   文件字节不经过主机。
 - 接收端按元信息直连复制端 FileProvider，发送 CLIPBOARD_FILE_PULL_REQ，接收
-  P2P_FILE_DATA 分块，写出到目标位置。并发上限 5、失败不重发（由上层浏览器/队列控制）。
+  FILE_BEGIN/FILE_DATA/FILE_END 流式分块（与主机同步分发同一套协议），写出到目标位置。
+- 传输逻辑与同步文件传输（server._send_large_file_to_client / 服务端接收循环）同一套：
+  发送前取真实大小作为 FILE_BEGIN 的 file_size，分块流式发送、进度分母恒定，
+  FILE_END 携带真实大小并校验完整度（不符则丢弃）。并发上限 5、失败不重发。
 
 路径安全：只按「会话 + 条目名」查本机登记表中的绝对路径，拒绝任意路径请求，天然防穿越。
 """
@@ -26,17 +29,11 @@ class FileSession:
     """一个待投递的文件会话（登记在复制端的 FileProvider 上）。"""
 
     def __init__(self, session_id: str, token: str, files: dict):
-        """files: {条目名: 本机绝对路径}。大小在提供时按文件实际大小读取。"""
+        """files: {条目名: 本机绝对路径}。"""
         self.session_id = session_id
         self.token = token
-        self.files = dict(files)  # {name: abs_path}
-        self.total_bytes = 0
+        self.files = dict(files)
         self._lock = threading.Lock()
-        for _name, path in self.files.items():
-            try:
-                self.total_bytes += os.path.getsize(path)
-            except OSError:
-                self.total_bytes += 0
 
     def resolve(self, name: str) -> str:
         """按条目名解析本机绝对路径；条目不存在返回 None。"""
@@ -45,9 +42,15 @@ class FileSession:
 
 
 class FileProvider(QObject):
-    """复制端目录服务：接受 P2P 拉取请求并按会话提供文件字节。"""
+    """复制端目录服务：接受拉取请求并按会话提供文件字节（端到端 TCP 直连）。"""
 
     log_message = Signal(str)
+    # 投递发送进度（服务线程 → UI）：(session_id, 条目名, 已发送字节, 文件真实大小)
+    # 字节数用 64 位整型（'qlonglong'）：大文件（>2GB）超出 32 位 int 会溢出为 0，
+    # 导致进度分母丢失（旧"发送端 7MB/瞬间走满"根因之一）
+    send_progress = Signal(str, str, 'qlonglong', 'qlonglong')
+    # 单文件发送结束：(session_id, 条目名, 是否成功发完 FILE_END)
+    send_finished = Signal(str, str, bool)
 
     CHUNK_SIZE = 64 * 1024
     DEFAULT_START_PORT = 21300  # 独立于同步主端口的目录服务起始端口
@@ -157,6 +160,7 @@ class FileProvider(QObject):
             conn_id = f"{addr[0]}:{addr[1]}"
             try:
                 client_socket.setsockopt(socket.SOL_SOCKET, socket.SO_SNDBUF, 4 * 1024 * 1024)
+                client_socket.setsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF, 4 * 1024 * 1024)
             except Exception:
                 pass
             with self._lock:
@@ -164,6 +168,9 @@ class FileProvider(QObject):
                     'socket': client_socket,
                     'receiver': MessageReceiver(),
                     'send_guard': SendLock(),
+                    'pull_session': None,   # 当前正在服务的会话（用于发送进度上报）
+                    'pull_name': None,
+                    'pull_done': False,     # 是否已成功发完 FILE_END（防重复上报失败）
                 }
             threading.Thread(target=self._handle_pull, args=(conn_id,), daemon=True).start()
 
@@ -191,6 +198,13 @@ class FileProvider(QObject):
         except OSError:
             pass
         finally:
+            with self._lock:
+                pull_session = info.get('pull_session')
+                pull_name = info.get('pull_name')
+                pull_done = info.get('pull_done')
+            # 连接关闭且未发完 FILE_END：向 UI 上报该文件发送失败（取消/中断）
+            if pull_session and pull_name and not pull_done:
+                self.send_finished.emit(pull_session, pull_name, False)
             self._close_conn(conn_id)
 
     def _process_pull_message(self, conn_id: str, message):
@@ -206,7 +220,6 @@ class FileProvider(QObject):
             session_id = req.get('session_id', '')
             token = req.get('token', '')
             name = req.get('name', '')
-            offset = int(req.get('offset', 0))
         except Exception:
             return
 
@@ -218,27 +231,51 @@ class FileProvider(QObject):
         if not abs_path or not os.path.isfile(abs_path):
             return
 
-        self._stream_file(info['socket'], info['send_guard'], name, abs_path, offset)
+        with self._lock:
+            info['pull_session'] = session_id
+            info['pull_name'] = name
+            info['pull_done'] = False
+        ok = self._stream_file(info['socket'], info['send_guard'], session_id, name, abs_path)
+        with self._lock:
+            info['pull_done'] = ok
 
-    def _stream_file(self, conn_socket, send_guard: SendLock, name: str, abs_path: str, offset: int):
-        """从本机文件按 offset 起读取并以 P2P_FILE_DATA 分块发送。"""
-        total_size = os.path.getsize(abs_path)
+    def _stream_file(self, conn_socket, send_guard: SendLock, session_id: str, name: str,
+                     abs_path: str) -> bool:
+        """从本机文件流式发送（与同步传输 server._send_large_file_to_client 同一套逻辑）。
+
+        发送前取真实大小作为 FILE_BEGIN 的 file_size，分块流式发送、进度分母恒定，
+        FILE_END 携带真实大小；成功发完 FILE_END 上报 send_finished(True) 并返回 True，
+        任何中断返回 False（连接关闭时由 _handle_pull 兜底上报失败）。
+        """
         try:
+            total_size = os.path.getsize(abs_path)
+            mtime = os.path.getmtime(abs_path)
+        except OSError:
+            return False
+        ok = False
+        try:
+            send_guard.send(conn_socket, Protocol.pack_message(
+                MessageType.FILE_BEGIN, name, total_size, False, b'', mtime))
+            sent = 0
             with open(abs_path, 'rb') as fh:
-                fh.seek(offset)
-                sent = 0
+                chunk_index = 0
                 while self.running:
                     chunk = fh.read(self.CHUNK_SIZE)
                     if not chunk:
                         break
+                    send_guard.send(conn_socket,
+                                    Protocol.create_file_data_message(name, chunk_index, chunk))
                     sent += len(chunk)
-                    is_last = (offset + sent) >= total_size
-                    msg = Protocol.create_p2p_data(name, offset + sent - len(chunk), total_size, chunk, is_last)
-                    send_guard.send(conn_socket, msg)
-                    if is_last:
-                        break
+                    chunk_index += 1
+                    self.send_progress.emit(session_id, name, sent, total_size)
+            if self.running:
+                send_guard.send(conn_socket,
+                                Protocol.create_file_end_message(name, total_size, mtime))
+                ok = True
+                self.send_finished.emit(session_id, name, True)
         except Exception:
-            pass
+            ok = False
+        return ok
 
     def _close_conn(self, conn_id: str):
         with self._lock:
@@ -251,55 +288,75 @@ class FileProvider(QObject):
 
 
 def pull_file(host: str, port: int, session_id: str, token: str, name: str, dest_path: str,
-              offset: int = 0, progress_cb=None):
-    """接收端 P2P 单文件拉取：直连复制端目录端口，写文件到 dest_path（原子替换）。
+              progress_cb=None):
+    """接收端单文件拉取：直连复制端目录端口，以 FILE_BEGIN/FILE_DATA/FILE_END 流式收文件。
+
+    与同步接收同一套逻辑：FILE_BEGIN 携带真实大小作为进度分母（恒定），分块顺序写入，
+    FILE_END 校验完整度（实际接收字节数 == FILE_BEGIN 的真实大小，不一致则丢弃）。
 
     Args:
         host: 复制端局域网 IP
         port: 复制端 FileProvider 端口
         session_id / token / name: 拉取目标
         dest_path: 接收端写入的最终路径
-        offset: 起始偏移（阶段A固定 0）
         progress_cb: 可选，回调 (received_bytes, total_bytes)
 
     Returns:
         (成功?, 实际接收字节数, 错误消息)
     """
     total = 0
-    got_last = False
+    got_end = False
+    expected_total = 0
+    mtime = 0.0
     try:
-        conn = socket.create_connection((host, port), timeout=5.0)
+        conn = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        # 增大 TCP 收发缓冲（与同步传输 client.connect_to_server 同款）：
+        # 接收端窗口由 SO_RCVBUF 决定，默认 64KB 会限制大文件吞吐（实测投递比同步慢 ~1.5 倍）
+        try:
+            conn.setsockopt(socket.SOL_SOCKET, socket.SO_SNDBUF, 4 * 1024 * 1024)
+            conn.setsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF, 4 * 1024 * 1024)
+        except Exception:
+            pass
+        conn.settimeout(5.0)
+        conn.connect((host, port))
     except OSError as e:
         return False, 0, f"无法连接复制端 {host}:{port}: {e}"
 
-    conn.settimeout(5.0)
+    conn.settimeout(30.0)
     receiver = MessageReceiver()
-    send_guard = SendLock()
 
     # 目标路径准备（写入临时文件，成功后再原子改名，避免失败留下半成品）
     dest_dir = os.path.dirname(os.path.abspath(dest_path)) or '.'
     os.makedirs(dest_dir, exist_ok=True)
-    tmp_fd, tmp_path = tempfile.mkstemp(prefix='.p2p_', suffix='.part', dir=dest_dir)
+    tmp_fd, tmp_path = tempfile.mkstemp(prefix='.tcp_', suffix='.part', dir=dest_dir)
     try:
         with os.fdopen(tmp_fd, 'wb') as fh:
-            send_guard.send(conn, Protocol.create_pull_request(session_id, token, name, offset))
+            conn.sendall(Protocol.create_pull_request(session_id, token, name))
             while True:
-                raw = conn.recv(65536)
+                try:
+                    raw = conn.recv(65536)
+                except socket.timeout:
+                    continue  # 发送端打开/读取大文件时静默等待（与同步接收一致）
                 if not raw:
-                    break  # 对端关闭：若已收完（got_last）才算成功，否则视为失败
+                    break  # 对端关闭：若已收完（got_end）才算成功，否则视为失败
                 receiver.feed(raw)
                 while receiver.has_complete_message():
-                    mtype, fname, fsize, _mtime, _hide, content = receiver.get_message()
-                    if mtype != MessageType.P2P_FILE_DATA:
+                    mtype, fname, fsize, msg_mtime, _hide, content = receiver.get_message()
+                    if mtype == MessageType.FILE_BEGIN:
+                        expected_total = fsize  # 发送端开流时的真实大小（进度分母，恒定）
+                        mtime = msg_mtime
+                    elif mtype == MessageType.FILE_DATA:
+                        _chunk_index, chunk = content
+                        fh.write(chunk)
+                        total += len(chunk)
+                        if progress_cb:
+                            progress_cb(total, expected_total)
+                    elif mtype == MessageType.FILE_END:
+                        got_end = True
+                        break
+                    else:
                         continue
-                    _off, total_size, is_last, payload = Protocol.unpack_p2p_data(content)
-                    fh.write(payload)
-                    total += len(payload)
-                    if progress_cb:
-                        progress_cb(total, total_size)
-                    if is_last:
-                        got_last = True
-                if got_last:
+                if got_end:
                     break
         conn.close()
     except Exception as e:
@@ -310,12 +367,22 @@ def pull_file(host: str, port: int, session_id: str, token: str, name: str, dest
         _safe_remove(tmp_path)
         return False, total, f"拉取失败: {e}"
 
-    if not got_last or total == 0:
+    if not got_end:
         _safe_remove(tmp_path)
         return False, total, "复制端未提供数据（会话无效或文件不存在）"
 
-    # 完成：原子替换为目标文件
+    # 完整度校验（与同步接收一致）：FILE_END 携带真实大小，实际接收字节数不符则丢弃
+    if expected_total > 0 and total != expected_total:
+        _safe_remove(tmp_path)
+        return False, total, f"文件不完整（实际 {total}/期望 {expected_total}）"
+
+    # 完成：原子替换为目标文件，恢复源文件修改时间
     os.replace(tmp_path, dest_path)
+    if mtime:
+        try:
+            os.utime(dest_path, (mtime, mtime))
+        except Exception:
+            pass
     return True, total, ""
 
 

@@ -535,7 +535,7 @@ class SyncServer(QObject):
         - 同时通过 clipboard_received 信号回投 UI 主线程，写入主机自身的系统剪贴板（满足"含主机"）。
         """
         if mime_type != "text":
-            return  # 忽略非法类型，防伪（文本走剪贴板；图片/文件走文件 P2P 链路）
+            return  # 忽略非法类型，防伪（文本走剪贴板；图片/文件走文件 TCP 直连链路）
         msg = Protocol.create_clipboard_message(mime_type, data)
         # 排除源端，避免把内容回写给复制发起者（它本地已显示剪贴板）
         self._broadcast_data(msg, exclude_client=client_id)

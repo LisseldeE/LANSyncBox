@@ -12,7 +12,7 @@
 
 ## Introduction
 
-LANSyncBox Pro is the upgraded version of [LANSyncBox](https://github.com/LisseldeE/LANSyncBox). It focuses on LAN multi-user collaboration, adding a host of new features to improve the user experience.
+LANSyncBox Pro is the upgraded version of [LANSyncBox](https://github.com/LisseldeE/LANSyncBox/tree/main). It focuses on LAN multi-user collaboration. Compared to the standard edition, Pro is introducing several new capabilities — **Delivery** for cross-device copy & paste, top-edge **quick-add** by drag-and-drop, Collect mode, and more — under continuous development.
 
 ## Version Statement
 
@@ -20,13 +20,14 @@ The Pro edition will remain **open source** and will not become a paid product. 
 
 ## New Highlights (In Progress)
 
-Compared to the old version, the Pro edition is adding the following features (listed only partially):
+> Beyond file sync, the Pro edition is adding the following capabilities (in development, listed only partially).
 
 | Feature | Description |
 | :--- | :--- |
-| **LAN Clipboard** | Active once a room is connected — one-click copy & paste of **text, images, and files** across devices on the LAN |
-| **Distributed File Transfer (P2P)** | File metadata is distributed by the host, but pasting **pulls the file directly from the copying peer**, bypassing host forwarding |
-| **Sync / Collect Modes** | New Collect mode: client files are submitted to the host only, without broadcasting to other clients |
+| **Delivery · Cross-device Copy & Paste** | Copy on device A, hit **Ctrl+V** on device B — done. **Text** is broadcast by the host into every client's system clipboard; **images/files** are **pulled peer-to-peer** from the copying device and delivered to your local folder |
+| **Top Quick-Add** | Drag files/folders onto the **top edge of the screen** to add them to the sync list instantly, without reaching into the window |
+| **Distributed File Transfer** | File metadata is distributed by the host, but the bytes flow **directly between the copying and receiving peers**, bypassing host forwarding |
+| **Sync / Collect Modes** | On top of real-time sync, a new **Collect mode**: clients submit files to the host only, without broadcasting to other clients |
 
 > The above are planned Beta changes; specifics and progress may shift during development. Refer to actual releases.
 
