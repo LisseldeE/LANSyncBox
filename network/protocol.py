@@ -36,6 +36,10 @@ class MessageType:
     CLIPBOARD_FILES_NOTIFY = 0x17  # 剪切板文件会话通知（复制端→主机→其余端；content=JSON 会话元数据）
     CLIPBOARD_FILE_PULL_REQ = 0x18 # 文件拉取请求（接收端→复制端目录端口；content=JSON {session_id,token,name,offset}）
     P2P_FILE_DATA = 0x19 # 预留常量（投递已改走 FILE_BEGIN/FILE_DATA/FILE_END 端到端 TCP 流式传输，不再使用）
+    MODE_SWITCH = 0x1A    # 模式切换指令（主机→连接端；content="sync"/"collect"）
+    MODE_ACK = 0x1B       # 模式切换完成回执（连接端→主机；content=切换后的模式）
+    MODE_REQ = 0x1C       # 模式请求（连接端认证成功后→主机，请求当前模式）
+    MODE_RESP = 0x1D      # 模式响应（主机→连接端；content="sync"/"collect"）
 
 
 class Protocol:
@@ -237,6 +241,20 @@ class Protocol:
         """
         content = struct.pack('!d', send_time)
         return Protocol.pack_message(MessageType.PONG, '', len(content), False, content)
+
+    @staticmethod
+    def create_mode_message(msg_type: int, mode: str) -> bytes:
+        """创建模式相关消息（MODE_SWITCH / MODE_ACK / MODE_REQ / MODE_RESP）
+
+        Args:
+            msg_type: 模式消息类型常量
+            mode: "sync"（同步模式）或 "collect"（收集模式）
+
+        Returns:
+            消息字节
+        """
+        content = mode.encode('utf-8')
+        return Protocol.pack_message(msg_type, '', len(content), False, content)
 
     @staticmethod
     def create_clipboard_message(mime_type: str, data: bytes) -> bytes:

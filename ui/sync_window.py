@@ -16,9 +16,10 @@ from PySide6.QtWidgets import (
     QTableWidget, QTableWidgetItem, QProgressBar, QHeaderView, QApplication,
     QGraphicsOpacityEffect
 )
-from PySide6.QtCore import Qt, Signal, QEvent, QMetaObject, Q_ARG, Slot, QTimer, QPropertyAnimation, QEasingCurve
+from PySide6.QtCore import Qt, Signal, QEvent, QMetaObject, Q_ARG, Slot, QTimer, QPropertyAnimation, QEasingCurve, QSize
 from PySide6.QtGui import (QColor, QIcon, QPixmap, QCursor, QPalette, QKeySequence,
-                           QShortcut)
+                           QShortcut, QPainter)
+from PySide6.QtSvg import QSvgRenderer
 from pathlib import Path
 
 from i18n import I18n
@@ -33,6 +34,31 @@ from network.client import SyncClient
 from network.discovery import RoomResponder
 from utils.transfer_queue import TransferQueue
 from network.file_provider import FileProvider, pull_file
+
+
+def _render_mode_swap_icon() -> QIcon:
+    """渲染模式切换按钮的双向箭头线条图标（同轴双头 ↔，白色正常态 / 浅灰禁用态）。
+
+    注册 16px / 32px 两种位图：1 倍屏取 16px、2 倍屏取 32px，避免降采样导致
+    线条发虚；QIcon 同时注册 Normal / Disabled 两种模式，按钮禁用（等待连接端
+    确认）时自动切换为灰色版本。
+    """
+    svg = ('<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" '
+           'stroke="%C%" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">'
+           '<line x1="3.5" y1="12" x2="20.5" y2="12"/>'
+           '<polyline points="16.5 8.3 20.5 12 16.5 15.7"/>'
+           '<polyline points="7.5 8.3 3.5 12 7.5 15.7"/></svg>')
+    icon = QIcon()
+    for mode, color in ((QIcon.Normal, '#ffffff'), (QIcon.Disabled, '#ced4da')):
+        for size in (16, 32):
+            renderer = QSvgRenderer(bytearray(svg.replace('%C%', color).encode('utf-8')))
+            pix = QPixmap(size, size)
+            pix.fill(Qt.transparent)
+            painter = QPainter(pix)
+            renderer.render(painter)
+            painter.end()
+            icon.addPixmap(pix, mode)
+    return icon
 
 
 class SyncWindow(QMainWindow):
@@ -66,6 +92,10 @@ class SyncWindow(QMainWindow):
         self.server = None
         self.client = None
         self.responder = None
+
+        # 模式状态（"sync"同步 / "collect"收集；主机端=server.mode，连接端=client.mode）
+        self._mode = "sync"
+        self._mode_switching = False  # 模式切换进行中（等待连接端 ACK）
 
         # 顶部拖拽放置区（快捷添加文件）：仅在房间连接就绪后创建
         self._drop_zone = None
@@ -174,11 +204,11 @@ class SyncWindow(QMainWindow):
         info_layout.setContentsMargins(10, 10, 10, 10)
         info_layout.setSpacing(8)
         
-        # 模式标签
-        mode_text = I18n.tr('host_mode') if self.is_host else I18n.tr('client_mode')
-        mode_label = QLabel(f"<b>{mode_text}</b>")
-        mode_label.setAlignment(Qt.AlignCenter)
-        info_layout.addWidget(mode_label)
+        # 模式标签（主机端/连接端 · 同步模式/收集模式）
+        self.mode_label = QLabel()
+        self.mode_label.setAlignment(Qt.AlignCenter)
+        info_layout.addWidget(self.mode_label)
+        self._update_mode_label()
         
         # 房间号（可点击复制）
         self.room_label = QLabel(I18n.tr('room_info', code=self.room_code))
@@ -211,11 +241,25 @@ class SyncWindow(QMainWindow):
             self.status_label.setAttribute(Qt.WA_Hover, True)
             self.status_label.installEventFilter(self)
         
+        # 模式切换 + 断开连接按钮（主机端并排一行显示）
+        btn_row = QHBoxLayout()
+        btn_row.setSpacing(8)
+        self.mode_switch_btn = None
+        if self.is_host:
+            self.mode_switch_btn = AnimatedButton(I18n.tr('mode_switch_to_collect'))
+            self.mode_switch_btn.setIcon(_render_mode_swap_icon())
+            self.mode_switch_btn.setIconSize(QSize(16, 16))
+            self.mode_switch_btn.setToolTip(I18n.tr('mode_switch_collect_tip'))
+            self.mode_switch_btn.clicked.connect(self.on_mode_switch_clicked)
+            self.mode_switch_btn.setStyleSheet(BUTTON_STYLES['primary'])
+            btn_row.addWidget(self.mode_switch_btn)
+
         # 断开连接按钮
         disconnect_btn = AnimatedButton(I18n.tr('disconnect'))
         disconnect_btn.clicked.connect(self.on_disconnect)
         disconnect_btn.setStyleSheet(BUTTON_STYLES['danger'])
-        info_layout.addWidget(disconnect_btn)
+        btn_row.addWidget(disconnect_btn)
+        info_layout.addLayout(btn_row)
 
         left_layout.addWidget(info_frame)
 
@@ -403,6 +447,9 @@ class SyncWindow(QMainWindow):
             self.server.clipboard_received.connect(self.on_server_clipboard_received)
             # 主机端收到文件会话通知（展示远程文件胶囊；文件字节不经主机）
             self.server.files_notify_received.connect(self.on_files_notify)
+            # 主机端模式切换信号
+            self.server.mode_switching.connect(self.on_server_mode_switching)
+            self.server.mode_changed.connect(self.on_server_mode_changed)
 
             # 先启动房间响应服务（占用发现端口）
             self.responder = RoomResponder(self)
@@ -460,6 +507,8 @@ class SyncWindow(QMainWindow):
             self.client.clipboard_received.connect(self.on_client_clipboard_received)
             # 连接端收到主机转发的文件会话通知（展示远程文件胶囊）
             self.client.files_notify_received.connect(self.on_files_notify)
+            # 连接端模式变更信号
+            self.client.mode_changed.connect(self.on_client_mode_changed)
 
             # 连接到服务器（复用模式下 client 已验证通过，直接记录日志）
             host = self.host_address or "127.0.0.1"
@@ -467,6 +516,11 @@ class SyncWindow(QMainWindow):
             if self.client.authenticated:
                 self._add_record(f"{host}:{port}", "连接", "")
                 self.on_connected()
+                # 复用连接：MODE_RESP 可能早于 UI 信号连接已到达，补偿模式状态与初始差异同步
+                if self.client.mode_received:
+                    self.on_client_mode_changed(self.client.mode)
+                    if self.client.mode == "sync":
+                        self._perform_full_sync()
             elif self.client.connect_to_server(host, port):
                 self._add_record(f"{host}:{port}", "连接", "")
             else:
@@ -1396,8 +1450,7 @@ class SyncWindow(QMainWindow):
         else:
             # 连接端显示"已连接"，延迟初始为 -- ms，收到首个 PING 回包后再刷新为实际值
             self.status_label.setText(f'<span style="color: green;">{I18n.tr("status_connected")}</span> · {I18n.tr("latency_unknown")} {I18n.tr("latency_ms")}')
-            # 连接端连接成功：上报文件列表，触发首次全量差异同步
-            self._perform_full_sync()
+            # 首次全量差异同步改由模式确认后触发（sync 模式下收到 MODE_RESP 自动上报）
             # 连接就绪：开启局域网剪切板分发 + 启动本端目录服务（复制端 serve 用）
             self._start_provider()
             self._monitor.set_enabled(True)
@@ -1406,6 +1459,80 @@ class SyncWindow(QMainWindow):
         self._update_sync_btn_state()
         # 房间就绪：启用顶部拖拽放置区（快捷添加文件到当前同步列表/根目录）
         self._init_drop_zone()
+
+    # ========== 模式切换（同步/收集） ==========
+
+    def _update_mode_label(self):
+        """更新信息面板模式标签：主机端/连接端 · 同步模式/收集模式"""
+        role = I18n.tr('host_mode') if self.is_host else I18n.tr('client_mode')
+        mode_name = I18n.tr('mode_sync') if self._mode == "sync" else I18n.tr('mode_collect')
+        self.mode_label.setText(f"<b>{role} · {mode_name}</b>")
+
+    def _mode_name(self, mode: str) -> str:
+        """模式显示名（中文，用于日志记录）"""
+        return I18n.tr('mode_sync') if mode == "sync" else I18n.tr('mode_collect')
+
+    def _update_mode_switch_btn(self):
+        """更新模式切换按钮文本与可用性（仅主机端）"""
+        if not self.mode_switch_btn:
+            return
+        if self._mode_switching:
+            self.mode_switch_btn.setText(I18n.tr('mode_switching'))
+            self.mode_switch_btn.setEnabled(False)
+            return
+        self.mode_switch_btn.setEnabled(True)
+        if self._mode == "collect":
+            self.mode_switch_btn.setText(I18n.tr('mode_switch_to_sync'))
+            self.mode_switch_btn.setToolTip(I18n.tr('mode_switch_sync_tip'))
+        else:
+            self.mode_switch_btn.setText(I18n.tr('mode_switch_to_collect'))
+            self.mode_switch_btn.setToolTip(I18n.tr('mode_switch_collect_tip'))
+
+    def on_mode_switch_clicked(self):
+        """点击模式切换按钮（仅主机端）"""
+        if not self.is_host or not self.server or self._mode_switching:
+            return
+        new_mode = "collect" if self._mode == "sync" else "sync"
+        if not self.server.switch_mode(new_mode):
+            return
+        # 切换发起：记录系统日志（收集转同步时模式已立即生效）
+        self._add_record("", "系统", f"{self._mode_name(self._mode)} -> {self._mode_name(new_mode)}")
+        self._mode = new_mode
+        self._update_mode_label()
+        self._update_mode_switch_btn()
+
+    def on_server_mode_switching(self, new_mode: str):
+        """主机端模式切换发起：等待连接端 ACK 期间置灰切换按钮"""
+        self._mode_switching = True
+        self._update_mode_switch_btn()
+        self._update_sync_btn_state()
+
+    def on_server_mode_changed(self, old_mode: str, new_mode: str):
+        """主机端模式切换完成（全部连接端确认后触发）"""
+        self._mode_switching = False
+        self._mode = new_mode
+        self._update_mode_label()
+        self._update_mode_switch_btn()
+        self._update_sync_btn_state()
+        self._add_record("", "系统", f"{self._mode_name(old_mode)} -> {self._mode_name(new_mode)}")
+        # 本端 UI 传输队列同步处理：收集转同步取消全部，同步转收集仅清空排队
+        if new_mode == "sync":
+            self.transfer_queue.cancel_all_tasks()
+        else:
+            with self.transfer_queue.lock:
+                self.transfer_queue.queue.clear()
+
+    def on_client_mode_changed(self, new_mode: str):
+        """连接端模式变更（收到主机 MODE_RESP/MODE_SWITCH）"""
+        self._mode = new_mode
+        self._update_mode_label()
+        self._update_sync_btn_state()
+        # 本端 UI 传输队列同步处理：收集转同步取消全部，同步转收集仅清空排队
+        if new_mode == "sync":
+            self.transfer_queue.cancel_all_tasks()
+        else:
+            with self.transfer_queue.lock:
+                self.transfer_queue.queue.clear()
 
     def _init_drop_zone(self):
         """创建屏顶放置条，启用「把文件/文件夹拖到屏幕顶部」快捷添加。
@@ -1524,8 +1651,12 @@ class SyncWindow(QMainWindow):
             self.file_list.show_global_notification(I18n.tr('manual_sync_consistent'))
 
     def _update_sync_btn_state(self):
-        """根据连接状态更新手动同步按钮可用性"""
+        """根据连接状态更新手动同步按钮可用性（收集模式下始终不可用）"""
         if self._sync_btn_locked:
+            self.file_list.set_sync_btn_enabled(False)
+            return
+        if self._mode == "collect":
+            # 收集模式下不会同步各端列表，手动同步不可用
             self.file_list.set_sync_btn_enabled(False)
             return
         if self.is_host:

@@ -42,6 +42,7 @@ class SyncClient(QObject):
     latency_updated = Signal(float)     # 延迟更新 (rtt_ms)，连接端="已连接"旁显示的延迟
     clipboard_received = Signal(str, bytes)  # 收到剪切板内容 (mime_type, data)，交 UI 写系统剪贴板
     files_notify_received = Signal(bytes)    # 收到文件会话通知（content=JSON 字节），交 UI 展示远程文件胶囊
+    mode_changed = Signal(str)         # 模式变更 (new_mode)，"sync"/"collect"
     
     # 数据块大小（64KB）
     CHUNK_SIZE = 64 * 1024
@@ -61,6 +62,10 @@ class SyncClient(QObject):
 
         # 延迟缓存（连接端显示用），由 PING/PONG 在接收线程更新
         self.latency = None
+
+        # 当前模式：认证后由主机端下发（"sync"同步 / "collect"收集）
+        self.mode = "sync"
+        self.mode_received = False  # 是否已收到主机模式下发（复用连接时用于补偿 UI 状态）
 
         # 延迟探测线程控制
         self._ping_stop = threading.Event()
@@ -378,6 +383,9 @@ class SyncClient(QObject):
         
         elif msg_type == MessageType.SYNC_REQUEST:
             # 主机端请求手动同步：重新上报文件列表，触发差异补齐
+            # 收集模式下不触发全量同步（不会同步各端列表）
+            if self.mode == "collect":
+                return
             self.sync_requested.emit()
 
         elif msg_type == MessageType.SYNC_RESULT:
@@ -410,6 +418,68 @@ class SyncClient(QObject):
         elif msg_type == MessageType.CLIPBOARD_FILES_NOTIFY:
             # 收到主机转发的文件会话通知：交 UI 展示远程文件胶囊
             self.files_notify_received.emit(content)
+
+        elif msg_type == MessageType.MODE_RESP:
+            # 主机端响应模式请求：设置当前模式
+            mode = content.decode('utf-8', errors='ignore').strip()
+            self._handle_mode_response(mode)
+
+        elif msg_type == MessageType.MODE_SWITCH:
+            # 主机端模式切换指令：切换本端模式并回执 ACK
+            mode = content.decode('utf-8', errors='ignore').strip()
+            self._handle_mode_switch(mode)
+    
+    def _send_mode_request(self):
+        """认证成功后向主机端请求当前模式"""
+        if not self.socket:
+            return
+        try:
+            self._send_guard.send(self.socket, Protocol.create_mode_message(MessageType.MODE_REQ, "sync"))
+        except Exception:
+            pass
+
+    def _handle_mode_response(self, mode: str):
+        """处理主机端返回的模式（认证后首次下发）
+
+        初次加入时：
+        - sync 模式 → 触发一次全量差异同步（原连接成功即同步的行为）
+        - collect 模式 → 不触发全量同步（连接端加入不会触发同步逻辑）
+        """
+        if mode not in ("sync", "collect"):
+            mode = "sync"
+        self.mode = mode
+        self.mode_received = True  # 标记已收到模式下发（复用连接时供 UI 补偿状态）
+        self.mode_changed.emit(mode)
+        if mode == "sync":
+            # 同步模式下初次加入需补齐差异
+            self.sync_requested.emit()
+
+    def _handle_mode_switch(self, new_mode: str):
+        """处理主机端模式切换指令
+
+        - 切换前先处理传输队列：收集转同步取消全部传输；同步转收集仅清空排队
+        - 回执 MODE_ACK 给主机端，由主机端统计全部回执后执行后续逻辑
+        """
+        if new_mode not in ("sync", "collect"):
+            return
+        old_mode = self.mode
+        if new_mode == "sync" and old_mode == "collect":
+            # 收集转同步：取消同步中的文件并清空传输列表
+            self.transfer_queue.cancel_all_tasks()
+        else:
+            # 同步转收集：正在传输的继续传输，仅清空排队列表
+            with self.transfer_queue.lock:
+                self.transfer_queue.queue.clear()
+        self.mode = new_mode
+        self.mode_received = True  # 切换指令同样视为已收到模式下发
+
+        try:
+            self._send_guard.send(self.socket, Protocol.create_mode_message(MessageType.MODE_ACK, new_mode))
+        except Exception:
+            pass
+
+        self.mode_changed.emit(new_mode)
+        self.log_message.emit(f"模式切换: {old_mode} -> {new_mode}")
     
     def _handle_auth_response(self, content: bytes):
         """处理验证响应"""
@@ -424,6 +494,8 @@ class SyncClient(QObject):
                 self.log_message.emit("验证成功")
                 # 认证成功后启动延迟探测，连接端才能周期性 PING 主机以显示延迟
                 self._start_ping_thread()
+                # 认证成功后请求当前模式，由主机端决定本端模式
+                self._send_mode_request()
             else:
                 self.log_message.emit(f"验证失败: {message}")
                 # 发射验证失败信号
@@ -436,7 +508,26 @@ class SyncClient(QObject):
             self.disconnect()
 
     def _handle_delete(self, filename: str):
-        """处理删除指令"""
+        """处理删除指令
+
+        空文件名（主机端删除对应 IP 文件夹）时清空本端根目录全部内容。
+        """
+        if not filename:
+            # 主机端删除 IP 文件夹：连接端清空根目录
+            try:
+                from sync.file_manager import safe_rmtree
+                for item in os.listdir(self.sync_folder):
+                    item_path = os.path.join(self.sync_folder, item)
+                    if os.path.isdir(item_path):
+                        safe_rmtree(item_path)
+                    else:
+                        os.remove(item_path)
+                self.log_message.emit("清空根目录")
+                self.file_deleted.emit('')
+                return
+            except Exception as e:
+                self.log_message.emit(f"清空根目录失败: {e}")
+                return
         try:
             file_path = self._safe_join(filename)
         except ValueError as e:

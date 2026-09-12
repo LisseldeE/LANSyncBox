@@ -16,18 +16,61 @@ from PySide6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QTableWidget, 
     QTableWidgetItem, QHeaderView, QMenu, QMessageBox, 
     QFileDialog, QAbstractItemView, QLabel, QPushButton,
-    QRubberBand, QGraphicsOpacityEffect
+    QRubberBand, QGraphicsOpacityEffect, QFrame
 )
 from PySide6.QtCore import (Qt, Signal, QMimeData, QUrl, QPoint, QThread,
                             QMetaObject, Q_ARG, QRect, QItemSelection,
                             QItemSelectionModel, QTimer, QPropertyAnimation,
-                            QSequentialAnimationGroup, QEasingCurve)
-from PySide6.QtGui import QAction, QIcon, QDrag, QDropEvent, QDragEnterEvent, QDragMoveEvent, QCursor, QColor, QDesktopServices
+                            QSequentialAnimationGroup, QEasingCurve, QSize)
+from PySide6.QtGui import (QAction, QIcon, QDrag, QDropEvent, QDragEnterEvent,
+                           QDragMoveEvent, QCursor, QColor, QDesktopServices,
+                           QPixmap, QPainter)
+from PySide6.QtSvg import QSvgRenderer
 from PySide6.QtWidgets import QApplication
 
 from i18n import I18n
 from config import Config
 from ui.widgets import BUTTON_STYLES, UnderlineEdit
+
+
+# 快捷操作栏图标（轻量线条风格 SVG，%C% 占位符在渲染时替换为实际颜色）
+_SVG_NEW_FOLDER = (
+    '<svg viewBox="0 0 24 24" fill="none" stroke="%C%" stroke-width="1.8" '
+    'stroke-linecap="round" stroke-linejoin="round">'
+    '<path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/>'
+    '<path d="M12 9.5v6M9 12.5h6"/></svg>'
+)
+_SVG_COPY = (
+    '<svg viewBox="0 0 24 24" fill="none" stroke="%C%" stroke-width="1.8" '
+    'stroke-linecap="round" stroke-linejoin="round">'
+    '<rect x="8" y="8" width="12" height="12" rx="2"/>'
+    '<path d="M16 8V6a2 2 0 0 0-2-2H6a2 2 0 0 0-2 2v8a2 2 0 0 0 2 2h2"/></svg>'
+)
+_SVG_CUT = (
+    '<svg viewBox="0 0 24 24" fill="none" stroke="%C%" stroke-width="1.8" '
+    'stroke-linecap="round" stroke-linejoin="round">'
+    '<circle cx="6" cy="6" r="3"/><circle cx="6" cy="18" r="3"/>'
+    '<path d="M20 4 8.12 15.88"/><path d="M14.48 14.48 20 20"/>'
+    '<path d="M8.12 8.12 12 12"/></svg>'
+)
+_SVG_PASTE = (
+    '<svg viewBox="0 0 24 24" fill="none" stroke="%C%" stroke-width="1.8" '
+    'stroke-linecap="round" stroke-linejoin="round">'
+    '<rect x="7" y="3" width="12" height="18" rx="2"/><path d="M11 3h4"/>'
+    '<rect x="3" y="8" width="12" height="14" rx="2"/></svg>'
+)
+_SVG_RENAME = (
+    '<svg viewBox="0 0 24 24" fill="none" stroke="%C%" stroke-width="1.8" '
+    'stroke-linecap="round" stroke-linejoin="round">'
+    '<path d="M4 20h4L19 9l-4-4L4 16v4z"/><path d="M13.5 6.5l4 4"/></svg>'
+)
+_SVG_DELETE = (
+    '<svg viewBox="0 0 24 24" fill="none" stroke="%C%" stroke-width="1.8" '
+    'stroke-linecap="round" stroke-linejoin="round">'
+    '<path d="M3 6h18"/><path d="M8 6V4a1 1 0 0 1 1-1h6a1 1 0 0 1 1 1v2"/>'
+    '<path d="M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6"/>'
+    '<path d="M10 11v6M14 11v6"/></svg>'
+)
 
 
 class WarnSyncButton(QPushButton):
@@ -708,6 +751,63 @@ class FileListWidget(QWidget):
         
         layout.addWidget(toolbar)
         
+        # 快捷操作栏（Win11 命令栏样式：仅图标按钮，启用状态随选中/投递状态联动）
+        action_bar = QWidget()
+        action_bar_layout = QHBoxLayout(action_bar)
+        action_bar_layout.setContentsMargins(6, 2, 6, 2)
+        action_bar_layout.setSpacing(2)
+
+        # 主题适配图标颜色（与表格选中色同一套亮度判定）
+        _win = self.palette().color(self.palette().ColorRole.Window)
+        _lum = 0.299 * _win.red() + 0.587 * _win.green() + 0.114 * _win.blue()
+        self._act_icon = "#212529" if _lum > 128 else "#e9ecef"
+        self._act_icon_disabled = "#b9bec6" if _lum > 128 else "#4f545b"
+        self._act_hover = "rgba(0, 0, 0, 0.06)" if _lum > 128 else "rgba(255, 255, 255, 0.09)"
+
+        self._new_folder_btn = self._make_action_btn(
+            _SVG_NEW_FOLDER, I18n.tr('new_folder'), self.on_new_folder)
+        action_bar_layout.addWidget(self._new_folder_btn)
+
+        self._copy_btn = self._make_action_btn(
+            _SVG_COPY, I18n.tr('copy'), self.copy_files)
+        action_bar_layout.addWidget(self._copy_btn)
+
+        self._cut_btn = self._make_action_btn(
+            _SVG_CUT, I18n.tr('cut'), self.cut_files)
+        action_bar_layout.addWidget(self._cut_btn)
+
+        self._paste_btn = self._make_action_btn(
+            _SVG_PASTE, I18n.tr('paste'), self.paste_files)
+        action_bar_layout.addWidget(self._paste_btn)
+
+        # 分组分隔线（复制/剪切/粘贴 与 重命名/删除 之间）
+        act_vline = QFrame()
+        act_vline.setFrameShape(QFrame.VLine)
+        act_vline.setFrameShadow(QFrame.Plain)
+        act_vline.setFixedHeight(16)
+        action_bar_layout.addSpacing(4)
+        action_bar_layout.addWidget(act_vline)
+        action_bar_layout.addSpacing(4)
+
+        self._rename_btn = self._make_action_btn(
+            _SVG_RENAME, I18n.tr('rename'), self.rename_file)
+        action_bar_layout.addWidget(self._rename_btn)
+
+        self._delete_btn = self._make_action_btn(
+            _SVG_DELETE, I18n.tr('delete'), self.delete_files)
+        action_bar_layout.addWidget(self._delete_btn)
+
+        action_bar_layout.addStretch()
+
+        # 右侧状态指示：已选数量 + 投递列表数量（与预览图一致，随选中/投递状态实时更新）
+        self._sel_status_label = QLabel()
+        self._delivery_status_label = QLabel()
+        for label in (self._sel_status_label, self._delivery_status_label):
+            label.setStyleSheet(f"color: {'#6c757d' if _lum > 128 else '#9a9ea6'}; font-size: 12px;")
+            action_bar_layout.addWidget(label, 0, Qt.AlignVCenter)
+
+        layout.addWidget(action_bar)
+        
         # 文件列表表格
         self.table = DragableTableWidget()
         # 整行统一高亮（类似系统文件管理器）：关闭网格线切口，并消掉每格焦点框
@@ -751,7 +851,10 @@ class FileListWidget(QWidget):
         # 右键菜单
         self.table.setContextMenuPolicy(Qt.CustomContextMenu)
         self.table.customContextMenuRequested.connect(self.show_context_menu)
-        
+
+        # 快捷操作栏按钮启用状态随选中变化实时刷新
+        self.table.itemSelectionChanged.connect(self._update_action_states)
+
         layout.addWidget(self.table)
 
         # 拖拽提示悬浮层（透明，不影响表格操作）
@@ -764,6 +867,62 @@ class FileListWidget(QWidget):
 
         # 更新路径显示
         self.update_path_display()
+
+        # 初始状态（无选中、无投递内容：仅"新建文件夹"可用）
+        self._update_action_states()
+    
+    def _make_action_btn(self, svg: str, tooltip: str, slot) -> QPushButton:
+        """创建快捷操作栏图标按钮：统一尺寸、线条图标、悬浮浅灰底，禁用态灰色。
+
+        QIcon 同时注册 Normal / Disabled 两种模式的位图（渲染为 2 倍尺寸保证高分屏清晰），
+        禁用时按钮自动使用灰色版本，与右键菜单的启用语义保持一致。
+        """
+        btn = QPushButton(self)
+        btn.setToolTip(tooltip)
+        btn.setFixedSize(30, 30)
+        btn.setCursor(Qt.PointingHandCursor)
+        btn.setIcon(self._render_svg_icon(svg))
+        btn.setIconSize(QSize(18, 18))
+        btn.setStyleSheet(f"""
+            QPushButton {{ background: transparent; border: none; border-radius: 6px; }}
+            QPushButton:hover {{ background: {self._act_hover}; }}
+        """)
+        btn.clicked.connect(slot)
+        return btn
+
+    def _render_svg_icon(self, svg: str) -> QIcon:
+        """将线条 SVG 渲染为带 Normal/Disabled 双模式的 QIcon（2 倍尺寸，高分屏清晰）。"""
+        icon = QIcon()
+        for mode, color in ((QIcon.Normal, self._act_icon),
+                            (QIcon.Disabled, self._act_icon_disabled)):
+            renderer = QSvgRenderer(bytearray(svg.replace('%C%', color).encode('utf-8')))
+            pix = QPixmap(36, 36)
+            pix.fill(Qt.transparent)
+            painter = QPainter(pix)
+            renderer.render(painter)
+            painter.end()
+            icon.addPixmap(pix, mode)
+        return icon
+
+    def _update_action_states(self):
+        """刷新快捷操作栏按钮启用状态与右侧状态指示（与右键菜单同一套判定逻辑）。"""
+        has_selection = len(self.get_selected_files()) > 0
+        selected_rows = self.table.selectionModel().selectedRows()
+        self._new_folder_btn.setEnabled(not has_selection)
+        self._copy_btn.setEnabled(has_selection)
+        self._cut_btn.setEnabled(has_selection)
+        self._paste_btn.setEnabled(len(self.clipboard_files) > 0)
+        self._rename_btn.setEnabled(len(selected_rows) == 1)
+        self._delete_btn.setEnabled(has_selection)
+
+        # 右侧状态指示
+        self._sel_status_label.setText(
+            I18n.tr('selected_count', count=len(selected_rows)))
+        if self.clipboard_files:
+            self._delivery_status_label.setText(
+                I18n.tr('delivery_list_count', count=len(self.clipboard_files)))
+        else:
+            self._delivery_status_label.setText(I18n.tr('delivery_list_empty'))
     
     def load_files(self):
         """加载文件列表"""
@@ -1141,11 +1300,13 @@ class FileListWidget(QWidget):
         """复制文件"""
         self.clipboard_files = self.get_selected_files()
         self.clipboard_is_cut = False
+        self._update_action_states()
     
     def cut_files(self):
         """剪切文件"""
         self.clipboard_files = self.get_selected_files()
         self.clipboard_is_cut = True
+        self._update_action_states()
     
     def paste_files(self):
         """粘贴文件（使用进度对话框避免界面卡死）"""
@@ -1321,6 +1482,7 @@ class FileListWidget(QWidget):
             self.clipboard_files = []
             self.clipboard_is_cut = False
         self.load_files()
+        self._update_action_states()
 
     def _on_paste_finished(self, dialog):
         """所有文件粘贴完成回调"""
@@ -1331,6 +1493,7 @@ class FileListWidget(QWidget):
             self.clipboard_files = []
             self.clipboard_is_cut = False
         self.load_files()
+        self._update_action_states()
 
     def _fast_move_files(self, files: List[Path]):
         """快速移动文件（同分区内使用 rename）"""
@@ -1378,6 +1541,7 @@ class FileListWidget(QWidget):
 
         # 刷新文件列表
         self.load_files()
+        self._update_action_states()
     
     def delete_files(self):
         """删除文件"""

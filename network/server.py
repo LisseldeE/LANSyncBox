@@ -42,6 +42,8 @@ class SyncServer(QObject):
     latency_updated = Signal(str, float)  # 延迟更新 (client_id, rtt_ms)
     clipboard_received = Signal(str, bytes)  # 收到剪切板内容 (mime_type, data)，交 UI 写入主机自身剪贴板
     files_notify_received = Signal(bytes)    # 收到文件会话通知（content=JSON 字节），交 UI 展示远程文件胶囊
+    mode_switching = Signal(str)      # 模式切换发起 (new_mode)，ACK 未收齐期间 UI 置灰切换按钮
+    mode_changed = Signal(str, str)   # 模式切换完成 (old_mode, new_mode)
     
     # 数据块大小（64KB）
     CHUNK_SIZE = 64 * 1024
@@ -67,6 +69,13 @@ class SyncServer(QObject):
         self._ping_stop = threading.Event()
         self._ping_thread = None
         self.PING_INTERVAL = 2.0  # 每 2 秒向每个已认证客户端发送一次 PING
+
+        # 模式状态：主机端管理模式切换
+        self.mode = "sync"             # 当前模式："sync"（同步）/ "collect"（收集）
+        self._pending_mode = None       # 切换中的目标模式（等待连接端 ACK）
+        self.mode_ack_pending = {}      # {client_id: expected_mode}，等待 ACK 的客户端
+        self._mode_ack_stop = threading.Event()
+        self._mode_ack_thread = None
     
     def start(self, port: int = None, exclude_port: int = None) -> bool:
         """启动服务器，尝试多个端口（9527-9536）
@@ -314,8 +323,14 @@ class SyncServer(QObject):
 
         elif msg_type == MessageType.FILE_BEGIN:
             # 大文件传输开始 - 使用临时文件
+            # 收集模式下路由到连接端 IP 文件夹（接收端 key 仍用原始文件名，落盘路径记录在 target_filename）
+            if self.mode == "collect":
+                ip = client_info.get('ip', '')
+                target_filename = f"{ip}/{filename}" if ip else filename
+            else:
+                target_filename = filename
             try:
-                file_path = self._safe_join(filename)
+                file_path = self._safe_join(target_filename)
             except ValueError as e:
                 self.log_message.emit(f"拒绝非法路径: {e}")
                 return
@@ -323,45 +338,47 @@ class SyncServer(QObject):
 
             os.makedirs(os.path.dirname(file_path), exist_ok=True)
 
-            # 检查是否已经有其他客户端正在接收该文件
-            cancel_self = False
-            with self._lock:
-                for other_client_id, other_client_info in self.clients.items():
-                    if other_client_id != client_id:
-                        other_rf = other_client_info.get('receiving_files', {}).get(filename)
-                        if other_rf:
-                            # 比较修改时间，只接收最新版本的文件
-                            other_mtime = other_rf['mtime']
-                            if mtime > other_mtime:
-                                # 当前文件更新，取消其他客户端的接收
-                                self.log_message.emit(f"取消 {other_client_id} 的文件接收（版本较旧）")
-                                # 关闭文件句柄
-                                handle = other_rf.get('handle')
-                                if handle:
-                                    try:
-                                        handle.close()
-                                    except Exception:
-                                        pass
-                                # 删除临时文件
-                                other_temp_path = other_rf['temp_path']
-                                if os.path.exists(other_temp_path):
-                                    os.remove(other_temp_path)
-                                # 清理状态
-                                del other_client_info['receiving_files'][filename]
-                            else:
-                                # 当前文件较旧，取消接收
-                                self.log_message.emit(f"取消 {client_id} 的文件接收（版本较旧）")
-                                cancel_self = True
-                                break
+            # 收集模式下各连接端文件路由到各自 IP 文件夹，路径隔离无需比较版本
+            if self.mode == "sync":
+                # 检查是否已经有其他客户端正在接收该文件
+                cancel_self = False
+                with self._lock:
+                    for other_client_id, other_client_info in self.clients.items():
+                        if other_client_id != client_id:
+                            other_rf = other_client_info.get('receiving_files', {}).get(filename)
+                            if other_rf:
+                                # 比较修改时间，只接收最新版本的文件
+                                other_mtime = other_rf['mtime']
+                                if mtime > other_mtime:
+                                    # 当前文件更新，取消其他客户端的接收
+                                    self.log_message.emit(f"取消 {other_client_id} 的文件接收（版本较旧）")
+                                    # 关闭文件句柄
+                                    handle = other_rf.get('handle')
+                                    if handle:
+                                        try:
+                                            handle.close()
+                                        except Exception:
+                                            pass
+                                    # 删除临时文件
+                                    other_temp_path = other_rf['temp_path']
+                                    if os.path.exists(other_temp_path):
+                                        os.remove(other_temp_path)
+                                    # 清理状态
+                                    del other_client_info['receiving_files'][filename]
+                                else:
+                                    # 当前文件较旧，取消接收
+                                    self.log_message.emit(f"取消 {client_id} 的文件接收（版本较旧）")
+                                    cancel_self = True
+                                    break
 
-            # 在锁外发送取消消息，避免阻塞其他线程
-            if cancel_self:
-                cancel_msg = Protocol.create_file_cancel(filename)
-                try:
-                    self._socket_send(client_info, cancel_msg)
-                except Exception:
-                    pass
-                return
+                # 在锁外发送取消消息，避免阻塞其他线程
+                if cancel_self:
+                    cancel_msg = Protocol.create_file_cancel(filename)
+                    try:
+                        self._socket_send(client_info, cancel_msg)
+                    except Exception:
+                        pass
+                    return
 
             # 创建临时文件句柄，准备流式写入
             try:
@@ -371,6 +388,7 @@ class SyncServer(QObject):
                     'mtime': mtime,
                     'received_size': 0,
                     'temp_path': temp_file_path,
+                    'target_filename': target_filename,
                     'handle': file_handle
                 }
 
@@ -434,9 +452,9 @@ class SyncServer(QObject):
                     del client_info['receiving_files'][filename]
                     return
 
-                # 重命名临时文件为正式文件
+                # 重命名临时文件为正式文件（收集模式下落到连接端 IP 文件夹）
                 try:
-                    final_file_path = self._safe_join(filename)
+                    final_file_path = self._safe_join(rf.get('target_filename') or filename)
                 except ValueError as e:
                     self.log_message.emit(f"拒绝非法路径: {e}")
                     if os.path.exists(temp_file_path):
@@ -458,8 +476,9 @@ class SyncServer(QObject):
                     # 通知接收完成
                     self.file_received.emit(filename)
 
-                    # 静默通知其他客户端（按需转发）
-                    self._notify_file_available(filename, rf['file_size'], rf['mtime'], exclude_client=client_id)
+                    # 静默通知其他客户端（按需转发；收集模式下不转发）
+                    if self.mode == "sync":
+                        self._notify_file_available(filename, rf['file_size'], rf['mtime'], exclude_client=client_id)
 
                 except Exception as e:
                     self.log_message.emit(f"重命名文件失败: {e}")
@@ -506,6 +525,22 @@ class SyncServer(QObject):
         elif msg_type == MessageType.CLIPBOARD_FILES_NOTIFY:
             # 剪切板文件会话通知：主机只转发元信息给其余连接端 + 回投主机自身 UI（不中转文件字节）
             self._handle_files_notify(client_id, content)
+
+        elif msg_type == MessageType.MODE_REQ:
+            # 连接端认证成功后请求当前模式：返回有效模式，收集模式下同时确保其 IP 文件夹已创建
+            mode = self._pending_mode or self.mode
+            resp = Protocol.create_mode_message(MessageType.MODE_RESP, mode)
+            try:
+                self._socket_send(client_info, resp)
+            except Exception:
+                pass
+            if mode == "collect":
+                self._ensure_client_ip_folder(client_id)
+
+        elif msg_type == MessageType.MODE_ACK:
+            # 连接端确认切换完成：从等待集合移除，全部到齐后执行切换后续逻辑
+            mode = content.decode('utf-8', errors='ignore').strip()
+            self._handle_mode_ack(client_id, mode)
 
     def _handle_files_notify(self, client_id: str, content: bytes):
         """处理主机收到的文件会话通知（复制端→主机）
@@ -605,9 +640,15 @@ class SyncServer(QObject):
             self._remove_client(client_id)
     
     def _handle_delete(self, client_id: str, filename: str):
-        """处理删除请求"""
+        """处理删除请求（收集模式下路由到连接端 IP 文件夹，且不转发）"""
+        # 收集模式下：连接端删除自身文件 → 在对应 IP 文件夹内删除
+        target = filename
+        if self.mode == "collect":
+            ip = self.clients.get(client_id, {}).get('ip', '')
+            if ip:
+                target = f"{ip}/{filename}"
         try:
-            file_path = self._safe_join(filename)
+            file_path = self._safe_join(target)
         except ValueError as e:
             self.log_message.emit(f"拒绝非法路径: {e}")
             return
@@ -619,41 +660,56 @@ class SyncServer(QObject):
                 from sync.file_manager import safe_rmtree
                 safe_rmtree(file_path)
 
-            self.log_message.emit(f"删除: {filename}")
+            self.log_message.emit(f"删除: {target}")
             self.file_deleted.emit(filename)
             
-            # 转发给其他客户端
-            self._broadcast_delete(filename, exclude_client=client_id)
+            # 转发给其他客户端（收集模式下不转发）
+            if self.mode == "sync":
+                self._broadcast_delete(filename, exclude_client=client_id)
             
         except Exception as e:
             self.log_message.emit(f"删除失败: {e}")
     
     def _handle_dir_create(self, client_id: str, dirname: str):
-        """处理目录创建"""
+        """处理目录创建（收集模式下路由到连接端 IP 文件夹，且不转发）"""
+        target = dirname
+        if self.mode == "collect":
+            ip = self.clients.get(client_id, {}).get('ip', '')
+            if ip:
+                target = f"{ip}/{dirname}"
         try:
-            dir_path = self._safe_join(dirname)
+            dir_path = self._safe_join(target)
         except ValueError as e:
             self.log_message.emit(f"拒绝非法路径: {e}")
             return
         os.makedirs(dir_path, exist_ok=True)
         
-        self.log_message.emit(f"创建目录: {dirname}")
+        self.log_message.emit(f"创建目录: {target}")
         
         # 发射目录创建信号
         self.dir_created.emit(dirname)
         
-        # 转发给其他客户端
-        self._broadcast_dir_create(dirname, exclude_client=client_id)
+        # 转发给其他客户端（收集模式下不转发）
+        if self.mode == "sync":
+            self._broadcast_dir_create(dirname, exclude_client=client_id)
     
     def _handle_rename(self, client_id: str, content: bytes):
-        """处理变更（重命名/移动）"""
+        """处理变更（重命名/移动）（收集模式下路由到连接端 IP 文件夹，且不转发）"""
         try:
             data = content.decode('utf-8').split('|')
             old_name = data[0]
             new_name = data[1]
 
-            old_path = self._safe_join(old_name)
-            new_path = self._safe_join(new_name)
+            old_target = old_name
+            new_target = new_name
+            if self.mode == "collect":
+                ip = self.clients.get(client_id, {}).get('ip', '')
+                if ip:
+                    old_target = f"{ip}/{old_name}"
+                    new_target = f"{ip}/{new_name}"
+
+            old_path = self._safe_join(old_target)
+            new_path = self._safe_join(new_target)
 
             # 如果目标文件已存在，先删除
             if os.path.exists(new_path):
@@ -665,13 +721,14 @@ class SyncServer(QObject):
 
             os.rename(old_path, new_path)
 
-            self.log_message.emit(f"变更: {old_name} -> {new_name}")
+            self.log_message.emit(f"变更: {old_target} -> {new_target}")
 
             # 发射变更信号
             self.file_renamed.emit(old_name, new_name)
 
-            # 转发给其他客户端
-            self._broadcast_rename(old_name, new_name, exclude_client=client_id)
+            # 转发给其他客户端（收集模式下不转发）
+            if self.mode == "sync":
+                self._broadcast_rename(old_name, new_name, exclude_client=client_id)
 
         except Exception as e:
             self.log_message.emit(f"变更失败: {e}")
@@ -679,12 +736,18 @@ class SyncServer(QObject):
     def _handle_file_list_request(self, client_id: str):
         """处理文件列表请求"""
         try:
-            # 获取文件列表
+            # 获取文件列表（排除收集 IP 文件夹内容，收集区不参与同步）
             from sync.file_manager import FileManager
             from pathlib import Path
             
             file_manager = FileManager(Path(self.sync_folder))
             file_list = file_manager.get_file_list_for_sync()
+            ip_folders = self._collect_ip_folders()
+            if ip_folders:
+                file_list = [
+                    f for f in file_list
+                    if not f['filename'].split('/', 1)[0] in ip_folders
+                ]
             
             # 发送文件列表响应
             response = Protocol.create_file_list_response(file_list)
@@ -705,6 +768,10 @@ class SyncServer(QObject):
                 2) 新格式 dict： {"files": [...], "empty_dirs": ["subdir1", ...]}
                     其中 empty_dirs 为连接端的空目录，需在主机端补建
         """
+        # 收集模式下不做差异仲裁：连接端加入不会触发全量同步逻辑
+        if self.mode == "collect":
+            self.log_message.emit(f"收集模式，忽略 {client_id} 的文件列表")
+            return
         try:
             # 兼容解析新格式（dict）与旧格式（list）
             if isinstance(client_file_list, dict):
@@ -738,6 +805,14 @@ class SyncServer(QObject):
             
             file_manager = FileManager(Path(self.sync_folder))
             host_file_list = file_manager.get_file_list_for_sync()
+
+            # 排除收集 IP 文件夹内容：收集区文件只归属对应连接端，不参与差异同步
+            ip_folders = self._collect_ip_folders()
+            if ip_folders:
+                host_file_list = [
+                    f for f in host_file_list
+                    if not f['filename'].split('/', 1)[0] in ip_folders
+                ]
             
             # 创建主机端文件字典（文件名 -> 文件信息）
             host_dict = {f['filename']: f for f in host_file_list}
@@ -1366,6 +1441,217 @@ class SyncServer(QObject):
                 del self.clients[client_id]
         
         self.client_disconnected.emit(client_id)
+
+        # 该客户端若正等待模式切换 ACK，直接移除（其已断开，无需再等）
+        with self._lock:
+            if client_id in self.mode_ack_pending:
+                del self.mode_ack_pending[client_id]
+                remaining = len(self.mode_ack_pending)
+                pending = self._pending_mode
+            else:
+                remaining = None
+                pending = None
+        if pending is not None and remaining == 0:
+            self._complete_mode_switch(pending)
+    
+    # ========== 模式管理 ==========
+
+    def switch_mode(self, new_mode: str) -> bool:
+        """主机端发起模式切换（同步模式 <-> 收集模式）
+
+        - 当前模式立即切换，文件路由等按新模式生效；
+        - 广播 MODE_SWITCH 给所有已认证连接端并记录 ACK 等待集合；
+        - 全部 ACK 到齐（或无在线连接端）后执行切换后续逻辑（清空队列 / 全量同步）。
+        """
+        if new_mode not in ("sync", "collect"):
+            return False
+        with self._lock:
+            if self._pending_mode is not None:
+                return False  # 已有切换进行中
+            if new_mode == self.mode:
+                return False  # 模式未变化
+            old_mode = self.mode
+            self.mode = new_mode
+            self._pending_mode = new_mode
+            self.mode_ack_pending = {
+                cid: new_mode
+                for cid, info in self.clients.items()
+                if info.get('authenticated')
+            }
+            targets = [(cid, info) for cid, info in self.clients.items()
+                       if info.get('authenticated')]
+
+        # 发射切换发起信号（UI 置灰切换按钮）
+        self.mode_switching.emit(new_mode)
+        self.log_message.emit(
+            f"切换模式: {old_mode} -> {new_mode}，等待 {len(targets)} 个连接端确认"
+        )
+
+        # 广播模式切换指令
+        msg = Protocol.create_mode_message(MessageType.MODE_SWITCH, new_mode)
+        self._broadcast_data(msg)
+
+        # 启动定时补发线程
+        self._start_mode_ack_thread()
+
+        # 无在线连接端：立即完成切换
+        if not targets:
+            self._complete_mode_switch(new_mode)
+        return True
+
+    def _handle_mode_ack(self, client_id: str, mode: str):
+        """处理连接端模式切换完成回执"""
+        with self._lock:
+            expected = self.mode_ack_pending.get(client_id)
+            if expected is None:
+                return  # 未在等待该客户端的 ACK（如重复回执）
+            if mode and mode != expected:
+                return  # 回执模式与预期不符，忽略
+            del self.mode_ack_pending[client_id]
+            pending = self._pending_mode
+            remaining = len(self.mode_ack_pending)
+        self.log_message.emit(f"连接端 {client_id} 已切换至 {mode}")
+        if pending is not None and remaining == 0:
+            self._complete_mode_switch(pending)
+
+    def _complete_mode_switch(self, new_mode: str):
+        """全部连接端 ACK 到齐后执行切换后续逻辑（仅执行一次）"""
+        with self._lock:
+            if self._pending_mode is None:
+                return
+            old_mode = "collect" if new_mode == "sync" else "sync"
+            self._pending_mode = None
+            self.mode_ack_pending = {}
+        self._stop_mode_ack_thread()
+
+        if new_mode == "collect":
+            # 正在传输的文件继续传输，仅清空排队列表
+            self._clear_queued_tasks()
+            # 为所有已认证连接端创建对应 IP 文件夹
+            self._ensure_ip_folders()
+        elif new_mode == "sync":
+            # 取消同步中的文件并清空传输列表
+            self.transfer_queue.cancel_all_tasks()
+            # 触发一次全量同步广播，各连接端上报列表后差异补齐
+            self.request_sync_all()
+
+        self.mode_changed.emit(old_mode, new_mode)
+        self.log_message.emit(f"模式切换完成: {old_mode} -> {new_mode}")
+
+    def _start_mode_ack_thread(self):
+        """启动模式切换 ACK 定时补发线程"""
+        if self._mode_ack_thread and self._mode_ack_thread.is_alive():
+            return
+        self._mode_ack_stop.clear()
+        self._mode_ack_thread = threading.Thread(target=self._mode_ack_loop, daemon=True)
+        self._mode_ack_thread.start()
+
+    def _stop_mode_ack_thread(self):
+        """停止模式切换 ACK 补发线程"""
+        self._mode_ack_stop.set()
+
+    def _mode_ack_loop(self):
+        """定时向未完成切换的连接端补发 MODE_SWITCH，直到全部 ACK 或切换被取消"""
+        while not self._mode_ack_stop.wait(2.0):
+            if not self.running:
+                break
+            with self._lock:
+                pending = self._pending_mode
+                if pending is None:
+                    break
+                targets = [
+                    (cid, info) for cid, info in self.clients.items()
+                    if cid in self.mode_ack_pending and info.get('authenticated')
+                ]
+                remaining = len(self.mode_ack_pending)
+            if pending is None:
+                break
+            if remaining == 0:
+                self._complete_mode_switch(pending)
+                break
+            if not targets:
+                # 等待集合非空但目标都已断开（_remove_client 会清理），无需再补发
+                continue
+            msg = Protocol.create_mode_message(MessageType.MODE_SWITCH, pending)
+            for cid, info in targets:
+                try:
+                    self._socket_send(info, msg)
+                except Exception:
+                    pass
+
+    def _clear_queued_tasks(self):
+        """清空传输队列中的排队任务（保留正在传输的任务）"""
+        with self.transfer_queue.lock:
+            self.transfer_queue.queue.clear()
+
+    def _ensure_client_ip_folder(self, client_id: str):
+        """在收集模式下为指定连接端创建对应 IP 文件夹（收集区）
+
+        文件夹仅用于收集该连接端投递的文件；创建后通过 dir_created 信号
+        刷新主机端列表，但不广播（收集模式下 IP 文件夹隔离）。
+        """
+        client_info = self.clients.get(client_id)
+        if not client_info:
+            return
+        ip = client_info.get('ip', '')
+        if not ip:
+            return
+        try:
+            folder = os.path.join(self.sync_folder, ip)
+            os.makedirs(folder, exist_ok=True)
+            self.dir_created.emit(ip)
+        except Exception as e:
+            self.log_message.emit(f"创建IP文件夹失败: {e}")
+
+    def _ensure_ip_folders(self):
+        """为所有已认证连接端创建 IP 文件夹"""
+        with self._lock:
+            client_ids = [
+                cid for cid, info in self.clients.items() if info.get('authenticated')
+            ]
+        for cid in client_ids:
+            self._ensure_client_ip_folder(cid)
+
+    def _collect_ip_folders(self) -> set:
+        """返回当前所有连接端 IP 集合（收集模式下的 IP 文件夹名集合）"""
+        with self._lock:
+            return {info.get('ip', '') for info in self.clients.values()
+                    if info.get('authenticated') and info.get('ip')}
+
+    def _ip_folder_owner(self, rel_path: str) -> str:
+        """判断相对路径是否位于某连接端的 IP 文件夹内
+
+        Returns:
+            命中的 IP（文件夹名），否则返回空字符串
+        """
+        if not rel_path:
+            return ''
+        first = rel_path.split('/', 1)[0]
+        if first in self._collect_ip_folders():
+            return first
+        return ''
+
+    def _send_mode_msg_to(self, client_id: str, data: bytes):
+        """发送原始消息给指定客户端（按需转发用）"""
+        with self._lock:
+            client_info = self.clients.get(client_id)
+            if not client_info:
+                return
+            sock = client_info.get('socket')
+            if not sock:
+                return
+        try:
+            self._socket_send(client_info, data)
+        except Exception:
+            pass
+
+    def _find_clients_by_ip(self, ip: str) -> list:
+        """按 IP 查找已认证连接端 client_id 列表（同 IP 多端时逐个下发）"""
+        if not ip:
+            return []
+        with self._lock:
+            return [cid for cid, info in self.clients.items()
+                    if info.get('ip') == ip and info.get('authenticated')]
     
     # ========== 广播方法 ==========
     
@@ -1383,6 +1669,12 @@ class SyncServer(QObject):
         try:
             # 检查是否需要停止
             if stop_event and stop_event.is_set():
+                return
+
+            # 收集模式下主机端不转发文件：本地添加的文件仅落在主机同步文件夹
+            if self.mode == "collect":
+                rel_path = os.path.relpath(filepath, self.sync_folder).replace('\\', '/')
+                self.log_message.emit(f"收集模式，不转发文件: {rel_path}")
                 return
 
             # 检查是否是文件夹
@@ -1508,8 +1800,29 @@ class SyncServer(QObject):
     def broadcast_delete(self, filepath: str):
         """
         广播删除指令（主机端本地删除文件时调用）
+
+        收集模式下：只有删除某连接端 IP 文件夹（或其内部文件）时才定向通知该连接端；
+        删除 IP 文件夹本身时发送空文件名指令，对应连接端清空根目录；
+        IP 文件夹之外的内容修改不发送任何信号。
         """
         rel_path = os.path.relpath(filepath, self.sync_folder).replace('\\', '/')
+        if self.mode == "collect":
+            ip = self._ip_folder_owner(rel_path)
+            if not ip:
+                self.log_message.emit(f"收集模式，忽略根目录变更: {rel_path}")
+                return
+            if rel_path == ip:
+                # 主机删除整个 IP 文件夹 → 通知对应连接端清空根目录
+                target_rel = ''
+            else:
+                target_rel = rel_path[len(ip) + 1:]
+            msg = Protocol.create_delete_message(
+                os.path.join(self.sync_folder, target_rel), self.sync_folder
+            )
+            for cid in self._find_clients_by_ip(ip):
+                self._send_mode_msg_to(cid, msg)
+            self.log_message.emit(f"收集模式，通知 {ip} 删除: {target_rel or '(清空根目录)'}")
+            return
         self._broadcast_delete(rel_path)
         self.log_message.emit(f"广播删除: {rel_path}")
     
@@ -1536,8 +1849,25 @@ class SyncServer(QObject):
         self._broadcast_data(message, exclude_client)
     
     def broadcast_dir_create(self, dirpath: str):
-        """广播创建目录"""
+        """广播创建目录
+
+        收集模式下：仅当目录位于某连接端 IP 文件夹内时定向通知该连接端；
+        IP 文件夹之外的内容修改不发送任何信号。
+        """
         rel_path = os.path.relpath(dirpath, self.sync_folder).replace('\\', '/')
+        if self.mode == "collect":
+            ip = self._ip_folder_owner(rel_path)
+            if not ip:
+                self.log_message.emit(f"收集模式，忽略根目录变更: {rel_path}")
+                return
+            target_rel = rel_path[len(ip) + 1:]
+            msg = Protocol.create_dir_create_message(
+                os.path.join(self.sync_folder, target_rel), self.sync_folder
+            )
+            for cid in self._find_clients_by_ip(ip):
+                self._send_mode_msg_to(cid, msg)
+            self.log_message.emit(f"收集模式，通知 {ip} 创建目录: {target_rel}")
+            return
         self._broadcast_dir_create(rel_path)
         self.log_message.emit(f"广播创建目录: {rel_path}")
     
@@ -1549,9 +1879,30 @@ class SyncServer(QObject):
         self._broadcast_data(message, exclude_client)
     
     def broadcast_rename(self, old_path: str, new_path: str):
-        """广播重命名"""
+        """广播重命名
+
+        收集模式下：仅当旧/新路径都位于同一连接端 IP 文件夹内时定向通知该连接端；
+        IP 文件夹之外的内容修改不发送任何信号。
+        """
         old_rel = os.path.relpath(old_path, self.sync_folder).replace('\\', '/')
         new_rel = os.path.relpath(new_path, self.sync_folder).replace('\\', '/')
+        if self.mode == "collect":
+            old_ip = self._ip_folder_owner(old_rel)
+            new_ip = self._ip_folder_owner(new_rel)
+            if not old_ip or old_ip != new_ip:
+                self.log_message.emit(f"收集模式，忽略根目录变更: {old_rel} -> {new_rel}")
+                return
+            old_target = old_rel[len(old_ip) + 1:]
+            new_target = new_rel[len(new_ip) + 1:]
+            msg = Protocol.create_rename_message(
+                os.path.join(self.sync_folder, old_target),
+                os.path.join(self.sync_folder, new_target),
+                self.sync_folder
+            )
+            for cid in self._find_clients_by_ip(old_ip):
+                self._send_mode_msg_to(cid, msg)
+            self.log_message.emit(f"收集模式，通知 {old_ip} 变更: {old_target} -> {new_target}")
+            return
         self._broadcast_rename(old_rel, new_rel)
         self.log_message.emit(f"广播变更: {old_rel} -> {new_rel}")
     

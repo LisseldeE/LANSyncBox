@@ -99,6 +99,13 @@ class I18n:
             # 同步界面
             "host_mode": "主机端",
             "client_mode": "连接端",
+            "mode_sync": "同步模式",
+            "mode_collect": "收集模式",
+            "mode_switch_to_collect": "收集",
+            "mode_switch_to_sync": "同步",
+            "mode_switching": "切换中",
+            "mode_switch_collect_tip": "切换至收集模式",
+            "mode_switch_sync_tip": "切换至同步模式",
             "room_info": "房间: {code}",
             "sync_folder_path": "缓存文件夹: {path}",
             "disconnect": "断开连接",
@@ -174,6 +181,11 @@ class I18n:
             "select_all": "全选",
             "refresh": "刷新",
             "go_up": "↑ 上级",
+
+            # 快捷操作栏状态指示
+            "selected_count": "已选 {count} 项",
+            "delivery_list_count": "投递列表 {count} 项",
+            "delivery_list_empty": "投递列表为空",
             
             # 拖拽操作
             "drag_add": "添加文件",
@@ -344,6 +356,13 @@ class I18n:
             # Sync window
             "host_mode": "Host",
             "client_mode": "Client",
+            "mode_sync": "Sync Mode",
+            "mode_collect": "Collect Mode",
+            "mode_switch_to_collect": "Collect",
+            "mode_switch_to_sync": "Sync",
+            "mode_switching": "Switching",
+            "mode_switch_collect_tip": "Switch to Collect Mode",
+            "mode_switch_sync_tip": "Switch to Sync Mode",
             "room_info": "Room: {code}",
             "sync_folder_path": "Cache folder: {path}",
             "disconnect": "Disconnect",
@@ -419,6 +438,11 @@ class I18n:
             "select_all": "Select All",
             "refresh": "Refresh",
             "go_up": "↑ Up",
+
+            # Quick action bar status
+            "selected_count": "Selected {count}",
+            "delivery_list_count": "Delivery list: {count}",
+            "delivery_list_empty": "Delivery list empty",
             
             # Drag operations
             "drag_add": "Add Files",
