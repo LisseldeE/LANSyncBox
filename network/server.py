@@ -76,6 +76,7 @@ class SyncServer(QObject):
         self.mode_ack_pending = {}      # {client_id: expected_mode}，等待 ACK 的客户端
         self._mode_ack_stop = threading.Event()
         self._mode_ack_thread = None
+        self._ip_folders_created = set()  # 收集模式下创建过的 IP 文件夹名集合（含已断开连接的遗留文件夹）
     
     def start(self, port: int = None, exclude_port: int = None) -> bool:
         """启动服务器，尝试多个端口（9527-9536）
@@ -860,6 +861,12 @@ class SyncServer(QObject):
                 from pathlib import Path
                 host_fm = FileManager(Path(self.sync_folder))
                 host_empty_dirs = host_fm.get_empty_directory_list()
+                # 排除收集 IP 文件夹结构：空 IP 文件夹及其空子目录同样不参与同步
+                if ip_folders:
+                    host_empty_dirs = [
+                        d for d in host_empty_dirs
+                        if not d.split('/', 1)[0] in ip_folders
+                    ]
                 
                 # 构建连接端目录集合（从文件路径推断父目录）
                 client_dirs = set()
@@ -1599,6 +1606,8 @@ class SyncServer(QObject):
         try:
             folder = os.path.join(self.sync_folder, ip)
             os.makedirs(folder, exist_ok=True)
+            # 记录已创建过的 IP 文件夹：即使该连接端后续断开，遗留文件夹仍不参与同步
+            self._ip_folders_created.add(ip)
             self.dir_created.emit(ip)
         except Exception as e:
             self.log_message.emit(f"创建IP文件夹失败: {e}")
@@ -1613,10 +1622,15 @@ class SyncServer(QObject):
             self._ensure_client_ip_folder(cid)
 
     def _collect_ip_folders(self) -> set:
-        """返回当前所有连接端 IP 集合（收集模式下的 IP 文件夹名集合）"""
+        """返回收集模式下应排除的 IP 文件夹名集合
+
+        = 当前已认证连接端的 IP ∪ 历史上创建过的 IP 文件夹名。
+        遗留文件夹（连接端已断开）同样排除，避免切换回同步模式时被误同步。
+        """
         with self._lock:
-            return {info.get('ip', '') for info in self.clients.values()
-                    if info.get('authenticated') and info.get('ip')}
+            connected = {info.get('ip', '') for info in self.clients.values()
+                         if info.get('authenticated') and info.get('ip')}
+            return connected | set(self._ip_folders_created)
 
     def _ip_folder_owner(self, rel_path: str) -> str:
         """判断相对路径是否位于某连接端的 IP 文件夹内

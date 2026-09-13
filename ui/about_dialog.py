@@ -111,6 +111,18 @@ class AboutDialog(QDialog):
         details_label.set_click_callback(self._open_details)
         link_layout.addWidget(details_label)
 
+        link_layout.addSpacing(20)  # 两个链接之间间距
+
+        # 支持作者链接
+        support_label = ClickableLabel(
+            I18n.tr('about_support_author'),
+            normal_color="#339af0",
+            hover_color="#228be6",
+            underline_on_hover=True
+        )
+        support_label.set_click_callback(self._open_support)
+        link_layout.addWidget(support_label)
+
         link_layout.addStretch()
         layout.addLayout(link_layout)
 
@@ -141,8 +153,8 @@ class AboutDialog(QDialog):
         self.setLayout(layout)
 
     def _open_github(self, event):
-        """打开 GitHub 链接"""
-        QDesktopServices.openUrl(QUrl(f"https://github.com/{Config.GITHUB_REPO}"))
+        """打开 GitHub 仓库链接（当前版本位于 pro 分支）"""
+        QDesktopServices.openUrl(QUrl(f"https://github.com/{Config.GITHUB_REPO}/tree/pro"))
 
     def _open_issues(self, event):
         """打开 GitHub Issues 页面（问题反馈）"""
@@ -151,6 +163,10 @@ class AboutDialog(QDialog):
     def _open_details(self, event):
         """打开作者主页链接（查看详情）"""
         QDesktopServices.openUrl(QUrl(Config.APP_AUTHOR_LINK))
+
+    def _open_support(self, event):
+        """打开爱发电赞助页（支持作者）"""
+        QDesktopServices.openUrl(QUrl("https://ifdian.net/a/lisseldee"))
 
     def _show_styled_message(self, title: str, text: str, icon_type=QMessageBox.Information):
         """显示统一风格的提示框"""

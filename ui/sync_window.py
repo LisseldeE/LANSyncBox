@@ -16,9 +16,9 @@ from PySide6.QtWidgets import (
     QTableWidget, QTableWidgetItem, QProgressBar, QHeaderView, QApplication,
     QGraphicsOpacityEffect
 )
-from PySide6.QtCore import Qt, Signal, QEvent, QMetaObject, Q_ARG, Slot, QTimer, QPropertyAnimation, QEasingCurve, QSize
+from PySide6.QtCore import Qt, Signal, QEvent, QMetaObject, Q_ARG, Slot, QTimer, QPropertyAnimation, QEasingCurve, QSize, QVariantAnimation, QAbstractAnimation, QRectF, QPointF
 from PySide6.QtGui import (QColor, QIcon, QPixmap, QCursor, QPalette, QKeySequence,
-                           QShortcut, QPainter)
+                           QShortcut, QPainter, QPainterPath, QPen)
 from PySide6.QtSvg import QSvgRenderer
 from pathlib import Path
 
@@ -59,6 +59,229 @@ def _render_mode_swap_icon() -> QIcon:
             painter.end()
             icon.addPixmap(pix, mode)
     return icon
+
+
+class ModeSegmentedControl(QWidget):
+    """同步/收集 分段切换胶囊
+
+    - 圆角长条胶囊，内含"同步""收集"两个选项；
+    - 激活选项带一个可左右滑动的焦点气泡（QVariantAnimation 驱动，280ms OutCubic）；
+    - 切换中（等待全部连接端 ACK）禁用点击并整体降透明度；
+    - 点击某一侧发起切换，是否执行由 SyncWindow 决定。
+    """
+
+    mode_switch_requested = Signal(str)  # 目标模式 "sync" / "collect"
+
+    _MARGIN = 3    # 气泡内边距
+    _HEIGHT = 26   # 胶囊高度（紧凑精致）
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setFixedHeight(self._HEIGHT)
+        self.setAttribute(Qt.WA_Hover, True)
+        self.setMouseTracking(True)   # 无需按键即可跟踪鼠标，用于半区悬浮反馈
+        self.setCursor(Qt.PointingHandCursor)
+        self._mode = "sync"        # 当前激活模式
+        self._pos = 0.0            # 气泡位置：0.0=同步(左)，1.0=收集(右)
+        self._switching = False    # 切换进行中（等待 ACK）
+        self._hovered = False
+        self._hover_side = -1      # 悬浮所在半区：0=左/同步，1=右/收集，-1=无
+        self._anim = None
+
+    def set_mode(self, mode: str, animate: bool = True):
+        """设置激活模式，气泡（可选）动画滑向对应侧"""
+        if mode not in ("sync", "collect"):
+            return
+        self._mode = mode
+        target = 0.0 if mode == "sync" else 1.0
+        if animate and abs(target - self._pos) > 1e-3:
+            self._animate_to(target)
+        else:
+            self._stop_anim()
+            self._pos = target
+            self.update()
+
+    def set_switching(self, switching: bool):
+        """切换进行中：禁止点击并切换光标（不加置灰，避免点击时闪一下）"""
+        if self._switching != switching:
+            self._switching = switching
+            self.setCursor(Qt.ForbiddenCursor if switching else Qt.PointingHandCursor)
+            self.update()
+
+    def mode(self) -> str:
+        return self._mode
+
+    def is_switching(self) -> bool:
+        return self._switching
+
+    # ---------- 气泡动画 ----------
+
+    def _animate_to(self, target: float):
+        self._stop_anim()
+        anim = QVariantAnimation(self)
+        anim.setDuration(280)
+        anim.setStartValue(self._pos)
+        anim.setEndValue(target)
+        anim.setEasingCurve(QEasingCurve.OutCubic)
+        anim.valueChanged.connect(lambda v: self._set_pos(float(v)))
+        anim.finished.connect(self._on_anim_finished)
+        self._anim = anim
+        anim.start()
+
+    def _set_pos(self, v: float):
+        self._pos = v
+        self.update()
+
+    def _stop_anim(self):
+        if self._anim is not None:
+            self._anim.stop()
+            self._anim.deleteLater()
+            self._anim = None
+
+    def _on_anim_finished(self):
+        self._anim = None
+
+    # ---------- 事件 ----------
+
+    def enterEvent(self, event):
+        self._hovered = True
+        self._update_hover_side(event.position().x())
+        self.update()
+        super().enterEvent(event)
+
+    def leaveEvent(self, event):
+        self._hovered = False
+        self._hover_side = -1
+        self.update()
+        super().leaveEvent(event)
+
+    def mouseMoveEvent(self, event):
+        self._update_hover_side(event.position().x())
+        self.update()
+        super().mouseMoveEvent(event)
+
+    def _update_hover_side(self, x: float):
+        """更新悬浮所在半区（0=左/同步，1=右/收集）"""
+        side = 0 if x < self.width() / 2.0 else 1
+        if side != self._hover_side:
+            self._hover_side = side
+
+    def mousePressEvent(self, event):
+        if event.button() == Qt.LeftButton and not self._switching:
+            x = event.position().x()
+            target = "collect" if x >= self.width() / 2.0 else "sync"
+            if target != self._mode:
+                self.mode_switch_requested.emit(target)
+        super().mousePressEvent(event)
+
+    def _is_dark(self) -> bool:
+        """当前是否为深色模式（依据顶层窗口背景亮度判断，避免被自身透明背景污染）"""
+        win = self.window()
+        pal = win.palette() if win is not None and win is not self else QApplication.palette()
+        bg = pal.color(QPalette.Window)
+        return (bg.red() * 0.299 + bg.green() * 0.587 + bg.blue() * 0.114) < 128
+
+    def paintEvent(self, event):
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.Antialiasing, True)
+        dark = self._is_dark()
+
+        w, h = self.width(), self.height()
+        r = h / 2.0
+
+        # 胶囊底板（中性玻璃，悬浮效果不作用在此处）
+        bg = QColor(0, 0, 0, 12) if not dark else QColor(255, 255, 255, 26)
+        painter.setPen(Qt.NoPen)
+        painter.setBrush(bg)
+        painter.drawRoundedRect(QRectF(0, 0, w, h), r, r)
+
+        # 未选中半区的悬浮反馈：鼠标悬浮在未选中的选项上时，其下垫一层淡淡灰底
+        active_i = 0 if self._mode == "sync" else 1
+        if (self._hovered and not self._switching
+                and self._hover_side >= 0 and self._hover_side != active_i):
+            m0 = self._MARGIN
+            hx = self._hover_side * w / 2.0
+            hover_rect = QRectF(hx + m0, m0, w / 2.0 - 2 * m0, h - 2 * m0)
+            hcol = QColor(0, 0, 0, 22) if not dark else QColor(255, 255, 255, 30)
+            painter.setBrush(hcol)
+            painter.drawRoundedRect(hover_rect, (h - 2 * m0) / 2.0, (h - 2 * m0) / 2.0)
+
+        # 焦点气泡（随 _pos 左右滑动）：淡灰色系（浅色/深色模式均偏灰，不突兀），
+        # 均配深色文字保证对比度；悬浮激活侧仅轻微提亮气泡本身，不改变几何位置（避免跳动）
+        m = self._MARGIN
+        bw = (w - 2 * m) / 2.0
+        bx = m + self._pos * bw
+        bubble = QRectF(bx, m, bw, h - 2 * m)
+        bcol = QColor("#e9eaee") if not dark else QColor("#eceef2")
+        if (self._hovered and not self._switching
+                and self._hover_side == active_i):
+            bcol = QColor("#e2e5ea") if not dark else QColor("#f3f5f8")
+        painter.setBrush(bcol)
+        painter.drawRoundedRect(bubble, (h - 2 * m) / 2.0, (h - 2 * m) / 2.0)
+
+        # 两个选项文字：激活侧深色（气泡为白系，深浅模式均易读），未激活侧灰
+        for i, (label, active) in enumerate((
+            (I18n.tr('mode_switch_to_sync'), self._mode == "sync"),
+            (I18n.tr('mode_switch_to_collect'), self._mode == "collect"),
+        )):
+            if active:
+                painter.setPen(QColor("#1f2328"))
+            else:
+                painter.setPen(QColor("#767d86" if not dark else "#a0a0a0"))
+            painter.drawText(QRectF(i * w / 2.0, 0, w / 2.0, h),
+                             Qt.AlignCenter, label)
+
+
+class ModeToggleCard(QFrame):
+    """同步模式切换卡片（主机端专用）
+
+    状态卡与日志卡之间的窄卡片：卡片短标题与分段胶囊同一行，紧凑精致。
+    """
+
+    mode_switch_requested = Signal(str)
+
+    def __init__(self, mode: str = "sync", parent=None):
+        super().__init__(parent)
+        self.setFrameShape(QFrame.StyledPanel)
+        layout = QHBoxLayout(self)
+        layout.setContentsMargins(10, 5, 10, 5)
+        layout.setSpacing(8)
+
+        # 标题靠左、胶囊靠右的经典设置行布局
+        self._title = QLabel(I18n.tr('mode_card_title'))
+        self._title.setAlignment(Qt.AlignVCenter | Qt.AlignLeft)
+        layout.addWidget(self._title)
+
+        layout.addStretch()
+
+        self.seg = ModeSegmentedControl()
+        self.seg.setFixedWidth(132)  # 窄胶囊：左右更收敛
+        self.seg.mode_switch_requested.connect(self.mode_switch_requested)
+        layout.addWidget(self.seg)
+
+        self._refresh_title_color()
+        self.seg.set_mode(mode, animate=False)
+
+    def _refresh_title_color(self):
+        """标题颜色随深浅主题切换（浅色 #666，深色 #a0a0a0）"""
+        dark = self.seg._is_dark()
+        self._title.setStyleSheet(
+            f"color: {'#a0a0a0' if dark else '#666'}; font-size: 11px;"
+        )
+
+    def changeEvent(self, event):
+        super().changeEvent(event)
+        if event.type() == QEvent.PaletteChange:
+            self._refresh_title_color()
+
+    def set_mode(self, mode: str, animate: bool = True):
+        self.seg.set_mode(mode, animate)
+
+    def set_switching(self, switching: bool):
+        self.seg.set_switching(switching)
+
+    def mode(self) -> str:
+        return self.seg.mode()
 
 
 class SyncWindow(QMainWindow):
@@ -204,7 +427,7 @@ class SyncWindow(QMainWindow):
         info_layout.setContentsMargins(10, 10, 10, 10)
         info_layout.setSpacing(8)
         
-        # 模式标签（主机端/连接端 · 同步模式/收集模式）
+        # 身份标签（仅显示主机端/连接端；模式由下方切换卡片直观呈现）
         self.mode_label = QLabel()
         self.mode_label.setAlignment(Qt.AlignCenter)
         info_layout.addWidget(self.mode_label)
@@ -241,27 +464,19 @@ class SyncWindow(QMainWindow):
             self.status_label.setAttribute(Qt.WA_Hover, True)
             self.status_label.installEventFilter(self)
         
-        # 模式切换 + 断开连接按钮（主机端并排一行显示）
-        btn_row = QHBoxLayout()
-        btn_row.setSpacing(8)
-        self.mode_switch_btn = None
-        if self.is_host:
-            self.mode_switch_btn = AnimatedButton(I18n.tr('mode_switch_to_collect'))
-            self.mode_switch_btn.setIcon(_render_mode_swap_icon())
-            self.mode_switch_btn.setIconSize(QSize(16, 16))
-            self.mode_switch_btn.setToolTip(I18n.tr('mode_switch_collect_tip'))
-            self.mode_switch_btn.clicked.connect(self.on_mode_switch_clicked)
-            self.mode_switch_btn.setStyleSheet(BUTTON_STYLES['primary'])
-            btn_row.addWidget(self.mode_switch_btn)
-
-        # 断开连接按钮
+        # 断开连接按钮（独立全宽显示）
         disconnect_btn = AnimatedButton(I18n.tr('disconnect'))
         disconnect_btn.clicked.connect(self.on_disconnect)
         disconnect_btn.setStyleSheet(BUTTON_STYLES['danger'])
-        btn_row.addWidget(disconnect_btn)
-        info_layout.addLayout(btn_row)
+        info_layout.addWidget(disconnect_btn)
 
         left_layout.addWidget(info_frame)
+
+        # 模式切换卡片（仅主机端，位于状态卡与日志卡之间）
+        if self.is_host:
+            self.mode_toggle_card = ModeToggleCard(self._mode)
+            self.mode_toggle_card.mode_switch_requested.connect(self.on_mode_switch_clicked)
+            left_layout.addWidget(self.mode_toggle_card)
 
         # 左侧下方：同步记录表格（使用 stretch=1 自动扩展）
         log_frame = QFrame()
@@ -1463,56 +1678,36 @@ class SyncWindow(QMainWindow):
     # ========== 模式切换（同步/收集） ==========
 
     def _update_mode_label(self):
-        """更新信息面板模式标签：主机端/连接端 · 同步模式/收集模式"""
+        """更新信息面板身份标签：仅显示主机端/连接端，模式由切换卡片直观呈现"""
         role = I18n.tr('host_mode') if self.is_host else I18n.tr('client_mode')
-        mode_name = I18n.tr('mode_sync') if self._mode == "sync" else I18n.tr('mode_collect')
-        self.mode_label.setText(f"<b>{role} · {mode_name}</b>")
+        self.mode_label.setText(f"<b>{role}</b>")
 
     def _mode_name(self, mode: str) -> str:
         """模式显示名（中文，用于日志记录）"""
         return I18n.tr('mode_sync') if mode == "sync" else I18n.tr('mode_collect')
 
-    def _update_mode_switch_btn(self):
-        """更新模式切换按钮文本与可用性（仅主机端）"""
-        if not self.mode_switch_btn:
+    def on_mode_switch_clicked(self, target_mode: str):
+        """模式切换卡片点击：主机端发起切换（由服务端判定能否执行）"""
+        if not self.is_host or self.server is None:
             return
-        if self._mode_switching:
-            self.mode_switch_btn.setText(I18n.tr('mode_switching'))
-            self.mode_switch_btn.setEnabled(False)
-            return
-        self.mode_switch_btn.setEnabled(True)
-        if self._mode == "collect":
-            self.mode_switch_btn.setText(I18n.tr('mode_switch_to_sync'))
-            self.mode_switch_btn.setToolTip(I18n.tr('mode_switch_sync_tip'))
-        else:
-            self.mode_switch_btn.setText(I18n.tr('mode_switch_to_collect'))
-            self.mode_switch_btn.setToolTip(I18n.tr('mode_switch_collect_tip'))
-
-    def on_mode_switch_clicked(self):
-        """点击模式切换按钮（仅主机端）"""
-        if not self.is_host or not self.server or self._mode_switching:
-            return
-        new_mode = "collect" if self._mode == "sync" else "sync"
-        if not self.server.switch_mode(new_mode):
-            return
-        # 切换发起：记录系统日志（收集转同步时模式已立即生效）
-        self._add_record("", "系统", f"{self._mode_name(self._mode)} -> {self._mode_name(new_mode)}")
-        self._mode = new_mode
-        self._update_mode_label()
-        self._update_mode_switch_btn()
+        if self.server.switch_mode(target_mode):
+            # 乐观更新：气泡立即滑向目标侧，随后的切换中置灰持续到全部 ACK 到齐
+            if hasattr(self, 'mode_toggle_card'):
+                self.mode_toggle_card.set_mode(target_mode, animate=True)
 
     def on_server_mode_switching(self, new_mode: str):
-        """主机端模式切换发起：等待连接端 ACK 期间置灰切换按钮"""
+        """主机端模式切换发起（等待连接端 ACK 期间）"""
         self._mode_switching = True
-        self._update_mode_switch_btn()
         self._update_sync_btn_state()
+        # 切换中：置灰分段胶囊，等待全部连接端 ACK
+        if self.is_host and hasattr(self, 'mode_toggle_card'):
+            self.mode_toggle_card.set_switching(True)
 
     def on_server_mode_changed(self, old_mode: str, new_mode: str):
         """主机端模式切换完成（全部连接端确认后触发）"""
         self._mode_switching = False
         self._mode = new_mode
         self._update_mode_label()
-        self._update_mode_switch_btn()
         self._update_sync_btn_state()
         self._add_record("", "系统", f"{self._mode_name(old_mode)} -> {self._mode_name(new_mode)}")
         # 本端 UI 传输队列同步处理：收集转同步取消全部，同步转收集仅清空排队
@@ -1521,6 +1716,12 @@ class SyncWindow(QMainWindow):
         else:
             with self.transfer_queue.lock:
                 self.transfer_queue.queue.clear()
+        # 切换完成：恢复分段胶囊可点击；若乐观动画未对齐目标（如被拒绝/异常），
+        # 再以动画补位，避免打断进行中的气泡过渡
+        if self.is_host and hasattr(self, 'mode_toggle_card'):
+            self.mode_toggle_card.set_switching(False)
+            if self.mode_toggle_card.mode() != new_mode:
+                self.mode_toggle_card.set_mode(new_mode, animate=True)
 
     def on_client_mode_changed(self, new_mode: str):
         """连接端模式变更（收到主机 MODE_RESP/MODE_SWITCH）"""

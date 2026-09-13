@@ -38,7 +38,7 @@ class Config:
     GITEE_REPO = "Lisselde_E/LANSyncBox"
 
     # 版本号托管于 GitHub Pages 纯文本文件，避免 raw 外链滥用/API tags 频率限制
-    UPDATE_URL = "https://lisseldee.github.io/version/lansyncbox"
+    UPDATE_URL = "https://lisseldee.github.io/version/lansyncboxpro"
     # 下载落地页（按语言区分，保持不变）
     GITHUB_RELEASES = f"https://github.com/{GITHUB_REPO}/releases"
     GITEE_RELEASES = f"https://gitee.com/{GITEE_REPO}/releases"
