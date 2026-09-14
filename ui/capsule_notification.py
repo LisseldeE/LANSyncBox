@@ -1,30 +1,7 @@
 """
 胶囊通知栏 - 局域网剪切板文件投递的三段式状态展示
-
-与 CapRise 倒计时结束通知 (TimerNoticeOverlay) 一致，是独立的系统级胶囊：
-无边框 + 置顶 + Tool 的顶层窗口，透明背景，不抢焦点；显示在**屏幕顶部**，
-完全脱离主窗口/同步界面，随屏幕可用区自动摆位（同 CapRise 倒计时结束通知）。
-
-本文件包含两层：
-- _CapsuleItem  : 单条胶囊（可用提示 / 传输态）。自身不做屏幕居中，水平位置由
-                  协调者按“槽位”驱动（_slot_x）；几何变化时发出 layout_dirty。
-- CapsuleNotification : 多胶囊协调者，对外 API 与旧版单胶囊完全一致。
-    * 新可用消息：瞬态胶囊悬浮 2.5s 后自动收起；
-    * 传输中有新可用：在传输胶囊**左侧**新开一条胶囊并排显示，两条整体实时居中；
-      可用胶囊收起后传输胶囊平滑回中；
-    * 传输胶囊永远不被“可用”顶掉；多条可用以最新替换（始终单条可用胶囊）。
-
-表现文件投递的三个阶段：
-    1. 收到通知   : “有可用的远程文件 {名称} {大小}”，提示可用 Ctrl+V 粘贴
-    2. 开始传输   : 原“可用”胶囊就地过渡为传输态（同胶囊），露出文件名 + 淡蓝进度条
-    3. 完成       : 进度条填满后，以对钩动画淡出隐藏
-
-风格与动画约定（本分支自行实现）：
-- 本体样式沿用常用胶囊栏的胶囊观感：系统背景派生的纵向渐变 + 发丝描边
-  （深色下 #505050），非固定蓝色，不做玻璃拟态。进度条仍为淡蓝色（#74c0fc）。
-- 出现 / 收起：自屏幕上方滑入，宽度由小药丸线性伸展；收起时上滑 + 淡出。
-  不使用常驻透明度效果——它缓存源图，重新展开时会产生文字纵向重叠的残留。
-- 完成后：圆角胶囊内播放对钩绘制动画，随后整条收起淡出。
+Copyright (c) 2026 Lisselde_E <Lisselde.E@outlook.com>.
+Licensed under the GNU General Public License v3.0.
 """
 from PySide6.QtCore import (Qt, QRect, QRectF, QPoint, QPointF, QSize,
                             QAbstractAnimation, QParallelAnimationGroup,
@@ -34,7 +11,7 @@ from PySide6.QtGui import (QPainter, QColor, QPen, QPainterPath, QLinearGradient
                            QPalette, QFont, QFontMetrics)
 from PySide6.QtWidgets import (
     QApplication, QWidget, QFrame, QVBoxLayout, QHBoxLayout, QLabel,
-    QProgressBar, QSizePolicy, QGraphicsOpacityEffect,
+    QProgressBar, QPushButton, QSizePolicy, QGraphicsOpacityEffect,
 )
 
 
@@ -208,6 +185,8 @@ class _CapsuleItem(QFrame):
 
     # 点击胶囊请求粘贴远程文件（收到通知状态下点击触发热点）
     paste_requested = Signal()
+    # 冲突询问（目标已有同名文件）用户决策：True=替换(覆盖)，False=取消(跳过)
+    confirm_chosen = Signal(bool)
     # 几何变化（展开帧/宽度动画/隐藏）→ 协调者重排整组
     layout_dirty = Signal()
 
@@ -341,6 +320,24 @@ class _CapsuleItem(QFrame):
         self._bar.set_text_color("#94a3b8")
         self._bar.setVisible(False)
         inner.addWidget(self._bar, 0, Qt.AlignVCenter)
+
+        # 冲突询问按钮（"替换"/"取消"）：仅询问态显示，与进度条同槽位
+        self._confirm_btn = QPushButton("替换", self._content)
+        self._confirm_btn.setFixedHeight(22)
+        self._confirm_btn.setCursor(Qt.PointingHandCursor)
+        self._confirm_btn.setFocusPolicy(Qt.NoFocus)
+        self._confirm_btn.clicked.connect(lambda: self.confirm_chosen.emit(True))
+        self._confirm_btn.setVisible(False)
+        inner.addWidget(self._confirm_btn, 0, Qt.AlignVCenter)
+
+        self._cancel_btn = QPushButton("取消", self._content)
+        self._cancel_btn.setFixedHeight(22)
+        self._cancel_btn.setCursor(Qt.PointingHandCursor)
+        self._cancel_btn.setFocusPolicy(Qt.NoFocus)
+        self._cancel_btn.clicked.connect(lambda: self.confirm_chosen.emit(False))
+        self._cancel_btn.setVisible(False)
+        inner.addWidget(self._cancel_btn, 0, Qt.AlignVCenter)
+
         # 尾部弹性伸缩项：进度条隐藏（可用态 / 展开动画早期）时吸收 inner 布局的
         # 多余空间，文本区不被拉宽——标题省略长度不随进度条显隐跳动
         inner.addStretch(1)
@@ -403,6 +400,27 @@ class _CapsuleItem(QFrame):
         self._icon.setVisible(False)
         self._queue_waiting = 0
         self._transferring = False
+        self._present()
+
+    def ask_replace(self, title: str, subtitle: str):
+        """询问态：目标目录已有同名文件，展示"替换/取消"按钮等待用户决策。
+
+        与 show_hint 同为不可整体点击的提示型状态，但带按钮响应；不自动收起，
+        由协调者在用户点击按钮后收起并广播决策。
+        """
+        self._stop_all()
+        self._refresh_theme()
+        self._hint_mode = True
+        self._title.setText(title)
+        self._hint.setText(subtitle)
+        self._hint.setVisible(True)
+        self._bar.setVisible(False)
+        self._bar.setValue(0)
+        self._icon.setVisible(False)
+        self._queue_waiting = 0
+        self._transferring = False
+        self._confirm_btn.setVisible(True)
+        self._cancel_btn.setVisible(True)
         self._present()
 
     def begin_transfer(self, file_name: str, total_bytes: int):
@@ -705,13 +723,15 @@ class _CapsuleItem(QFrame):
             self.layout_dirty.emit()   # 本胶囊已消失 → 协调者重排剩余胶囊回中
 
     def _reset_content(self):
-        """清空提示/标题/进度条/对钩，回到初始空白状态。"""
+        """清空提示/标题/进度条/对钩/询问按钮，回到初始空白状态。"""
         self._title.clear()
         self._hint.clear()
         self._hint.setVisible(False)
         self._bar.setVisible(False)
         self._bar.setValue(0)
         self._icon.setVisible(False)
+        self._confirm_btn.setVisible(False)
+        self._cancel_btn.setVisible(False)
         self._queue_waiting = 0
         self._transferring = False
 
@@ -744,7 +764,7 @@ class _CapsuleItem(QFrame):
         self._bar.set_text_color(text_color)
 
     def _refresh_theme(self):
-        """按当前深浅主题刷新文字颜色（深色下数值用白、标签用灰）。"""
+        """按当前深浅主题刷新文字颜色（深色下数值用白、标签用灰）与询问按钮。"""
         dark = self._is_dark()
         if dark:
             title, hint, bar_text = "#ffffff", "#a0a0a0", "#e2e8f0"
@@ -753,6 +773,15 @@ class _CapsuleItem(QFrame):
         self._title.setStyleSheet(f"color: {title}; font-size: 13px; font-weight: 600;")
         self._hint.setStyleSheet(f"color: {hint}; font-size: 11px;")
         self._bar_style(bar_text)
+        # 询问按钮：替换=全局蓝（胶囊主题蓝 #74c0fc），取消=红；白字保证深浅模式对比
+        def _btn_css(bg: str, hover: str) -> str:
+            return (
+                f"QPushButton {{ background-color: {bg}; color: #ffffff;"
+                f"border: none; border-radius: 11px; padding: 0 12px;"
+                f"font-size: 11px; font-weight: 600; }}"
+                f"QPushButton:hover {{ background-color: {hover}; }}")
+        self._confirm_btn.setStyleSheet(_btn_css("#74c0fc", "#5fb3e8"))
+        self._cancel_btn.setStyleSheet(_btn_css("#f03e3e", "#e03131"))
 
     def paintEvent(self, event):
         # CapRise 主胶囊栏默认样式：系统背景派生的纵向渐变 + 深色下发丝描边，
@@ -872,6 +901,8 @@ class CapsuleNotification(QObject):
     """
 
     paste_requested = Signal()
+    # 冲突询问（目标已有同名文件）用户决策：True=替换(覆盖)，False=取消(跳过)
+    replace_confirmed = Signal(bool)
     # 瞬态"可用远程文件"胶囊已收起/隐藏（超时、点击或被动 dismiss 均触发）：
     # 调用方（sync_window）据此释放系统级 Ctrl+V 劫持
     available_hidden = Signal()
@@ -889,6 +920,7 @@ class CapsuleNotification(QObject):
         # 广播一律以"触发者是否仍为可用角色"为准（sender 守卫），换位无需重接线
         for cap in (self._available, self._transfer):
             cap.paste_requested.connect(self._on_available_clicked)
+            cap.confirm_chosen.connect(self._on_confirm_chosen)
             cap.layout_dirty.connect(self._relayout)
             cap.layout_dirty.connect(self._on_available_layout_dirty)
         self._avail_timer = QTimer(self)
@@ -896,6 +928,8 @@ class CapsuleNotification(QObject):
         self._avail_timer.timeout.connect(self._on_avail_timeout)
         # 提示态（如"无效的粘贴位置"）期间新可用消息不得覆盖提示
         self._hint_active = False
+        # 冲突询问（"替换/取消"）期间新可用/提示/错误均不得覆盖，等待用户决策
+        self._ask_active = False
         # 当前"可用"胶囊代表的会话 id（与 begin_transfer 比对，决定是否同胶囊过渡）
         self._available_session = None
 
@@ -905,9 +939,9 @@ class CapsuleNotification(QObject):
         """新可用消息：瞬态胶囊悬浮 2.5s 后自动收起（最新为主，重启计时）。
 
         提示态（如"无效的粘贴位置"）期间不覆盖提示，避免无效提示被新到的
-        可用消息遮挡；提示收起后才恢复正常。
+        可用消息遮挡；提示收起后才恢复正常。冲突询问期间同样不覆盖（等用户决策）。
         """
-        if self._hint_active:
+        if self._hint_active or self._ask_active:
             return
         self._avail_timer.stop()
         self._available_session = session_id
@@ -920,8 +954,10 @@ class CapsuleNotification(QObject):
 
         提示态优先于可用消息：顶掉当前"可用远程文件"提示（含其剩余计时），
         期间新到的可用消息不再覆盖提示，直到提示收起。专用 _HINT_MS 计时，
-        比可用消息（_AVAIL_MS）更短，保证无效提示即时报错即走。
+        比可用消息（_AVAIL_MS）更短，保证无效提示即时报错即走。冲突询问期间不覆盖。
         """
+        if self._ask_active:
+            return
         self._hint_active = True
         self._avail_timer.stop()
         self._available_session = None
@@ -929,18 +965,37 @@ class CapsuleNotification(QObject):
         self._relayout()
         self._avail_timer.start(self._HINT_MS)
 
-    def show_error(self, title: str, subtitle: str):
-        """投递失败错误提示：警示胶囊（橙色感叹号 + 双行文字）_ERROR_MS 后自动收起。
+    def show_error(self, title: str, subtitle: str, duration_ms: int | None = None):
+        """投递失败错误提示：警示胶囊（橙色感叹号 + 双行文字）后自动收起。
 
         与 show_hint 同理：顶掉当前"可用/提示"（含剩余计时），期间新到的可用
-        消息不覆盖，直到错误提示收起。双行内容稍长，时长放宽至 2s 保证可读。
+        消息不覆盖，直到错误提示收起。双行内容稍长，默认时长 2s 保证可读；
+        "远程文件不可用"等轻量错误由调用方传入 1s 短时长。
+        冲突询问期间不覆盖。
         """
+        if self._ask_active:
+            return
         self._hint_active = True
         self._avail_timer.stop()
         self._available_session = None
         self._available.show_error(title, subtitle)
         self._relayout()
-        self._avail_timer.start(self._ERROR_MS)
+        self._avail_timer.start(duration_ms if duration_ms is not None
+                                else self._ERROR_MS)
+
+    def ask_replace(self, title: str, subtitle: str, session_id=None):
+        """冲突询问：可用槽位显示"替换/取消"按钮，等待用户对同名文件的决策。
+
+        与 show_hint 同理不抢焦点，但不自动收起（等用户响应按钮）；期间新的
+        可用/提示/错误消息均不覆盖，避免询问被新事件顶掉后粘贴语义丢失。
+        session_id 用于决策后 begin_transfer 同胶囊过渡（可用槽位直接转为传输态）。
+        """
+        self._ask_active = True
+        self._hint_active = True
+        self._avail_timer.stop()
+        self._available_session = session_id
+        self._available.ask_replace(title, subtitle)
+        self._relayout()
 
     def begin_transfer(self, file_name: str, total_bytes: int, session_id=None):
         """开始传输：优先让"可用"胶囊就地过渡为传输态（同胶囊过渡）。
@@ -982,6 +1037,7 @@ class CapsuleNotification(QObject):
     def dismiss(self):
         """手动收起：优先收掉瞬态可用胶囊；无可用时收传输胶囊。"""
         self._hint_active = False
+        self._ask_active = False
         if self._available.isVisible():
             self._available_session = None
             self._available.dismiss()
@@ -1010,10 +1066,22 @@ class CapsuleNotification(QObject):
     def close(self):
         self._avail_timer.stop()
         self._hint_active = False
+        self._ask_active = False
         self._available.close()
         self._transfer.close()
 
     # ------------------------------------------------------------ 内部
+
+    def _on_confirm_chosen(self, replace: bool):
+        """用户点击"替换/取消"：仅响应可用槽位的按钮，收起询问并广播决策。"""
+        if self.sender() is not self._available:
+            return
+        self._ask_active = False
+        self._hint_active = False
+        self._avail_timer.stop()
+        self._available_session = None
+        self._available.dismiss()
+        self.replace_confirmed.emit(replace)
 
     def _on_available_clicked(self):
         """点击瞬态可用胶囊：收起并请求粘贴（上游失败时 dismiss 再次收起为幂等）。

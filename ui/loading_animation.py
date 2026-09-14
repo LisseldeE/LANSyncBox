@@ -2,10 +2,6 @@
 平行四边形扫描加载动画 - PySide6 实现
 Copyright (c) 2026 Lisselde_E <Lisselde.E@outlook.com>.
 Licensed under the GNU General Public License v3.0.
-
-支持两种状态：
-- 状态1（普通）：单向扫描 + 底部脉冲拖尾
-- 状态2（中间状态）：左右循环扫描，无拖尾，用于"加载中/思考中/运行中"
 """
 
 from PySide6.QtWidgets import QWidget, QVBoxLayout

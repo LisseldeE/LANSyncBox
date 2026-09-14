@@ -1,23 +1,7 @@
 """
 顶部快捷放置区（快捷添加文件） - 屏顶常驻 OLE 放置条（方案B，无全局钩子）
-
-同步房间运行期间，在屏幕顶部常驻一条**跨屏宽、基本透明**的置顶窗口，它本身是
-一个真实、非穿透的 OLE drop-target：
-
-1. 用户把文件/文件夹从桌面（任何位置）往上拖到屏幕顶部，光标进入这条顶边带，系统
-   直接派发 dragEnterEvent —— 不依赖任何全局鼠标钩子、不受会话隔离/DPI/UAC 影响。
-2. 收到文件拖入 → 放置条马上从顶部**滑出可见胶囊**（"松开以添加文件到同步列表"），
-   并显示真实文件数量。
-3. 在胶囊上松手 → 文件加入当前同步列表（根目录即房间目录），随后收起；拖出顶带 →
-   胶囊收回。
-
-为什么不用"全屏 + WS_EX_TRANSPARENT 穿透覆盖层"或"全局低级鼠标钩子"：
-- 点击穿透(WS_EX_TRANSPARENT)的窗口无法被系统 OLE 文件拖放命中，放置条根本不出现；
-- 全局钩子(WH_MOUSE_LL)在本环境/真机上能装上却不派发回调，拖拽感知不可靠（两次实测无事件）。
-- 本方案把判定交给系统 OLE 拖拽路由本身，天然可靠、且跨平台地由 Qt 兜底。
-
-代价：房间运行时顶部会常驻一条(默认 56px)透明置顶带，拦截该区域的文件拖动/点击。
-胶囊共存：若关联胶囊正悬浮在顶部，放置胶囊定位在其下方，避免两条浮条重叠。
+Copyright (c) 2026 Lisselde_E <Lisselde.E@outlook.com>.
+Licensed under the GNU General Public License v3.0.
 """
 from PySide6.QtCore import Qt, QRectF, QByteArray, QVariantAnimation, QEasingCurve, Signal, Property, QPropertyAnimation, QPointF, QTimer
 from PySide6.QtGui import QPainter, QColor, QPen, QPainterPath, QFontMetrics, QLinearGradient, QPalette, QFont

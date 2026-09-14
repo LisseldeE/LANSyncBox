@@ -383,6 +383,7 @@ class SyncWindow(QMainWindow):
         self._send_rows = {}           # "session_id:name" -> 本机发送进度行信息（复制端）
         self._pending_transfers = []   # [(session_id, 首文件名, 总字节), ...]：传输中又收到新粘贴时排队，
                                        # 等当前会话完成后按序接管胶囊进度（避免进度被重置回 0%）
+        self._pending_confirm = None   # 冲突询问待确认上下文（见 _paste_remote_files/_on_paste_confirm）
         self._self_temp_images = []    # 本端复制图片时生成的临时 PNG（下次复制时清理）
         self._own_copy_fps = []        # 本端最近复制文件指纹 [(名字集合, 时间戳)]，识别共享剪贴板回环
         self.tcp_progress.connect(self._update_tcp_progress)
@@ -395,6 +396,8 @@ class SyncWindow(QMainWindow):
         self._capsule.available_hidden.connect(self._update_global_hotkey)
         self.tcp_file_done.connect(self._on_tcp_file_done)
         self.tcp_file_error.connect(self._on_tcp_file_error)
+        # 粘贴冲突询问（目标目录已有同名文件）的用户决策："替换"覆盖 / "取消"跳过
+        self._capsule.replace_confirmed.connect(self._on_paste_confirm)
         self._transfer_session = None  # 胶囊传输态当前显示的会话 id
         self._pull_remaining = 0       # 全局尚未完成的远程拉取数（排队计数用）
 
@@ -847,16 +850,26 @@ class SyncWindow(QMainWindow):
         files_map = {}
         files_meta = []
         new_temp = []  # 本次复制涉及的临时图片
+        occupied = set()  # 已生成条目名（原始名与派生名都算）：不同目录同名文件生成
+        # 唯一条目名（1.txt / 1 (1).txt / 1 (2).txt ...），派生名若也撞上原始名
+        # （如同时复制 "1 (1).txt"）则继续递增，保证会话内条目名唯一
         for ent in entries:
-            name = os.path.basename(ent['path'])
             path = ent['path']
             if not os.path.isfile(path):
                 continue
-            files_map[name] = path
             size = self._safe_size(path)
             if size < 0:
                 continue
-            files_meta.append({'name': name, 'size': size})
+            original = os.path.basename(ent['path'])
+            candidate = original
+            i = 1
+            while candidate in occupied:
+                stem, ext = os.path.splitext(original)
+                candidate = f"{stem} ({i}){ext}"
+                i += 1
+            occupied.add(candidate)
+            files_map[candidate] = path
+            files_meta.append({'name': candidate, 'size': size})
             # 追踪本端生成的临时图片，下次复制/关闭时清理
             if 'ClipboardImages' in path:
                 new_temp.append(path)
@@ -883,6 +896,11 @@ class SyncWindow(QMainWindow):
 
     def _broadcast_file_session(self, files_map: dict, files_meta: list):
         """登记文件会话并按元信息广播（生成 session_id/token，由复制端目录服务提供字节）。"""
+        if not self._provider or not self._provider.port:
+            # 投递服务未就绪（启动失败/端口被占）：不广播，避免接收端拿到无效会话
+            # 点击后静默失败；在复制端日志里明确暴露原因
+            self.add_log("投递", I18n.tr('clipboard_provider_not_ready'))
+            return
         session_id = uuid.uuid4().hex
         token = uuid.uuid4().hex
         # 文件在复制时已完整存在（复制的是原文件路径），登记即可；流式传输时
@@ -1141,7 +1159,14 @@ class SyncWindow(QMainWindow):
 
         仅当存在可用远程文件且焦点不在**可编辑**文本框时触发；否则放行文本粘贴。
         只读文本框（如路径栏）不拦截，避免 Ctrl+V 静默失效。
+
+        目标目录已有同名文件时弹胶囊询问"替换/取消"（空闲时）；正在传输中则
+        跳过冲突文件并记日志，避免打断传输。决策前不创建进度行，确保进度行
+        计数与实际入队数一致，不残留卡死的进度行。
         """
+        # 已有待确认的冲突询问（询问胶囊悬浮中）时不重复触发
+        if self._pending_confirm is not None:
+            return
         # 本次粘贴已消费可用会话：释放系统级劫持，后续 Ctrl+V 留给前台应用
         self._release_global_hotkey()
         focus = QApplication.focusWidget()
@@ -1169,6 +1194,87 @@ class SyncWindow(QMainWindow):
             return
 
         files = notify['files']
+        # 分类：目标目录已有同名文件 → 需用户确认是否覆盖（避免静默覆盖本地文件）
+        conflicts = []
+        non_conflicts = []
+        for f in files:
+            name = os.path.basename(f.get('name', ''))
+            if not name:
+                continue
+            if os.path.exists(os.path.join(target_dir, name)):
+                conflicts.append(f)
+            else:
+                non_conflicts.append(f)
+
+        if conflicts:
+            if self._capsule is not None and self._capsule.is_transferring():
+                # 传输中不打断：跳过冲突文件并记日志，只投递无冲突部分
+                self.add_log("投递", I18n.tr('clipboard_conflict_skipped', count=len(conflicts)))
+                files = non_conflicts
+                if not files:
+                    return
+            else:
+                # 空闲：弹胶囊询问"替换/取消"，等用户决策后统一入队
+                self._pending_confirm = {
+                    'notify': notify,
+                    'target_dir': target_dir,
+                    'session_id': session_id,
+                    'conflicts': conflicts,
+                    'non_conflicts': non_conflicts,
+                }
+                if self._capsule is not None:
+                    first_name = os.path.basename(conflicts[0].get('name', '')) \
+                        or 'unnamed'
+                    # 副标题：单冲突直接点名；多冲突用"文件{name} 等 N 个已存在"
+                    subtitle = (I18n.tr('clipboard_conflict_subtitle_single', name=first_name)
+                                if len(conflicts) == 1
+                                else I18n.tr('clipboard_conflict_subtitle_multi',
+                                             name=first_name, count=len(conflicts)))
+                    self._capsule.ask_replace(
+                        I18n.tr('clipboard_conflict_title'),
+                        subtitle,
+                        session_id)
+                return
+
+        self._start_paste(notify, target_dir, session_id, files)
+
+    def _on_paste_confirm(self, replace: bool):
+        """用户对"目标已有同名文件"询问的决策：替换（全部覆盖）或取消（跳过冲突）。"""
+        pending = self._pending_confirm
+        self._pending_confirm = None
+        if not pending:
+            return
+        files = (pending['conflicts'] + pending['non_conflicts']) if replace \
+            else pending['non_conflicts']
+        if not files:
+            # 全部文件都是冲突且用户选择取消：无内容可投递，记日志并放弃本会话
+            self.add_log("投递", I18n.tr('clipboard_conflict_cancelled',
+                                         count=len(pending['conflicts'])))
+            self._remote_files = None
+            self._update_global_hotkey()   # 无可用会话：确保系统级劫持保持释放
+            return
+        self._start_paste(pending['notify'], pending['target_dir'],
+                          pending['session_id'], files)
+
+    def _start_paste(self, notify: dict, target_dir: str, session_id: str, files: list):
+        """入队拉取会话内的文件（可能为全部或经冲突决策后的子集）。
+
+        进度行计数、胶囊进度均以**实际入队数**为准，避免同名/冲突被去重后
+        进度行残留卡死。队列去重键用 session_id:name，不同会话同名文件可并存。
+        """
+        # 防御：按条目名去重（上游唯一名生成已保证，这里兜底避免任何重复名
+        # 导致进度行 remaining 计数与实际入队数不一致而残留卡死）
+        seen = set()
+        uniq = []
+        for f in files:
+            nm = os.path.basename(f.get('name', ''))
+            if not nm or nm in seen:
+                continue
+            seen.add(nm)
+            uniq.append(f)
+        files = uniq
+        if not files:
+            return
         count = len(files)
         total_bytes = sum(int(f.get('size', 0)) for f in files)
         self.add_log("投递", I18n.tr('clipboard_files_dispatching', count=count))
@@ -1194,8 +1300,9 @@ class SyncWindow(QMainWindow):
             name = os.path.basename(f.get('name', ''))
             if not name:
                 continue
+            # 去重键用 session_id:name：不同会话的同名文件不会被互相顶掉
             if self.tcp_queue.add_task(
-                    'tcp_pull', self._pull_remote_file, name,
+                    'tcp_pull', self._pull_remote_file, f"{session_id}:{name}",
                     notify, name, target_dir, session_id):
                 added += 1
         if added:
@@ -1213,6 +1320,8 @@ class SyncWindow(QMainWindow):
         失败不重发（PRD）：记日志、不做重试；临时文件由 pull_file 内部清理。
         进度按会话累计：本文件之前已完成的字节数(base) + 本文件已收字节，随信号
         上报，进度条分母恒为会话元数据总大小——多文件时不会因切换文件而跳回 0%。
+        stop_event 置位（窗口关闭/传输取消）时：pull_file 中止拉取并清理临时文件，
+        仅收尾不弹错误胶囊。
         """
         if stop_event.is_set():
             self.tcp_file_done.emit(session_key, False)
@@ -1227,9 +1336,14 @@ class SyncWindow(QMainWindow):
                 int(notify.get('source_port', 0)),
                 sid, token, name, dest,
                 progress_cb=lambda recv, size: self.tcp_progress.emit(session_key, base + recv, size),
+                stop_event=stop_event,
             )
         except Exception as e:
             ok, total, err = False, 0, str(e)
+        if stop_event.is_set():
+            # 拉取被取消（窗口关闭等）：不弹错误胶囊，仅收尾本文件
+            self.tcp_file_done.emit(session_key, False)
+            return
         if ok:
             self._tcp_received[session_key] = base + total
             self._log_worker("投递", I18n.tr('clipboard_file_received', name=name))
@@ -1290,9 +1404,11 @@ class SyncWindow(QMainWindow):
                     self._capsule.dismiss()
                     if fail_name:
                         # 源文件已被删除/移动：收掉残留传输态并弹错误胶囊
+                        # （轻量提示，1s 自动收起）
                         self._capsule.show_error(
                             I18n.tr('clipboard_file_unavailable', name=fail_name),
-                            I18n.tr('clipboard_file_unavailable_hint'))
+                            I18n.tr('clipboard_file_unavailable_hint'),
+                            duration_ms=1000)
                     elif err_msg:
                         # 连接失败/网络中断等：明确提示失败原因，不再静默收起
                         self._capsule.show_error(
@@ -1335,10 +1451,12 @@ class SyncWindow(QMainWindow):
 
     # ---- 复制端发送进度（FileProvider 服务线程信号 → 本机同步界面，淡蓝同接收端） ----
 
-    @Slot(str, str, 'qlonglong', 'qlonglong')
-    def _on_tcp_send_progress(self, session_id: str, name: str, sent: int, total: int):
-        """复制端发送进度：单文件一行，键为 session_id:name；分母为开流时确认的真实大小。"""
-        key = f"{session_id}:{name}"
+    @Slot(str, str, str, 'qlonglong', 'qlonglong')
+    def _on_tcp_send_progress(self, conn_id: str, session_id: str, name: str,
+                              sent: int, total: int):
+        """复制端发送进度：单文件一行，键为 session_id:name:连接标识（多接收端同文件
+        各占一行，互不打架）；分母为开流时确认的真实大小。"""
+        key = f"{session_id}:{name}:{conn_id}"
         display = os.path.basename(name)
         if len(display) > 25:
             display = display[:22] + "..."
@@ -1377,10 +1495,10 @@ class SyncWindow(QMainWindow):
         tot_m = total_locked / 1024 / 1024
         bar.setFormat(f"{I18n.tr('clipboard_deliver_send')} {display} - {percent}% ({cur_m:.1f}/{tot_m:.1f}M)")
 
-    @Slot(str, str, bool)
-    def _on_tcp_send_finished(self, session_id: str, name: str, ok: bool):
+    @Slot(str, str, str, bool)
+    def _on_tcp_send_finished(self, conn_id: str, session_id: str, name: str, ok: bool):
         """复制端单文件发送结束：进度行移出钉住区，完成记录进入上方历史区流转。"""
-        key = f"{session_id}:{name}"
+        key = f"{session_id}:{name}:{conn_id}"
         info = self._send_rows.pop(key, None)
         if not info:
             return
@@ -2891,6 +3009,7 @@ class SyncWindow(QMainWindow):
         self.tcp_queue.clear()
         self._pull_remaining = 0
         self._remote_files = None
+        self._pending_confirm = None   # 作废未决的冲突询问（避免窗口关闭后按钮回调触发下载）
         self._stop_provider()
         self._remove_temp_self_images()
         

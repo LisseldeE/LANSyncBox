@@ -1,16 +1,6 @@
 """系统级 Ctrl+V 全局热键（仅 Windows 生效）。
-
-背景：远程文件可用胶囊悬浮期间，若同步窗口未激活（最小化/被其他应用遮挡），
-窗口内 QShortcut 收不到 Ctrl+V，导致"文件复制能触发状态，但 Ctrl+V 无后续
-操作"。本模块用 RegisterHotKey 注册全局 Ctrl+V，并把 WM_HOTKEY 接入 Qt
-原生事件过滤器，在后台也能触发粘贴。
-
-设计（不做常驻劫持，非流氓软件）：
-- 只在调用方明确 register() 期间占用 Ctrl+V；调用方保证窗口期极短——
-  可用胶囊悬浮 2.5s，且本端新复制 / 远程文字剪贴板同步 / 同步窗口激活 /
-  粘贴执行 / 胶囊收起超时 / 窗口关闭 都会立即 unregister()。
-- 其他平台或 RegisterHotKey 不可用时静默降级：不注册热键，行为与旧版一致
-  （窗口激活态 Ctrl+V 仍由 QShortcut 正常处理）。
+Copyright (c) 2026 Lisselde_E <Lisselde.E@outlook.com>.
+Licensed under the GNU General Public License v3.0.
 """
 from PySide6.QtCore import QAbstractNativeEventFilter
 

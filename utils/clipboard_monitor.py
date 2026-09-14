@@ -1,16 +1,6 @@
 """剪切板监听与分发组件（局域网剪切板 - 文本部分）
-
-决策：**文本走系统剪贴板广播**；**图片一律作为文件处理**（不写入远程剪切板，
-与复制的文件共用 TCP 直连链路，属于阶段二，当前阶段不投递）。
-
-职责：
-- 监听系统剪贴板变化（QClipboard.dataChanged），识别内容类型（文本/图片/文件）。
-- 仅对文本内容产生 clipboard_committed 信号，交由上层上报主机分发。
-- 提供 set_written_hash / apply_to_clipboard，用于"写入系统剪贴板"时记录内容摘要，
-  抑制由网络接收写入再次触发 dataChanged 造成的回环重发（A→host→B→… 死循环）。
-
-线程归属约定：本组件对 QClipboard 的所有访问必须发生在 GUI 线程；
-网络层接收到的内容经信号回投主线程后，再调用 apply_to_clipboard 写入。
+Copyright (c) 2026 Lisselde_E <Lisselde.E@outlook.com>.
+Licensed under the GNU General Public License v3.0.
 """
 import hashlib
 import os

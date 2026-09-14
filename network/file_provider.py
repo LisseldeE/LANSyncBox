@@ -1,23 +1,13 @@
 """分布式文件轻量服务（局域网剪切板 - 文件/图片 端到端 TCP 直连）。
-
-架构约定（与 PRD 分布式微服务一致）：
-- 每台设备在房间就绪后运行一个 FileProvider：绑定临时端口监听，负责向"接收端"提供
-  本机被复制的文件/图片字节。
-- 复制端登记一个文件会话（session_id/token/本地绝对路径表）。主机只转发会话元信息，
-  文件字节不经过主机。
-- 接收端按元信息直连复制端 FileProvider，发送 CLIPBOARD_FILE_PULL_REQ，接收
-  FILE_BEGIN/FILE_DATA/FILE_END 流式分块（与主机同步分发同一套协议），写出到目标位置。
-- 传输逻辑与同步文件传输（server._send_large_file_to_client / 服务端接收循环）同一套：
-  发送前取真实大小作为 FILE_BEGIN 的 file_size，分块流式发送、进度分母恒定，
-  FILE_END 携带真实大小并校验完整度（不符则丢弃）。并发上限 5、失败不重发。
-
-路径安全：只按「会话 + 条目名」查本机登记表中的绝对路径，拒绝任意路径请求，天然防穿越。
+Copyright (c) 2026 Lisselde_E <Lisselde.E@outlook.com>.
+Licensed under the GNU General Public License v3.0.
 """
 import json
 import os
 import socket
 import tempfile
 import threading
+import time
 
 from PySide6.QtCore import QObject, Signal
 
@@ -45,12 +35,13 @@ class FileProvider(QObject):
     """复制端目录服务：接受拉取请求并按会话提供文件字节（端到端 TCP 直连）。"""
 
     log_message = Signal(str)
-    # 投递发送进度（服务线程 → UI）：(session_id, 条目名, 已发送字节, 文件真实大小)
+    # 投递发送进度（服务线程 → UI）：(连接标识, session_id, 条目名, 已发送字节, 文件真实大小)
+    # 连接标识区分不同接收端（同一文件被多台设备同时拉取时各行独立，互不打架）。
     # 字节数用 64 位整型（'qlonglong'）：大文件（>2GB）超出 32 位 int 会溢出为 0，
     # 导致进度分母丢失（旧"发送端 7MB/瞬间走满"根因之一）
-    send_progress = Signal(str, str, 'qlonglong', 'qlonglong')
-    # 单文件发送结束：(session_id, 条目名, 是否成功发完 FILE_END)
-    send_finished = Signal(str, str, bool)
+    send_progress = Signal(str, str, str, 'qlonglong', 'qlonglong')
+    # 单文件发送结束：(连接标识, session_id, 条目名, 是否成功发完 FILE_END)
+    send_finished = Signal(str, str, str, bool)
 
     CHUNK_SIZE = 64 * 1024
     DEFAULT_START_PORT = 21300  # 独立于同步主端口的目录服务起始端口
@@ -68,9 +59,15 @@ class FileProvider(QObject):
     # ---- 会话登记 ----
 
     def register_session(self, session_id: str, token: str, files: dict) -> FileSession:
-        """登记一个待投递会话；同 session_id 的旧会话会被新会话顶掉（"最新为主"）。"""
+        """登记一个待投递会话；登记新会话时清空全部旧会话（"最新为主"）。
+
+        与 Windows 剪贴板语义一致：新内容一复制广播，旧会话即失效——已在进行
+        中的传输不受影响（_stream_file 已在开流前解析出绝对路径，之后不再查会话），
+        但迟到的旧会话拉取请求会被拒绝（会话无效），避免长期运行中会话无限累积。
+        """
         session = FileSession(session_id, token, files)
         with self._lock:
+            self.sessions.clear()
             self.sessions[session_id] = session
         return session
 
@@ -97,7 +94,7 @@ class FileProvider(QObject):
                 sock.setsockopt(socket.SOL_SOCKET, socket.SO_SNDBUF, 4 * 1024 * 1024)
                 sock.setsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF, 4 * 1024 * 1024)
                 sock.bind(('0.0.0.0', try_port))
-                sock.listen(50)
+                sock.listen(128)
                 sock.settimeout(1.0)
             except OSError:
                 try:
@@ -213,7 +210,7 @@ class FileProvider(QObject):
                 pull_done = info.get('pull_done')
             # 连接关闭且未发完 FILE_END：向 UI 上报该文件发送失败（取消/中断）
             if pull_session and pull_name and not pull_done:
-                self.send_finished.emit(pull_session, pull_name, False)
+                self.send_finished.emit(conn_id, pull_session, pull_name, False)
             self._close_conn(conn_id)
 
     def _process_pull_message(self, conn_id: str, message):
@@ -249,12 +246,13 @@ class FileProvider(QObject):
             info['pull_session'] = session_id
             info['pull_name'] = name
             info['pull_done'] = False
-        ok = self._stream_file(info['socket'], info['send_guard'], session_id, name, abs_path)
+        ok = self._stream_file(conn_id, info['socket'], info['send_guard'],
+                               session_id, name, abs_path)
         with self._lock:
             info['pull_done'] = ok
 
-    def _stream_file(self, conn_socket, send_guard: SendLock, session_id: str, name: str,
-                     abs_path: str) -> bool:
+    def _stream_file(self, conn_id: str, conn_socket, send_guard: SendLock,
+                     session_id: str, name: str, abs_path: str) -> bool:
         """从本机文件流式发送（与同步传输 server._send_large_file_to_client 同一套逻辑）。
 
         发送前取真实大小作为 FILE_BEGIN 的 file_size，分块流式发送、进度分母恒定，
@@ -286,14 +284,14 @@ class FileProvider(QObject):
                         return False
                     sent += len(chunk)
                     chunk_index += 1
-                    self.send_progress.emit(session_id, name, sent, total_size)
+                    self.send_progress.emit(conn_id, session_id, name, sent, total_size)
             if self.running:
                 if not self._send_retry(
                         conn_socket, send_guard,
                         Protocol.create_file_end_message(name, total_size, mtime)):
                     return False
                 ok = True
-                self.send_finished.emit(session_id, name, True)
+                self.send_finished.emit(conn_id, session_id, name, True)
         except Exception:
             ok = False
         return ok
@@ -328,7 +326,7 @@ class FileProvider(QObject):
 
 
 def pull_file(host: str, port: int, session_id: str, token: str, name: str, dest_path: str,
-              progress_cb=None):
+              progress_cb=None, stop_event=None):
     """接收端单文件拉取：直连复制端目录端口，以 FILE_BEGIN/FILE_DATA/FILE_END 流式收文件。
 
     与同步接收同一套逻辑：FILE_BEGIN 携带真实大小作为进度分母（恒定），分块顺序写入，
@@ -340,6 +338,7 @@ def pull_file(host: str, port: int, session_id: str, token: str, name: str, dest
         session_id / token / name: 拉取目标
         dest_path: 接收端写入的最终路径
         progress_cb: 可选，回调 (received_bytes, total_bytes)
+        stop_event: 可选，threading.Event。置位时中止拉取并清理临时文件（窗口关闭/传输取消）。
 
     Returns:
         (成功?, 实际接收字节数, 错误消息)
@@ -348,21 +347,41 @@ def pull_file(host: str, port: int, session_id: str, token: str, name: str, dest
     got_end = False
     expected_total = 0
     mtime = 0.0
-    try:
-        conn = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-        # 增大 TCP 收发缓冲（与同步传输 client.connect_to_server 同款）：
-        # 接收端窗口由 SO_RCVBUF 决定，默认 64KB 会限制大文件吞吐（实测投递比同步慢 ~1.5 倍）
+    cancelled = False
+    conn = None
+    # 建连阶段本地重试（数据阶段不重试，不违背"失败不重发"）：打掉弱网瞬时抖动
+    # （SYN 丢失 / 拥塞 / backlog 满被拒）。广播刚发出时复制端必然在线，慢 SYN 少见，
+    # 单次超时降到 6s；尝试间轮询 stop_event，关窗立即中断。
+    for attempt in range(3):
+        if stop_event is not None and stop_event.is_set():
+            return False, 0, "已取消"
         try:
-            conn.setsockopt(socket.SOL_SOCKET, socket.SO_SNDBUF, 4 * 1024 * 1024)
-            conn.setsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF, 4 * 1024 * 1024)
-        except Exception:
-            pass
-        conn.settimeout(15.0)   # 握手超时放宽：投递每次新建直连，网络差时 SYN 重试可能 >5s
-        conn.connect((host, port))
-    except OSError as e:
-        return False, 0, f"无法连接复制端 {host}:{port}: {e}"
+            conn = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            # 增大 TCP 收发缓冲（与同步传输 client.connect_to_server 同款）：
+            # 接收端窗口由 SO_RCVBUF 决定，默认 64KB 会限制大文件吞吐（实测投递比同步慢 ~1.5 倍）
+            try:
+                conn.setsockopt(socket.SOL_SOCKET, socket.SO_SNDBUF, 4 * 1024 * 1024)
+                conn.setsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF, 4 * 1024 * 1024)
+            except Exception:
+                pass
+            conn.settimeout(6.0)   # 单次建连超时：复制端刚广播过必然在线，6s 足够，重试兜底瞬断
+            conn.connect((host, port))
+            break
+        except OSError as e:
+            try:
+                conn.close()
+            except Exception:
+                pass
+            conn = None
+            if attempt >= 2:
+                return False, 0, f"无法连接复制端 {host}:{port}: {e}"
+            if stop_event is not None and stop_event.is_set():
+                return False, 0, "已取消"
+            time.sleep(0.5 if attempt == 0 else 1.0)
 
-    conn.settimeout(30.0)
+    # recv 超时 1s 供 stop_event 轮询（弱网语义不变：timeout 后 continue 静默等待，
+    # 发送端打开/读取慢时依然无限等待；仅新增取消响应能力）
+    conn.settimeout(1.0)
     receiver = MessageReceiver()
 
     # 目标路径准备（写入临时文件，成功后再原子改名，避免失败留下半成品）
@@ -373,6 +392,9 @@ def pull_file(host: str, port: int, session_id: str, token: str, name: str, dest
         with os.fdopen(tmp_fd, 'wb') as fh:
             conn.sendall(Protocol.create_pull_request(session_id, token, name))
             while True:
+                if stop_event is not None and stop_event.is_set():
+                    cancelled = True
+                    break
                 try:
                     raw = conn.recv(65536)
                 except socket.timeout:
@@ -398,7 +420,6 @@ def pull_file(host: str, port: int, session_id: str, token: str, name: str, dest
                         continue
                 if got_end:
                     break
-        conn.close()
     except Exception as e:
         try:
             conn.close()
@@ -406,9 +427,16 @@ def pull_file(host: str, port: int, session_id: str, token: str, name: str, dest
             pass
         _safe_remove(tmp_path)
         return False, total, f"拉取失败: {e}"
+    # 关闭连接独立收尾：文件已完整收完时 close 异常不推翻已成功的下载
+    try:
+        conn.close()
+    except Exception:
+        pass
 
     if not got_end:
         _safe_remove(tmp_path)
+        if cancelled:
+            return False, total, "已取消"
         return False, total, "复制端未提供数据（会话无效或文件不存在）"
 
     # 完整度校验（与同步接收一致）：FILE_END 携带真实大小，实际接收字节数不符则丢弃
@@ -416,8 +444,13 @@ def pull_file(host: str, port: int, session_id: str, token: str, name: str, dest
         _safe_remove(tmp_path)
         return False, total, f"文件不完整（实际 {total}/期望 {expected_total}）"
 
-    # 完成：原子替换为目标文件，恢复源文件修改时间
-    os.replace(tmp_path, dest_path)
+    # 完成：原子替换为目标文件，恢复源文件修改时间；
+    # 落盘改名失败时清理临时文件并报错，不留半成品与泄漏
+    try:
+        os.replace(tmp_path, dest_path)
+    except Exception as e:
+        _safe_remove(tmp_path)
+        return False, total, f"写入目标文件失败: {e}"
     if mtime:
         try:
             os.utime(dest_path, (mtime, mtime))
