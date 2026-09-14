@@ -186,7 +186,12 @@ class FileProvider(QObject):
 
         try:
             while self.running:
-                data = conn_socket.recv(65536)
+                try:
+                    data = conn_socket.recv(65536)
+                except socket.timeout:
+                    # 网络慢/请求未达：静默等待（与同步 server._handle_client 一致），
+                    # 避免网络差时把拉取连接误判为断开而提前关闭
+                    continue
                 if not data:
                     break
                 receiver.feed(data)
@@ -194,7 +199,11 @@ class FileProvider(QObject):
                     message = receiver.get_message()
                     if message:
                         self._process_pull_message(conn_id, message)
-            # 单条连接服务完一次拉取后即关闭
+                # 单条连接服务完一次拉取后即关闭（发送方主动收尾，不等对端 close）
+                with self._lock:
+                    done = info.get('pull_done')
+                if done:
+                    break
         except OSError:
             pass
         finally:
@@ -224,11 +233,16 @@ class FileProvider(QObject):
             return
 
         if not self._verify(session_id, token):
-            return  # 会话无效：直接关闭连接，不发送任何文件
+            # 会话无效：本连接处理完毕，关闭让接收端快速失败（不挂起等待）
+            with self._lock:
+                info['pull_done'] = True
+            return
 
         session = self.get_session(session_id)
         abs_path = session.resolve(name) if session else None
         if not abs_path or not os.path.isfile(abs_path):
+            with self._lock:
+                info['pull_done'] = True
             return
 
         with self._lock:
@@ -246,6 +260,8 @@ class FileProvider(QObject):
         发送前取真实大小作为 FILE_BEGIN 的 file_size，分块流式发送、进度分母恒定，
         FILE_END 携带真实大小；成功发完 FILE_END 上报 send_finished(True) 并返回 True，
         任何中断返回 False（连接关闭时由 _handle_pull 兜底上报失败）。
+        每条消息经 _send_retry 发送：背压超时（socket.timeout）重试，网络差时大文件
+        传输不因一次 sendall 超时失败（与同步 _send_with_cancel 同一策略）。
         """
         try:
             total_size = os.path.getsize(abs_path)
@@ -254,8 +270,9 @@ class FileProvider(QObject):
             return False
         ok = False
         try:
-            send_guard.send(conn_socket, Protocol.pack_message(
-                MessageType.FILE_BEGIN, name, total_size, False, b'', mtime))
+            if not self._send_retry(conn_socket, send_guard, Protocol.pack_message(
+                    MessageType.FILE_BEGIN, name, total_size, False, b'', mtime)):
+                return False
             sent = 0
             with open(abs_path, 'rb') as fh:
                 chunk_index = 0
@@ -263,19 +280,42 @@ class FileProvider(QObject):
                     chunk = fh.read(self.CHUNK_SIZE)
                     if not chunk:
                         break
-                    send_guard.send(conn_socket,
-                                    Protocol.create_file_data_message(name, chunk_index, chunk))
+                    if not self._send_retry(
+                            conn_socket, send_guard,
+                            Protocol.create_file_data_message(name, chunk_index, chunk)):
+                        return False
                     sent += len(chunk)
                     chunk_index += 1
                     self.send_progress.emit(session_id, name, sent, total_size)
             if self.running:
-                send_guard.send(conn_socket,
-                                Protocol.create_file_end_message(name, total_size, mtime))
+                if not self._send_retry(
+                        conn_socket, send_guard,
+                        Protocol.create_file_end_message(name, total_size, mtime)):
+                    return False
                 ok = True
                 self.send_finished.emit(session_id, name, True)
         except Exception:
             ok = False
         return ok
+
+    def _send_retry(self, conn_socket, send_guard: SendLock, data: bytes) -> bool:
+        """发送一条消息：背压超时（socket.timeout）重试，连接错误返回 False。
+
+        与同步 server._send_with_cancel 同一策略：socket 阻塞模式 1s 超时下 sendall
+        最多阻塞 1s，背压超时重试，保证网络差/接收端处理慢时大文件传输不因一次
+        sendall 超时失败；连接错误（BrokenPipe/Reset/Aborted/OSError）立即返回 False。
+        """
+        while self.running:
+            try:
+                send_guard.send(conn_socket, data)
+                return True
+            except socket.timeout:
+                continue
+            except (BrokenPipeError, ConnectionResetError, ConnectionAbortedError, OSError):
+                return False
+            except Exception:
+                return False
+        return False
 
     def _close_conn(self, conn_id: str):
         with self._lock:
@@ -317,7 +357,7 @@ def pull_file(host: str, port: int, session_id: str, token: str, name: str, dest
             conn.setsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF, 4 * 1024 * 1024)
         except Exception:
             pass
-        conn.settimeout(5.0)
+        conn.settimeout(15.0)   # 握手超时放宽：投递每次新建直连，网络差时 SYN 重试可能 >5s
         conn.connect((host, port))
     except OSError as e:
         return False, 0, f"无法连接复制端 {host}:{port}: {e}"

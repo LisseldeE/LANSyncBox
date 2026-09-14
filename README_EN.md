@@ -8,7 +8,7 @@
 
 </div>
 
-> ⚠️ **Beta Notice**: This branch (`pro`) is the **Pro** edition of **LANSyncBox**, under active development. Features are not yet fully stable and may change significantly. It is currently in the Beta testing stage — do not use it in production.
+> ⚠️ **Beta Notice**: This branch (`pro`) is the **Pro** edition of [**LANSyncBox**](https://github.com/LisseldeE/LANSyncBox/tree/main), under active development. Features are not yet fully stable and may change significantly. It is currently in the Beta testing stage — do not use it in production.
 
 ## Introduction
 
@@ -17,6 +17,23 @@ LANSyncBox Pro is the upgraded version of [LANSyncBox](https://github.com/Lissel
 ## Version Statement
 
 The Pro edition will remain **open source** and will not become a paid product. Because this edition involves low-level changes, it may not be able to connect with the standard edition in future iterations.
+
+## Version Comparison
+
+> The standard edition keeps all of its existing features; the Pro edition layers new LAN collaboration capabilities on top (Beta roadmap, partially listed, details may shift).
+
+| Feature | Standard | Pro |
+| :--- | :---: | :---: |
+| Real-time file sync | ✔ | ✔ |
+| Room sharing (6-digit code · password check) | ✔ | ✔ |
+| Large file transfer (streaming · resume) | ✔ | ✔ |
+| File operations (add/edit/delete · read-only preview) | ✔ | ✔ |
+| Chinese / English UI switching | ✔ | ✔ |
+| **Delivery · cross-device copy & paste** | — | ⭐ **New** |
+| **Text clipboard broadcast** | — | ⭐ **New** |
+| **Image / file peer-to-peer delivery** | — | ⭐ **New** |
+| **Top quick-add** | — | ⭐ **New** |
+| **Sync / Collect modes** | — | ⭐ **New** |
 
 ## New Highlights (In Progress)
 
@@ -52,11 +69,11 @@ The Pro edition will remain **open source** and will not become a paid product. 
 
 ## Open Source License
 
-This project uses the GNU General Public License v3.0, see [LICENSE](https://github.com/LisseldeE/LANSyncBox/blob/main/LICENSE) file for details.
+This project uses the GNU General Public License v3.0, see [LICENSE](https://github.com/LisseldeE/LANSyncBox/blob/pro/LICENSE) file for details.
 
 ## Privacy Policy
 
-This project does not collect any user data, see [Privacy Policy](https://github.com/LisseldeE/LANSyncBox/blob/main/privacy_policy.md) file for details.
+This project does not collect any user data, see [Privacy Policy](https://github.com/LisseldeE/LANSyncBox/blob/pro/privacy_policy.md) file for details.
 
 ## Feedback
 
@@ -68,4 +85,6 @@ Issues and Pull Requests are welcome!
 
 If you find this tool useful, feel free to tip me on **ifdian (爱发电)** to support further development. Thank you so much for your kindness!
 
-- **[ifdian Homepage](https://ifdian.net/a/lisseldee)** : [https://ifdian.net/a/lisseldee](https://ifdian.net/a/lisseldee)
+<a href="https://ifdian.net/a/lisseldee">
+  <img src="https://img.shields.io/badge/ifdian-Support_me-018E96?style=for-the-badge" alt="Support me">
+</a>

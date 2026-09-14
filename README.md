@@ -8,7 +8,7 @@
 
 </div>
 
-> ⚠️ **Beta 版本声明**：本分支（`pro`）为 **LANSyncBox** 的 **Pro** 版本，正在跟随新特性持续迭代。功能尚未完全稳定，可能会有较大改动。当前处于 Beta 测试开发阶段，请勿用于正式环境。
+> ⚠️ **Beta 版本声明**：本分支（`pro`）为 [**LANSyncBox**](https://github.com/LisseldeE/LANSyncBox/tree/main) 的 **Pro** 版本，正在跟随新特性持续迭代。功能尚未完全稳定，可能会有较大改动。当前处于 Beta 测试开发阶段，请勿用于正式环境。
 
 ## 项目简介
 
@@ -16,6 +16,23 @@ LANSyncBox Pro 是 [LANSyncBox](https://github.com/LisseldeE/LANSyncBox/tree/mai
 
 ## 新版本声明
 Pro版本将会保持**开源**状态，不会转为收费模式。由于Pro版本涉及到底层修改，可能随后续迭代将无法与普通版本相互连接。
+
+## 版本对比
+
+> 标准版的既有功能，Pro 全部保留；Pro 在其上叠加局域网协作新能力（Beta 规划中，仅列部分，细节可能随开发调整）。
+
+| 功能 | 标准版 | Pro 版 |
+| :--- | :---: | :---: |
+| 实时文件同步 | ✔ | ✔ |
+| 房间分享（6 位数字 + 密码校验） | ✔ | ✔ |
+| 大文件传输（流式分块 · 断点续传） | ✔ | ✔ |
+| 文件操作（增删改 · 只读预览） | ✔ | ✔ |
+| 中英文界面实时切换 | ✔ | ✔ |
+| **投递 · 跨设备复制粘贴** | — | ⭐ **新增** |
+| **文本剪贴板广播** | — | ⭐ **新增** |
+| **图片 / 文件端到端直投** | — | ⭐ **新增** |
+| **顶部快捷添加** | — | ⭐ **新增** |
+| **同步 / 收集双模式** | — | ⭐ **新增** |
 
 ## 新版本亮点（进行中）
 
@@ -51,11 +68,11 @@ Pro版本将会保持**开源**状态，不会转为收费模式。由于Pro版�
 
 ## 开源声明
 
-本项目采用 GNU General Public License v3.0 开源协议，详见 [LICENSE](https://github.com/LisseldeE/LANSyncBox/blob/main/LICENSE) 文件。
+本项目采用 GNU General Public License v3.0 开源协议，详见 [LICENSE](https://github.com/LisseldeE/LANSyncBox/blob/pro/LICENSE) 文件。
 
 ## 隐私政策
 
-本项目不收集任何用户数据，详见 [隐私政策](https://github.com/LisseldeE/LANSyncBox/blob/main/privacy_policy.md) 文件。
+本项目不收集任何用户数据，详见 [隐私政策](https://github.com/LisseldeE/LANSyncBox/blob/pro/privacy_policy.md) 文件。
 
 ## 反馈
 
@@ -67,4 +84,6 @@ Pro版本将会保持**开源**状态，不会转为收费模式。由于Pro版�
 
 如果你觉得这个工具还不错，欢迎在爱发电上打赏支持我继续开发，非常感谢你的心意！
 
-- **[爱发电主页](https://ifdian.net/a/lisseldee)** : [https://ifdian.net/a/lisseldee](https://ifdian.net/a/lisseldee)
+<a href="https://ifdian.net/a/lisseldee">
+  <img src="https://img.shields.io/badge/爱发电-支持作者-018E96?style=for-the-badge" alt="支持作者">
+</a>

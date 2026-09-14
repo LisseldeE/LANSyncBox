@@ -295,6 +295,8 @@ class SyncWindow(QMainWindow):
     tcp_progress = Signal(str, 'qlonglong', 'qlonglong')  # (session_key, received_bytes, total_bytes)
     # 会话内单个文件拉取结束（工作线程发射，供胶囊收尾进度/播放完成对钩）
     tcp_file_done = Signal(str, bool)     # (session_key, ok)
+    # 会话内单个文件拉取失败（工作线程发射，供胶囊弹"远程文件不可用"错误提示）
+    tcp_file_error = Signal(str, str, str)  # (session_key, 文件名, 错误消息)
 
     # 共享剪贴板回环识别窗口（秒）：本端复制后窗口期内收到同指纹通知视为回声
     _OWN_COPY_WINDOW = 8.0
@@ -376,6 +378,8 @@ class SyncWindow(QMainWindow):
         self._remote_files = None      # 本端"可用远程文件"元信息（最新复制覆盖旧）
         self._clipboard_rows = {}      # session_key -> 剪贴板进度行信息
         self._tcp_received = {}        # session_key -> 该会话已累计接收字节（多文件进度累加）
+        self._tcp_error_names = {}     # session_key -> 该会话首个"远程文件不可用"的文件名（供错误胶囊）
+        self._tcp_error_msgs = {}      # session_key -> 该会话首个非"文件不可用"类错误消息（连接失败/中断）
         self._send_rows = {}           # "session_id:name" -> 本机发送进度行信息（复制端）
         self._pending_transfers = []   # [(session_id, 首文件名, 总字节), ...]：传输中又收到新粘贴时排队，
                                        # 等当前会话完成后按序接管胶囊进度（避免进度被重置回 0%）
@@ -390,6 +394,7 @@ class SyncWindow(QMainWindow):
         # 可用胶囊收起/超时 → 释放系统级 Ctrl+V 劫持
         self._capsule.available_hidden.connect(self._update_global_hotkey)
         self.tcp_file_done.connect(self._on_tcp_file_done)
+        self.tcp_file_error.connect(self._on_tcp_file_error)
         self._transfer_session = None  # 胶囊传输态当前显示的会话 id
         self._pull_remaining = 0       # 全局尚未完成的远程拉取数（排队计数用）
 
@@ -1230,8 +1235,22 @@ class SyncWindow(QMainWindow):
             self._log_worker("投递", I18n.tr('clipboard_file_received', name=name))
         else:
             self._log_worker("投递", I18n.tr('clipboard_file_pull_fail', name=name, msg=err))
+            # 供主线程在会话收尾时弹"远程文件不可用"错误胶囊
+            self.tcp_file_error.emit(session_key, name, err)
         # 单文件拉取结束（成功/失败都算）：供胶囊收尾本会话进度
         self.tcp_file_done.emit(session_key, ok)
+
+    @Slot(str, str, str)
+    def _on_tcp_file_error(self, session_key: str, name: str, err: str):
+        """单文件拉取失败（工作线程 → 主线程）：识别"复制端未提供数据"（源文件
+        已被删除/移动/会话失效）类错误，记下文件名，供会话收尾时弹错误胶囊。
+        其他错误（如连接失败/网络中断）记下错误消息，收尾时弹"投递失败"提示，
+        不再静默收起——网络差时用户能明确看到失败原因而不是"没反应"。
+        """
+        if '复制端未提供数据' in (err or ''):
+            self._tcp_error_names.setdefault(session_key, name)
+        else:
+            self._tcp_error_msgs.setdefault(session_key, err or '')
 
     def _on_tcp_file_done(self, session_key: str, ok: bool):
         """单文件拉取结束（成功/失败均计入）：刷新排队等待数，全部完成后胶囊播放对勾。"""
@@ -1250,6 +1269,7 @@ class SyncWindow(QMainWindow):
             return
         # 当前会话全部拉完且仍有排队会话：按序接管胶囊进度（避免被新粘贴重置回 0%）
         if session_done and self._pending_transfers:
+            self._tcp_error_names.pop(session_key, None)  # 失败提示让位排队会话，不打断传输
             next_session_id, next_file, next_total = self._pending_transfers.pop(0)
             self._capsule.begin_transfer(next_file, next_total, next_session_id)
             self._transfer_session = next_session_id
@@ -1259,9 +1279,29 @@ class SyncWindow(QMainWindow):
             self._capsule.set_queue_waiting(max(0, self._pull_remaining - 1))
         else:
             self._transfer_session = None
-            # 仅传输态弹完成对勾（若已被更新的"可用"提示顶掉则不打扰）
+            # 仅传输态弹完成对勾（若已被更新的"可用"提示顶掉则不打扰）；
+            # 会话内任一文件失败都不播对勾（失败只记日志/弹错误胶囊）
             if self._capsule.is_transferring():
-                self._capsule.complete()
+                fail_name = self._tcp_error_names.pop(session_key, None)
+                err_msg = self._tcp_error_msgs.pop(session_key, None)
+                failed = (not ok) or (info is not None
+                                      and info['count'] - info.get('ok_count', 0) > 0)
+                if failed:
+                    self._capsule.dismiss()
+                    if fail_name:
+                        # 源文件已被删除/移动：收掉残留传输态并弹错误胶囊
+                        self._capsule.show_error(
+                            I18n.tr('clipboard_file_unavailable', name=fail_name),
+                            I18n.tr('clipboard_file_unavailable_hint'))
+                    elif err_msg:
+                        # 连接失败/网络中断等：明确提示失败原因，不再静默收起
+                        self._capsule.show_error(
+                            I18n.tr('clipboard_deliver_send_fail'), err_msg)
+                else:
+                    self._capsule.complete()
+            else:
+                self._tcp_error_names.pop(session_key, None)
+                self._tcp_error_msgs.pop(session_key, None)
 
     def _finish_tcp_progress(self, session_key: str):
         """投递会话全部结束后：进度条行移出钉住区，完成记录进入上方历史区流转。

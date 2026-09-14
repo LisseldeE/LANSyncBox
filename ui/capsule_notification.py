@@ -26,9 +26,10 @@
   不使用常驻透明度效果——它缓存源图，重新展开时会产生文字纵向重叠的残留。
 - 完成后：圆角胶囊内播放对钩绘制动画，随后整条收起淡出。
 """
-from PySide6.QtCore import (Qt, QRect, QRectF, QPoint, QSize,
-                            QParallelAnimationGroup, QPropertyAnimation, Property,
-                            QEasingCurve, Signal, QEvent, QByteArray, QObject, QTimer)
+from PySide6.QtCore import (Qt, QRect, QRectF, QPoint, QPointF, QSize,
+                            QAbstractAnimation, QParallelAnimationGroup,
+                            QPropertyAnimation, Property, QEasingCurve, Signal,
+                            QEvent, QByteArray, QObject, QTimer)
 from PySide6.QtGui import (QPainter, QColor, QPen, QPainterPath, QLinearGradient,
                            QPalette, QFont, QFontMetrics)
 from PySide6.QtWidgets import (
@@ -152,7 +153,7 @@ class _ElideLabel(QLabel):
 
 
 class _CheckMark(QWidget):
-    """自绘对钩动画（从左上到右下线性绘制，描边随进度生长）。"""
+    """状态图标：绿色圆底对钩（完成态，描边随进度生长）。"""
 
     def __init__(self, size=28, parent=None):
         super().__init__(parent)
@@ -172,15 +173,16 @@ class _CheckMark(QWidget):
         p = QPainter(self)
         p.setRenderHint(QPainter.Antialiasing, True)
         p.setPen(Qt.NoPen)
+        w, h = self.width(), self.height()
         # 圆底
         p.setBrush(QColor("#51cf66"))
-        p.drawEllipse(QRectF(0, 0, self.width(), self.height()))
+        p.drawEllipse(QRectF(0, 0, w, h))
 
         # 对钩折线路径
         path = QPainterPath()
-        path.moveTo(self.width() * 0.28, self.height() * 0.52)
-        path.lineTo(self.width() * 0.44, self.height() * 0.68)
-        path.lineTo(self.width() * 0.73, self.height() * 0.36)
+        path.moveTo(w * 0.28, h * 0.52)
+        path.lineTo(w * 0.44, h * 0.68)
+        path.lineTo(w * 0.73, h * 0.36)
 
         pen = QPen(QColor("#ffffff"), 3)
         pen.setCapStyle(Qt.RoundCap)
@@ -189,7 +191,7 @@ class _CheckMark(QWidget):
         p.setPen(pen)
         # 用裁剪来限制已绘制部分：仅绘制矩形 (0,0)->(宽, 高*进度) 内的对钩
         p.save()
-        clip = QRectF(0, 0, self.width(), self.height() * self._progress)
+        clip = QRectF(0, 0, w, h * self._progress)
         p.setClipRect(clip)
         p.drawPath(path)
         p.restore()
@@ -302,10 +304,10 @@ class _CapsuleItem(QFrame):
             "font-size: 11px; font-weight: 600; letter-spacing: 1px;")
         inner.addWidget(self._tag, 0, Qt.AlignVCenter)
 
-        # 左侧状态图标区（对钩仅在完成态显示）
+        # 状态图标（对钩仅在完成态显示）：创建于此处，加入布局放在文本区之后、
+        # 与进度条同槽位——完成转换时文字不因对钩插入而移动
         self._icon = _CheckMark(28)
         self._icon.setVisible(False)
-        inner.addWidget(self._icon, 0, Qt.AlignVCenter)
 
         # 文本内容区：整体作为一个可垂直居中的子控件
         self._text_box = QWidget()
@@ -326,6 +328,9 @@ class _CapsuleItem(QFrame):
 
         inner.addWidget(self._text_box, 0, Qt.AlignVCenter)
 
+        # 完成态对钩：与进度条同一槽位（进度条隐藏后原地淡入，文字位置不变）
+        inner.addWidget(self._icon, 0, Qt.AlignVCenter)
+
         # 传输进度条：显示「百分比 + 已接收/总量」（传输态出现），自绘圆角
         self._bar = _RoundedProgressBar()
         self._bar.setRange(0, 1000)
@@ -336,8 +341,13 @@ class _CapsuleItem(QFrame):
         self._bar.set_text_color("#94a3b8")
         self._bar.setVisible(False)
         inner.addWidget(self._bar, 0, Qt.AlignVCenter)
+        # 尾部弹性伸缩项：进度条隐藏（可用态 / 展开动画早期）时吸收 inner 布局的
+        # 多余空间，文本区不被拉宽——标题省略长度不随进度条显隐跳动
+        inner.addStretch(1)
 
-        outer.addWidget(self._content)
+        # 内容容器钉在左缘：宽度伸缩动画期间（如完成收缩）内容不随布局剩余空间
+        # 居中——内部元素位置恒定，胶囊宽度变化只引起整体平滑移动
+        outer.addWidget(self._content, 0, Qt.AlignLeft)
 
     def show_available(self, file_name: str, total_bytes: int):
         """状态1 —— 收到通知：提示“有可用的远程文件 {名称} {大小}”。"""
@@ -365,6 +375,29 @@ class _CapsuleItem(QFrame):
         self._hint_mode = True
         self._title.setText(text)
         self._hint.setVisible(False)
+        self._bar.setVisible(False)
+        self._bar.setValue(0)
+        self._icon.setVisible(False)
+        self._queue_waiting = 0
+        self._transferring = False
+        self._present()
+
+    def show_error(self, title: str, subtitle: str):
+        """错误提示态（投递失败）：标题行警示色 + 双行文字，自动收起。
+
+        与 show_hint 同一生命周期（协调者定时收起），用于“远程文件不可用”
+        等失败反馈；不配图标，仅以标题警示色与内容区分，克制不突兀。
+        """
+        self._stop_all()
+        self._refresh_theme()
+        self._hint_mode = True
+        # 标题行改用警示色（深橙），其余状态进入时 _refresh_theme() 自动复位
+        warn = "#e8590c" if not self._is_dark() else "#f76707"
+        self._title.setStyleSheet(
+            f"color: {warn}; font-size: 13px; font-weight: 600;")
+        self._title.setText(title)
+        self._hint.setText(subtitle)
+        self._hint.setVisible(True)
         self._bar.setVisible(False)
         self._bar.setValue(0)
         self._icon.setVisible(False)
@@ -447,6 +480,9 @@ class _CapsuleItem(QFrame):
         else:
             w, _ = self._content_size()
             self._full_w = w
+            # 展开动画进行中：内容立即钉到新完整宽度（超宽部分由胶囊裁剪），
+            # 在途动画继续按新宽度走到底，文字保持最终省略形态不逐帧重排
+            self._content.setFixedWidth(w)
 
     def complete(self):
         """状态3 —— 完成：进度封顶，播放对钩动画后淡出隐藏。"""
@@ -542,10 +578,15 @@ class _CapsuleItem(QFrame):
 
     def _sync_bar_visibility(self):
         """按当前胶囊宽度决定进度条显隐：宽度不足以完整容纳进度条时隐藏，
-        避免进度条右缘超出胶囊被裁剪（展开/伸缩动画中间态的关键修复）。"""
+        避免进度条右缘超出胶囊被裁剪（展开/伸缩动画中间态的关键修复）。
+
+        内容钉在最终宽度期间，进度条按最终位置布局；胶囊宽度须至少达到进度条
+        右缘（full_w - 右内边距 20）才显示，未达到时保持隐藏。
+        """
         if not self._transferring or self._bar_fit_w <= 0:
             return
-        if self.width() >= self._bar_fit_w:
+        fits = self.width() >= self._bar_fit_w and self.width() >= self._full_w - 20
+        if fits:
             if not self._bar.isVisible():
                 self._bar.setVisible(True)
         elif self._bar.isVisible():
@@ -562,6 +603,19 @@ class _CapsuleItem(QFrame):
             w, h = self._content_size()
             self._full_w = w
             self._resize_to(w, self.height() if keep_height else h)
+        elif self.isVisible() and self._expand > 0.001:
+            # 展开动画进行中内容切换（小文件秒传完成、同胶囊过渡等）：
+            # 宽度由 _w_anim 从当前值平滑过渡到新内容宽度，垂直滑入继续由展开
+            # 动画推进——避免 _show_anim 按新 full_w 重新插值导致宽度瞬间跳变
+            w, h = self._content_size()
+            self._full_w = w
+            self._content.setFixedWidth(w)
+            self._resize_group.stop()
+            self._w_anim.setStartValue(self.width())
+            self._w_anim.setEndValue(float(w))
+            self._h_anim.setStartValue(self.height())
+            self._h_anim.setEndValue(float(self.height() if keep_height else h))
+            self._resize_group.start()
         else:
             self._show_anim()
 
@@ -590,6 +644,9 @@ class _CapsuleItem(QFrame):
         self.raise_()
         w, h = self._content_size()
         self._full_w = w
+        # 内容钉在最终宽度：动画全程文字按最终省略形态布局（宽于胶囊的部分由父级
+        # 矩形裁剪），随胶囊伸展渐进露出，省略文字长度恒定、无逐帧跳动
+        self._content.setFixedWidth(w)
         self.setFixedHeight(h)
         self._sync_bar_visibility()   # 起手宽度（小药丸）不足以容纳进度条 → 先隐藏
         self._anim.stop()
@@ -732,9 +789,17 @@ class _CapsuleItem(QFrame):
         if not self.isVisible() and value > 0.0:
             self.setVisible(True)
             self.raise_()
-        # 宽度伸缩：由小药丸线性扩张到完整内容宽度（内容随几何一起收放，无残留）
-        w = int(self._min_w + (self._full_w - self._min_w) * value)
-        self.setFixedWidth(w)
+        # 宽度伸缩：由小药丸线性扩张到完整内容宽度（内容随几何一起收放，无残留）。
+        # 内容长度伸缩动画（_resize_group）运行时宽度改由 _w_anim 接管，此处只
+        # 推进垂直滑入与内容钉住——避免两套宽度源互相覆盖导致展开中切换时跳变
+        if self._resize_group.state() != QAbstractAnimation.Running:
+            w = int(self._min_w + (self._full_w - self._min_w) * value)
+            self.setFixedWidth(w)
+        # 内容钉在最终宽度：动画全程省略文字恒定，超出胶囊的部分由父级矩形裁剪
+        # 渐进露出——避免每帧按当前宽度重排导致省略文字长度逐帧跳动
+        if self._content.width() != self._full_w:
+            self._content.setFixedWidth(self._full_w)
+        self.layout().activate()   # 手动路径同样每帧同步布局（与 _set_content_width 一致）
         self._sync_bar_visibility()   # 宽度足够容纳进度条前保持隐藏
         self._apply_slot()
         self.layout_dirty.emit()   # 几何变化 → 协调者实时居中整组
@@ -767,6 +832,11 @@ class _CapsuleItem(QFrame):
 
     def _set_content_width(self, value: float):
         self.setFixedWidth(int(value))
+        # 内容钉在最终宽度（与展开动画同一策略）：伸缩动画全程省略文字恒定，
+        # 超出胶囊的部分由父级矩形裁剪渐进露出，文字长度无逐帧跳动
+        if self._content.width() != self._full_w:
+            self._content.setFixedWidth(self._full_w)
+        self.layout().activate()
         self._sync_bar_visibility()   # 长度伸缩动画中间态同样按宽度控制进度条显隐
         self.layout_dirty.emit()   # 宽度伸缩中 → 协调者实时居中整组
 
@@ -775,9 +845,11 @@ class _CapsuleItem(QFrame):
 
     def _set_content_height(self, value: float):
         self.setFixedHeight(int(value))
-        # 高度变化时保持顶部锚定在屏幕可用区下方
-        S = QApplication.primaryScreen().availableGeometry()
-        self.move(self.x(), S.y() + self._TOP_GAP)
+        # 仅完全展开时保持顶部锚定静止位；展开动画进行中（expand<1）不干预，
+        # 垂直滑入由 _apply_slot 按 expand 驱动，避免两处 move 互相覆盖造成抖动
+        if self._expand >= 0.99:
+            S = QApplication.primaryScreen().availableGeometry()
+            self.move(self.x(), S.y() + self._TOP_GAP)
 
     contentWidth = Property(float, _get_content_width, _set_content_width)
     contentHeight = Property(float, _get_content_height, _set_content_height)
@@ -806,6 +878,7 @@ class CapsuleNotification(QObject):
 
     _AVAIL_MS = 2500   # 新可用消息悬浮时长（到时自动收起）
     _HINT_MS = 1000    # 提示态（如"无效的粘贴位置"）悬浮时长，短于可用消息，轻量 toast 即时收起
+    _ERROR_MS = 2000   # 投递失败错误提示悬浮时长（双行内容，比单行提示稍长保证可读）
     _GAP = 14          # 并排胶囊间距
 
     def __init__(self, parent=None):
@@ -855,6 +928,19 @@ class CapsuleNotification(QObject):
         self._available.show_hint(text)
         self._relayout()
         self._avail_timer.start(self._HINT_MS)
+
+    def show_error(self, title: str, subtitle: str):
+        """投递失败错误提示：警示胶囊（橙色感叹号 + 双行文字）_ERROR_MS 后自动收起。
+
+        与 show_hint 同理：顶掉当前"可用/提示"（含剩余计时），期间新到的可用
+        消息不覆盖，直到错误提示收起。双行内容稍长，时长放宽至 2s 保证可读。
+        """
+        self._hint_active = True
+        self._avail_timer.stop()
+        self._available_session = None
+        self._available.show_error(title, subtitle)
+        self._relayout()
+        self._avail_timer.start(self._ERROR_MS)
 
     def begin_transfer(self, file_name: str, total_bytes: int, session_id=None):
         """开始传输：优先让"可用"胶囊就地过渡为传输态（同胶囊过渡）。
