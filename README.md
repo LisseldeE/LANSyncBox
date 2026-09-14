@@ -28,6 +28,8 @@
 
 LANSyncBox 是一款跨平台、专为局域网场景设计的文件实时同步工具，让多人只需在同一局域网内即可完成安全、流畅的文件共享与同步，全程无需公网。基于 Qt6 构建，支持大文件流式传输、串行化发送与断点续传，保证多连接高并发场景下的数据可靠与传输稳定。
 
+> 💡 寻找 [**LANSyncBox Pro**](https://github.com/LisseldeE/LANSyncBox/tree/pro) ？ 更高阶的 **Pro 版**（正在迭代的 Beta 版，含跨设备复制粘贴**投递**、顶部**快捷添加**、**收集模式**等新能力）位于 [`pro` 分支](https://github.com/LisseldeE/LANSyncBox/tree/pro)。
+
 ## 项目截图
 | 主界面 | 同步界面 |
 | :---: | :---: |
@@ -171,3 +173,11 @@ LANSyncBox 是一款跨平台、专为局域网场景设计的文件实时同步
 **开发中应用，如有问题或新的创意欢迎和我联系！**
 
 欢迎提交 Issue 和 Pull Request！
+
+## 支持我
+
+如果你觉得这个工具还不错，欢迎在爱发电上打赏支持我继续开发，非常感谢你的心意！
+
+<a href="https://ifdian.net/a/lisseldee">
+  <img src="https://img.shields.io/badge/爱发电-支持作者-018E96?style=for-the-badge" alt="支持作者">
+</a>

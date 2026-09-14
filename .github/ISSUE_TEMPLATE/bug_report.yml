@@ -1,0 +1,88 @@
+---
+name: Bug 反馈
+description: 报告一个缺陷。请务必注明是标准版还是 Pro 版出现的问题
+title: "[Bug]: "
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        ## 感谢提交 Bug
+
+        LANSyncBox 同时存在**标准版（main 分支）**与 **Pro 版（pro 分支）**，两者功能与行为不同。
+        为避免混淆，请务必在下方选择**实际出现问题**的版本。
+
+  - type: dropdown
+    id: edition
+    attributes:
+      label: 出现问题的是哪个版本
+      description: 请选择实际出问题的版本（标准版 / Pro 版）
+      options:
+        - 标准版（main 分支）
+        - Pro 版（pro 分支）
+        - 不确定
+    validations:
+      required: true
+
+  - type: input
+    id: app_version
+    attributes:
+      label: 应用版本号
+      description: 在"关于"界面左下角或帮助菜单中查看，形如 R7.1.6.0
+      placeholder: 例如 R7.1.6.0
+    validations:
+      required: true
+
+  - type: dropdown
+    id: platform
+    attributes:
+      label: 操作系统
+      description: 你在哪个系统上遇到此问题？
+      options:
+        - Windows 10
+        - Windows 11
+        - Linux
+        - macOS
+        - 其他
+    validations:
+      required: true
+
+  - type: textarea
+    id: what-happened
+    attributes:
+      label: 问题描述
+      description: 请清晰简要描述你遇到的问题
+      placeholder: 发生了什么事...
+    validations:
+      required: true
+
+  - type: textarea
+    id: reproduction
+    attributes:
+      label: 复现步骤
+      description: 详细描述复现该问题的步骤
+      placeholder: |
+        1. 打开应用
+        2. 点击...
+        3. 观察到...
+      render: shell
+    validations:
+      required: false
+
+  - type: textarea
+    id: expected
+    attributes:
+      label: 预期行为
+      description: 你期望的正确表现是什么
+      placeholder: 本来应该...
+    validations:
+      required: false
+
+  - type: textarea
+    id: logs
+    attributes:
+      label: 相关日志 / 截图
+      description: 如有报错信息、控制台日志或截图，请附上，能显著加快定位
+      render: shell
+    validations:
+      required: false
