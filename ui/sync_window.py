@@ -1164,12 +1164,17 @@ class SyncWindow(QMainWindow):
         return None
 
     def _windows_explorer_dir(self):
-        """Windows：前台资源管理器窗口的当前浏览目录（comtypes 可选，失败返回 None）。
+        """Windows：资源管理器窗口的当前浏览目录（comtypes 可选，失败返回 None）。
 
         粘贴目标固定取窗口当前浏览目录（doc.Folder.Self.Path），不使用选中项
         FocusedItem：资源管理器打开/导航目录时会把首个条目自动聚焦/选中
         （如 A/B/C 中在 B 粘贴会把 C 误当目标；桌面首项同理），一律以当前
         浏览目录为准，避免文件被错放进子文件夹或桌面首项。
+
+        候选句柄按顺序尝试，任一命中即返回：
+        1. 前台窗口（键盘焦点）——标准粘贴语义；
+        2. 鼠标指针所在窗口——键盘焦点在应用/其它窗口但鼠标已移到文件
+           管理器上时同样命中，避免"鼠标在文件夹却提示无效位置"。
         """
         fg_hwnd = 0
         try:
@@ -1177,7 +1182,13 @@ class SyncWindow(QMainWindow):
             fg_hwnd = int(ctypes.windll.user32.GetForegroundWindow())
         except Exception:
             return None
-        if not fg_hwnd:
+        candidates = []
+        if fg_hwnd:
+            candidates.append(fg_hwnd)
+        pt_hwnd = self._window_at_cursor()
+        if pt_hwnd:
+            candidates.append(pt_hwnd)
+        if not candidates:
             return None
         try:
             import comtypes.client
@@ -1186,11 +1197,22 @@ class SyncWindow(QMainWindow):
                 try:
                     if not str(w.FullName).lower().endswith("explorer.exe"):
                         continue
-                    if int(w.HWND) != fg_hwnd:
+                    if int(w.HWND) not in candidates:
                         continue
                     doc = w.Document
                     # 固定取当前浏览目录，不用 FocusedItem（首项自动聚焦会被误当目标）
-                    p = str(doc.Folder.Self.Path)
+                    p = None
+                    try:
+                        p = str(doc.Folder.Self.Path)
+                    except Exception:
+                        pass
+                    if not (p and os.path.isdir(p)):
+                        # 新版资源管理器（Win11）doc.Folder.Self 可能抛异常不可用，
+                        # 回退用 LocationURL（file:///C:/...）解析本地路径
+                        try:
+                            p = self._path_from_location_url(w.LocationURL)
+                        except Exception:
+                            p = None
                     if p and os.path.isdir(p):
                         return p
                 except Exception:
@@ -1198,6 +1220,64 @@ class SyncWindow(QMainWindow):
         except Exception:
             pass
         return None
+
+    @staticmethod
+    def _path_from_location_url(url):
+        """把资源管理器 LocationURL 解析为本地路径；非文件位置返回 None。
+
+        新版资源管理器（Win11）上 doc.Folder.Self 不可用时回退使用：
+        - file:///C:/foo/bar → C:/foo/bar（含 %20 等转义，unquote 还原）；
+        - file://server/share/foo → \\\\server\\share\\foo（UNC 共享）；
+        - 快速访问/库/回收站等虚拟位置（shell:...、无 scheme 等）→ None，
+          由调用方提示"无效的粘贴位置"，不静默回退。
+        """
+        if not url:
+            return None
+        from urllib.parse import urlparse, unquote
+        try:
+            u = urlparse(str(url))
+        except Exception:
+            return None
+        if u.scheme.lower() != "file":
+            return None
+        p = unquote(u.path)
+        netloc = (u.netloc or "").lower()
+        if netloc and netloc not in ("", "localhost"):
+            # UNC 共享：file://server/share/foo → \\server\share\foo
+            return "\\\\" + netloc + ("\\" + p.lstrip("/").replace("/", "\\")
+                                      if p else "")
+        if sys.platform == "win32" and len(p) > 2 and p[0] == "/" and p[2] == ":":
+            p = p[1:]  # "/C:/foo" → "C:/foo"
+        return p or None
+
+    @staticmethod
+    def _window_at_cursor():
+        """鼠标指针所在位置对应的顶层窗口句柄（GetCursorPos + WindowFromPoint）。
+
+        WindowFromPoint 可能返回子窗口句柄，用 GetAncestor(GA_ROOT) 归一化到
+        顶层窗口后再返回；失败返回 0。用于键盘焦点与鼠标位置不一致时，
+        定位用户鼠标实际指向的文件管理器窗口。
+        """
+        try:
+            import ctypes
+            from ctypes import wintypes
+            user32 = ctypes.windll.user32
+            user32.GetCursorPos.argtypes = [ctypes.POINTER(wintypes.POINT)]
+            user32.GetCursorPos.restype = wintypes.BOOL
+            user32.WindowFromPoint.argtypes = [wintypes.POINT]
+            user32.WindowFromPoint.restype = wintypes.HWND
+            user32.GetAncestor.argtypes = [wintypes.HWND, wintypes.UINT]
+            user32.GetAncestor.restype = wintypes.HWND
+            pt = wintypes.POINT()
+            if not user32.GetCursorPos(ctypes.byref(pt)):
+                return 0
+            hwnd = int(user32.WindowFromPoint(pt))
+            if not hwnd:
+                return 0
+            top = int(user32.GetAncestor(hwnd, 2))  # GA_ROOT = 2
+            return top or hwnd
+        except Exception:
+            return 0
 
     def _windows_desktop_dir(self):
         """Windows：前台为桌面（Progman/WorkerW，无资源管理器窗口）时返回真实桌面目录。

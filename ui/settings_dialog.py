@@ -131,6 +131,7 @@ class SettingsDialog(QDialog):
     """
 
     cache_changed = Signal()  # 缓存目录被清空，通知主窗刷新缓存占用
+    announcements_toggled = Signal(bool)  # 「接收推送公告」开关变化（True=开启）
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -223,12 +224,13 @@ class SettingsDialog(QDialog):
 
         lay.addWidget(self._make_section_label(I18n.tr('settings_section_notify')))
 
-        # 接收推送公告（仅开关，功能后续构建）
+        # 接收推送公告（关闭后主界面不显示公告入口；重新开启时恢复已接收公告）
         announce_row, announce_sw = self._make_switch_row(
             I18n.tr('settings_receive_announcements'),
             UserConfig.get_receive_announcements(),
             lambda checked: UserConfig.set_receive_announcements(checked),
         )
+        announce_sw.stateChanged.connect(self.announcements_toggled.emit)
         lay.addWidget(announce_row)
 
         lay.addStretch()

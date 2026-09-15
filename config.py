@@ -265,6 +265,7 @@ class UserConfig:
             "auto_check_update": False,
             "receive_announcements": True,
             "last_announcement": "",
+            "last_announcement_text": "",
             "room_history": []
         }
 
@@ -394,6 +395,16 @@ class UserConfig:
     def set_last_announcement(cls, version: str):
         """记录已显示公告的版本号，避免下次启动重复显示"""
         cls.set("last_announcement", str(version))
+
+    @classmethod
+    def get_last_announcement_text(cls) -> str:
+        """获取已接收公告的正文（config.json 中的记录，空串表示从未接收）"""
+        return str(cls.get("last_announcement_text", ""))
+
+    @classmethod
+    def set_last_announcement_text(cls, text: str):
+        """记录已接收公告的正文，供主界面入口启动时持久显示"""
+        cls.set("last_announcement_text", str(text))
 
     @classmethod
     def update_reference_info(cls, exe_path: str):

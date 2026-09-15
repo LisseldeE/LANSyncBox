@@ -8,10 +8,11 @@ import re
 import threading
 from PySide6.QtWidgets import (
     QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
-    QPushButton, QLabel, QFrame, QSpacerItem, QSizePolicy
+    QPushButton, QLabel, QFrame, QSpacerItem, QSizePolicy, QApplication
 )
-from PySide6.QtCore import Qt, QSize, QUrl, Signal, QFileSystemWatcher, QTimer
-from PySide6.QtGui import QFont, QDesktopServices
+from PySide6.QtCore import Qt, QSize, QUrl, Signal, QFileSystemWatcher, QTimer, QRectF
+from PySide6.QtGui import QFont, QDesktopServices, QPainter, QPixmap, QColor, QPalette
+from PySide6.QtSvg import QSvgRenderer
 
 from i18n import I18n
 from config import Config, UserConfig
@@ -21,7 +22,126 @@ from ui.about_dialog import AboutDialog, fetch_latest_version
 from ui.settings_dialog import SettingsDialog
 from ui.capsule_notification import CapsuleNotification
 from ui.announcement import fetch_announcement, is_newer
+from ui.announcement_dialog import AnnouncementDialog
 from ui.widgets import AnimatedButton, SnapOutlineButton, BUTTON_STYLES, ClickableLabel
+
+
+def _render_megaphone_icon(color: str) -> QPixmap:
+    """渲染公告喇叭线条图标（2 倍尺寸保证高分屏清晰）"""
+    svg = ('<svg viewBox="0 0 24 24" fill="none" stroke="%C%" stroke-width="1.8" '
+           'stroke-linecap="round" stroke-linejoin="round">'
+           '<path d="M3 11v2a1 1 0 0 0 1 1h2l7 4V6L6 10H4a1 1 0 0 0-1 1z"/>'
+           '<path d="M14 9.5a3 3 0 0 1 0 5"/></svg>')
+    renderer = QSvgRenderer(bytearray(svg.replace('%C%', color).encode('utf-8')))
+    pix = QPixmap(32, 32)
+    pix.fill(Qt.transparent)
+    painter = QPainter(pix)
+    renderer.render(painter)
+    painter.end()
+    return pix
+
+
+class AnnouncementEntry(QFrame):
+    """公告持久入口（细条样式）：喇叭图标 + 单行省略公告预览。
+
+    默认隐藏不占布局空间；有公告时由主窗口 set_announcement 显示并常驻，
+    直到收到更新的公告才刷新。点击（clicked 信号）由主窗口打开详情窗口。
+    浅灰底细条，悬浮略深；深浅主题自适应。
+    """
+
+    clicked = Signal()
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setAttribute(Qt.WA_Hover, True)
+        self.setCursor(Qt.PointingHandCursor)
+        self.setFixedHeight(32)
+        self._hovered = False
+        self._dark = None  # 上次应用的深浅标记，paintEvent 时按需刷新
+
+        lay = QHBoxLayout(self)
+        lay.setContentsMargins(10, 0, 10, 0)
+        lay.setSpacing(8)
+        self._icon = QLabel(self)
+        self._icon.setFixedSize(16, 16)
+        self._icon.setScaledContents(True)
+        lay.addWidget(self._icon)
+        self._text = QLabel(self)
+        lay.addWidget(self._text, 1)
+
+        self._full_text = ""
+        self.setVisible(False)
+
+    # ------------------------------------------------------------------ 对外接口
+
+    def set_announcement(self, text: str):
+        """设置公告预览文本并显示（持久入口，直到新公告刷新）"""
+        self._full_text = text
+        self._update_text()
+        self.setVisible(True)
+
+    def clear_announcement(self):
+        """清除公告并隐藏入口"""
+        self._full_text = ""
+        self._text.clear()
+        self.setVisible(False)
+
+    # ------------------------------------------------------------------ 内部实现
+
+    def _update_text(self):
+        fm = self._text.fontMetrics()
+        avail = self.width() - 20 - 16 - 8  # 左右内边距 + 图标 + 间距
+        self._text.setText(fm.elidedText(self._full_text, Qt.ElideRight, max(avail, 20)))
+
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        if self._full_text:
+            self._update_text()
+
+    def enterEvent(self, event):
+        self._hovered = True
+        self.update()
+        super().enterEvent(event)
+
+    def leaveEvent(self, event):
+        self._hovered = False
+        self.update()
+        super().leaveEvent(event)
+
+    def mouseReleaseEvent(self, event):
+        if event.button() == Qt.LeftButton and self.rect().contains(event.position().toPoint()):
+            self.clicked.emit()
+        super().mouseReleaseEvent(event)
+
+    def paintEvent(self, event):
+        self._sync_theme()
+        p = QPainter(self)
+        p.setRenderHint(QPainter.Antialiasing, True)
+        rect = QRectF(self.rect()).adjusted(0.5, 0.5, -0.5, -0.5)
+        p.setPen(Qt.NoPen)
+        p.setBrush(self._bg_hover if self._hovered else self._bg)
+        p.drawRoundedRect(rect, 6.0, 6.0)
+        p.end()
+        super().paintEvent(event)
+
+    def _sync_theme(self):
+        """按当前深浅主题刷新底色/文字/图标色（仅在深浅切换时重新应用）"""
+        win = self.window()
+        pal = win.palette() if win is not None else QApplication.palette()
+        bg = pal.color(QPalette.Window)
+        dark = (bg.red() * 0.299 + bg.green() * 0.587 + bg.blue() * 0.114) < 128
+        if dark == self._dark:
+            return
+        self._dark = dark
+        if dark:
+            self._bg, self._bg_hover = QColor("#262626"), QColor("#2f2f2f")
+            fg, icon = "#a0a0a0", "#a0a0a0"
+        else:
+            self._bg, self._bg_hover = QColor("#f1f3f5"), QColor("#e7eaee")
+            fg, icon = "#495057", "#868e96"
+        self._text.setStyleSheet(
+            f"color: {fg}; font-size: 12px; background: transparent; border: none;")
+        self._icon.setPixmap(_render_megaphone_icon(icon))
 
 
 class MainWindow(QMainWindow):
@@ -40,6 +160,7 @@ class MainWindow(QMainWindow):
         self._cache_watcher = None  # 文件系统监控器
         self._cache_refresh_timer = None  # 缓存刷新延迟定时器
         self._announce_capsule = CapsuleNotification()  # 公告提示胶囊
+        self._announcement = None  # 当前公告 (版本, 正文)，主界面入口持久显示直到新公告
         
         self.init_ui()
         self._setup_cache_watcher()
@@ -195,7 +316,12 @@ class MainWindow(QMainWindow):
         button_layout.addWidget(self.join_room_btn)
         
         main_layout.addLayout(button_layout)
-        
+
+        # 公告持久入口（细条）：有公告时显示，点击查看完整公告；默认隐藏不占布局
+        self._announce_entry = AnnouncementEntry()
+        self._announce_entry.clicked.connect(self._on_announcement_clicked)
+        main_layout.addWidget(self._announce_entry)
+
         # 弹性空间
         main_layout.addSpacerItem(QSpacerItem(20, 40, QSizePolicy.Minimum, QSizePolicy.Expanding))
         
@@ -304,6 +430,7 @@ class MainWindow(QMainWindow):
         """打开设置对话框（非模态；缓存被清空时同步刷新主界面缓存占用）"""
         self._settings_dialog = SettingsDialog(self)
         self._settings_dialog.cache_changed.connect(self._refresh_cache_size)
+        self._settings_dialog.announcements_toggled.connect(self._on_announcements_toggled)
         self._settings_dialog.show()
     
     def _get_language_text(self) -> str:
@@ -345,7 +472,7 @@ class MainWindow(QMainWindow):
                         join_btn.setText(I18n.tr('join_room'))
                 
                 # 底部按钮（布局：stretch, lang_btn, stretch, manage_cache_btn, stretch, about_btn, stretch）
-                bottom_layout = layout.itemAt(5)
+                bottom_layout = layout.itemAt(6)
                 if bottom_layout:
                     # manage_cache_btn（设置入口）在索引 3
                     manage_cache_btn = bottom_layout.itemAt(3).widget()
@@ -355,6 +482,9 @@ class MainWindow(QMainWindow):
                     about_btn = bottom_layout.itemAt(5).widget()
                     if about_btn:
                         about_btn.setText(I18n.tr('about'))
+
+                # 公告入口（语言切换后按当前语言刷新预览，持久显示）
+                self._refresh_announcement_entry()
 
                 # 版本和缓存信息
                 if self._version_label:
@@ -405,9 +535,10 @@ class MainWindow(QMainWindow):
     # ---------- 公告 ----------
 
     def _start_announcement_check(self):
-        """公告拉取：开启接收后程序启动时后台静默拉取一次，新公告以顶部胶囊提示"""
+        """公告拉取：开启接收时先恢复已接收公告的持久入口，再后台静默拉取一次新公告"""
         if not UserConfig.get_receive_announcements():
             return
+        self._restore_announcement_entry()
 
         def _fetch():
             version, text = fetch_announcement()
@@ -415,14 +546,57 @@ class MainWindow(QMainWindow):
 
         threading.Thread(target=_fetch, daemon=True).start()
 
+    def _restore_announcement_entry(self):
+        """从 config.json 恢复已接收公告（入口持久显示，不重播胶囊）。
+
+        若只有版本号而无正文（旧版本逻辑或异常中断的残留），视为未接收：
+        清空版本号，让本次拉取把服务器公告当新公告处理并补齐正文。
+        """
+        version = UserConfig.get_last_announcement()
+        text = UserConfig.get_last_announcement_text()
+        if version and not text:
+            UserConfig.set_last_announcement("")
+            return
+        if version and text:
+            self._announcement = (version, text)
+            self._refresh_announcement_entry()
+
+    def _on_announcements_toggled(self, enabled: bool):
+        """「接收推送公告」开关：关闭即隐藏主界面公告入口；重新开启时恢复已接收公告"""
+        if enabled:
+            self._restore_announcement_entry()
+        else:
+            self._announcement = None
+            self._announce_entry.clear_announcement()
+
     def _on_announcement_fetched(self, version: str, text: str):
-        """公告拉取结果：仅当版本新于已记录值时显示胶囊并更新记录（静默失败）"""
+        """公告拉取结果：仅当版本新于已记录值时播放胶囊并显示主界面持久入口（静默失败）"""
         if not version or not text:
             return
         if not is_newer(version, UserConfig.get_last_announcement()):
             return
+        self._announcement = (version, text)
         self._announce_capsule.show_announcement(text)
         UserConfig.set_last_announcement(version)
+        UserConfig.set_last_announcement_text(text)
+        self._refresh_announcement_entry()
+
+    def _refresh_announcement_entry(self):
+        """按当前语言刷新公告入口预览（持久显示，直到收到新公告才更新）"""
+        if not self._announcement:
+            return
+        version, text = self._announcement
+        prefix = f"{I18n.tr('announcement')}：" if I18n.get_language() == "zh_CN" \
+            else f"{I18n.tr('announcement')}: "
+        self._announce_entry.set_announcement(prefix + text)
+
+    def _on_announcement_clicked(self):
+        """点击公告入口：弹出完整公告详情窗口"""
+        if not self._announcement:
+            return
+        version, text = self._announcement
+        dialog = AnnouncementDialog(text, self)
+        dialog.exec()
 
     def _on_update_clicked(self, event):
         """点击提醒标签：打开下载落地页（中文 Gitee / 其他 GitHub）"""

@@ -8,15 +8,28 @@
 
 </div>
 
+<p align="center">
+  <a href="https://github.com/LisseldeE/LANSyncBox/releases"><img src="https://img.shields.io/badge/releases-R1.0.0.0-3b82f6" alt="releases R1.0.0.0"></a>
+  <a href="LICENSE"><img src="https://img.shields.io/github/license/LisseldeE/LANSyncBox" alt="License"></a>
+  <img src="https://img.shields.io/badge/platform-Windows-blue?logo=windows" alt="Platform">
+  <img src="https://img.shields.io/badge/platform-Linux-orange?logo=linux" alt="Platform">
+</p>
+
+<p align="center">
+  <a href="#screenshots">Screenshots</a> |
+  <a href="#project-information">Project Info</a> |
+  <a href="#system-support">Download</a> |
+  <a href="#usage">Usage</a> |
+  <a href="#sync-logic">Sync Logic</a> |
+  <a href="#installation">Installation</a> |
+  <a href="#open-source-license">License</a>
+</p>
+
 > ⚠️ **Beta Notice**: This branch (`pro`) is the **Pro** edition of [**LANSyncBox**](https://github.com/LisseldeE/LANSyncBox/tree/main), under active development. Features are not yet fully stable and may change significantly. It is currently in the Beta testing stage — do not use it in production.
 
-## Introduction
+## Project Introduction
 
 LANSyncBox Pro is the upgraded version of [LANSyncBox](https://github.com/LisseldeE/LANSyncBox/tree/main). It focuses on LAN multi-user collaboration. Compared to the standard edition, Pro is introducing several new capabilities — **Delivery** for cross-device copy & paste, top-edge **quick-add** by drag-and-drop, Collect mode, and more — under continuous development.
-
-## Version Statement
-
-The Pro edition will remain **open source** and will not become a paid product. Because this edition involves low-level changes, it may not be able to connect with the standard edition in future iterations. The Pro edition will be updated independently from the standard edition, and will not be merged into the main branch of the repository.
 
 ## Version Comparison
 
@@ -34,6 +47,12 @@ The Pro edition will remain **open source** and will not become a paid product. 
 | **Image / file peer-to-peer delivery** | — | ⭐ **New** |
 | **Top quick-add** | — | ⭐ **New** |
 | **Sync / Collect modes** | — | ⭐ **New** |
+
+## Screenshots
+
+| Main Interface | Sync Interface |
+| :---: | :---: |
+| ![Main Interface](https://lisseldee.github.io/assets/images/webp/1p-3.webp) | ![Sync Interface](https://lisseldee.github.io/assets/images/webp/1p-4.webp) |
 
 ## New Highlights (In Progress)
 
@@ -56,16 +75,110 @@ The Pro edition will remain **open source** and will not become a paid product. 
 - **File Operations**: add, create, copy, cut, paste, delete, rename; double-click for read-only preview
 - **Interface**: smooth Qt6 UI, real-time Chinese/English switching, visible transfer progress
 
+## Project Information
+
+- **Project Name**: LANSyncBox Pro
+- **Project Author**: Lisselde_E
+- **License**: GNU General Public License v3.0
+- **Project Homepage**: https://lisseldee.github.io/#1
+- **Project Repository**: https://github.com/LisseldeE/LANSyncBox/tree/pro
+
+## System Support
+
+<div align="center">
+
+| Operating System | x64 (AMD64) | ARM64 |
+| :--- | :---: | :---: |
+| Windows | ✅ | ❌ |
+| Linux | ✅ | ❌ |
+| macOS | ❌ | ❌ |
+
+</div>
+
+> Currently covers Windows 10/11 and Linux (x64) only; macOS support is on the roadmap.
+
+## Download
+
+<p align="center">
+  <a href="https://github.com/LisseldeE/LANSyncBox/releases">
+    <img src="https://img.shields.io/badge/GitHub-Releases-181717?style=flat-square&logo=github&logoColor=white" alt="GitHub Releases">
+  </a>
+  &nbsp;&nbsp;
+  <a href="https://gitee.com/Lisselde_E/LANSyncBox/releases">
+    <img src="https://img.shields.io/badge/Gitee-Mirror-C71D23?style=flat-square&logo=gitee&logoColor=white" alt="Gitee Mirror">
+  </a>
+</p>
+
+> 💡 Recommended for users in China: Gitee Mirror
+
 ## Usage
 
-- **Host (Create Connection)**: click "Create Connection" → optional password → create, entering the sync window
-- **Client (Join Connection)**: click "Join Connection" → enter/select room code → pre-validate password if required → connect, auto full sync from host
+### Host (Create Connection)
+
+1. Click "Create Connection" button
+2. Optional: Set password protection
+3. Click create to enter sync status window
+
+### Client (Join Connection)
+
+1. Click "Join Connection" button
+2. Enter or select room code
+3. If password required, enter directly in join dialog for pre-verification
+4. Verification failures are displayed directly in the join dialog, allowing immediate retry with corrected info
+5. Click connect - automatic full sync from host
+
+## Sync Logic
+
+### Endpoint Roles
+
+| End | Role |
+| :--- | :--- |
+| **Host** | Maintains file list, syncs changes to all clients in real-time; manages read/write permissions of each client; receives client files and forwards to others |
+| **Client** | Uploads file changes to host (not directly to other clients); incremental sync after manual reconnect |
+| **Conflict** | The version with the latest modification time wins |
+
+### Sync Mechanisms
+
+| Mechanism | Description |
+| :--- | :--- |
+| **Real-time Sync** | File changes recorded via operation list and dispatched in real-time |
+| **Transfer Protocol** | TCP + custom protocol |
+| **Streaming Transfer** | Chunked streaming to avoid loading entire files into memory |
+| **Concurrency Control** | Max 5 files transferred simultaneously to optimize resource usage |
+| **Resumable Sending** | Interrupted sends only resume the remaining bytes without resending what was already sent; brief back-off when the receiver is busy keeps latency realistic |
+| **Integrity Check** | Validates file size on completion, discards incomplete files |
+| **Transfer Cancellation** | Auto-cancels on file change and notifies receiver to clean up |
+| **Host Offline** | All clients notified "Connection disconnected" |
+
+## Change Log
+
+See [Changelog](https://github.com/LisseldeE/LANSyncBox/blob/pro/CHANGELOG.md)
 
 ## Tech Stack
 
 - Python 3.x
 - Qt6 (PySide6)
 - Custom TCP Protocol
+
+## Installation
+
+### System Requirements
+- Windows 10 or later (64-bit)
+- Linux x64 (amd64) distributions
+
+### Installation Methods
+- **Windows**: Download the installer from [GitHub Releases](https://github.com/LisseldeE/LANSyncBox/releases) or [Gitee Mirror](https://gitee.com/Lisselde_E/LANSyncBox/releases), then run it
+- **Linux (deb package)**: Download the architecture-appropriate `.deb` package from [GitHub Releases](https://github.com/LisseldeE/LANSyncBox/releases), then install it from the terminal:
+  ```bash
+  sudo apt install -y ./lansyncbox_*.deb
+  ```
+
+### Running
+- **Windows**: After installation, launch LANSyncBox Pro from the Start menu or desktop shortcut
+- **Linux**: Launch LANSyncBox from the app menu (Activities); if it reports missing system dependencies at runtime, run:
+  ```bash
+  sudo apt install -y libxcb-cursor0 libgl1 libxkbcommon-x11-0
+  ```
 
 ## Open Source License
 

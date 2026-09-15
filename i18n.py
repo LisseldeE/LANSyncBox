@@ -31,6 +31,7 @@ class I18n:
             "manage_cache": "管理缓存",
             "manage_cache_error": "无法打开缓存文件夹",
             "manage_cache_not_found": "缓存文件夹不存在",
+            "announcement": "公告",
 
             # 设置对话框
             "settings_category_general": "常规",
@@ -331,6 +332,7 @@ class I18n:
             "manage_cache": "Manage Cache",
             "manage_cache_error": "Cannot open cache folder",
             "manage_cache_not_found": "Cache folder does not exist",
+            "announcement": "Announcement",
 
             # Settings dialog
             "settings_category_general": "General",
