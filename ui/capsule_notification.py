@@ -402,6 +402,30 @@ class _CapsuleItem(QFrame):
         self._transferring = False
         self._present()
 
+    def show_announcement(self, text: str):
+        """公告提示态：左侧“公告”标签 + 纯文本胶囊，不可点击，由协调者定时收起。
+
+        公告与投递同款标签样式（左侧蓝底小标，文字换成“公告”）；正文全量
+        显示不做 320px 中段省略——放开标题宽度上限，仅在超过屏幕可用宽度时
+        才按屏幕边缘省略。复用提示态生命周期（协调者按正文长度决定悬浮时长）。
+        与 show_hint 同样不抢焦点、不打断用户操作。
+        """
+        self._stop_all()
+        self._refresh_theme()
+        self._hint_mode = True
+        self._tag.setText("公告")
+        self._tag.setVisible(True)
+        # 全量显示：解除标题 320px 宽度上限（超出屏幕宽时才由 _screen_max_w 兜底省略）
+        self._title.set_max_width(100000)
+        self._title.setText(text)
+        self._hint.setVisible(False)
+        self._bar.setVisible(False)
+        self._bar.setValue(0)
+        self._icon.setVisible(False)
+        self._queue_waiting = 0
+        self._transferring = False
+        self._present()
+
     def ask_replace(self, title: str, subtitle: str):
         """询问态：目标目录已有同名文件，展示"替换/取消"按钮等待用户决策。
 
@@ -739,6 +763,11 @@ class _CapsuleItem(QFrame):
         self._anim.stop()
         self._check_anim.stop()
         self._resize_group.stop()
+        # 公告提示态会换用“公告”标签并放开标题宽度上限；其余任何状态进入时
+        # 一律复位为“投递”标签 + 标题 320px 省略上限
+        self._tag.setText("投递")
+        self._tag.setVisible(True)
+        self._title.set_max_width(320)
 
     def _on_check_done(self):
         # 对钩停留片刻后淡出
@@ -982,6 +1011,25 @@ class CapsuleNotification(QObject):
         self._relayout()
         self._avail_timer.start(duration_ms if duration_ms is not None
                                 else self._ERROR_MS)
+
+    def show_announcement(self, text: str, duration_ms: int | None = None):
+        """公告提示：顶部胶囊显示公告正文（无"投递"标识），自动收起。
+
+        与 show_hint 同理不抢焦点、不响应点击，期间新到的可用/提示/错误消息
+        不覆盖，直到公告收起。悬浮时长默认按正文长度自适应——短公告短显示、
+        长公告长显示（约 1.8s + 每字 80ms，上限 8s），避免长短不一的公告
+        读不完或空转。冲突询问期间不覆盖。
+        """
+        if self._ask_active:
+            return
+        self._hint_active = True
+        self._avail_timer.stop()
+        self._available_session = None
+        self._available.show_announcement(text)
+        self._relayout()
+        if duration_ms is None:
+            duration_ms = min(1800 + 80 * len(text), 8000)
+        self._avail_timer.start(duration_ms)
 
     def ask_replace(self, title: str, subtitle: str, session_id=None):
         """冲突询问：可用槽位显示"替换/取消"按钮，等待用户对同名文件的决策。

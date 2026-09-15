@@ -14,7 +14,7 @@ from PySide6.QtWidgets import (
     QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, 
     QLabel, QPushButton, QTextEdit, QFrame, QSplitter, QMessageBox,
     QTableWidget, QTableWidgetItem, QProgressBar, QHeaderView, QApplication,
-    QGraphicsOpacityEffect
+    QGraphicsOpacityEffect, QCheckBox
 )
 from PySide6.QtCore import Qt, Signal, QEvent, QMetaObject, Q_ARG, Slot, QTimer, QPropertyAnimation, QEasingCurve, QSize, QVariantAnimation, QAbstractAnimation, QRectF, QPointF
 from PySide6.QtGui import (QColor, QIcon, QPixmap, QCursor, QPalette, QKeySequence,
@@ -62,38 +62,48 @@ def _render_mode_swap_icon() -> QIcon:
 
 
 class ModeSegmentedControl(QWidget):
-    """同步/收集 分段切换胶囊
+    """双档分段切换胶囊（通用）
 
-    - 圆角长条胶囊，内含"同步""收集"两个选项；
+    - 圆角长条胶囊，内含左右两个选项；
     - 激活选项带一个可左右滑动的焦点气泡（QVariantAnimation 驱动，280ms OutCubic）；
-    - 切换中（等待全部连接端 ACK）禁用点击并整体降透明度；
-    - 点击某一侧发起切换，是否执行由 SyncWindow 决定。
+    - 切换中（等待对端确认）禁用点击并切换光标；
+    - 点击某一侧发起切换，是否执行由使用方决定。
+    - 默认档位为同步/收集模式；传 values/labels 可复用为只读/读写权限胶囊。
     """
 
-    mode_switch_requested = Signal(str)  # 目标模式 "sync" / "collect"
+    mode_switch_requested = Signal(str)  # 目标档位（值取自 values）
 
     _MARGIN = 3    # 气泡内边距
     _HEIGHT = 26   # 胶囊高度（紧凑精致）
 
-    def __init__(self, parent=None):
+    def __init__(self, values=("sync", "collect"), labels=None, parent=None):
         super().__init__(parent)
         self.setFixedHeight(self._HEIGHT)
         self.setAttribute(Qt.WA_Hover, True)
         self.setMouseTracking(True)   # 无需按键即可跟踪鼠标，用于半区悬浮反馈
         self.setCursor(Qt.PointingHandCursor)
-        self._mode = "sync"        # 当前激活模式
-        self._pos = 0.0            # 气泡位置：0.0=同步(左)，1.0=收集(右)
-        self._switching = False    # 切换进行中（等待 ACK）
+        self._values = values                      # 左右档位值
+        self._labels = labels or (
+            I18n.tr('mode_switch_to_sync'),
+            I18n.tr('mode_switch_to_collect'),
+        )                                          # 左右档位文案
+        self._value = values[0]        # 当前激活档位
+        self._pos = 0.0                # 气泡位置：0.0=左档，1.0=右档
+        self._switching = False        # 切换进行中（等待对端确认）
         self._hovered = False
-        self._hover_side = -1      # 悬浮所在半区：0=左/同步，1=右/收集，-1=无
+        self._hover_side = -1          # 悬浮所在半区：0=左，1=右，-1=无
         self._anim = None
 
     def set_mode(self, mode: str, animate: bool = True):
-        """设置激活模式，气泡（可选）动画滑向对应侧"""
-        if mode not in ("sync", "collect"):
+        """设置激活档位，气泡（可选）动画滑向对应侧（兼容旧调用）"""
+        self.set_value(mode, animate)
+
+    def set_value(self, value: str, animate: bool = True):
+        """设置激活档位，气泡（可选）动画滑向对应侧"""
+        if value not in self._values:
             return
-        self._mode = mode
-        target = 0.0 if mode == "sync" else 1.0
+        self._value = value
+        target = 0.0 if value == self._values[0] else 1.0
         if animate and abs(target - self._pos) > 1e-3:
             self._animate_to(target)
         else:
@@ -109,7 +119,11 @@ class ModeSegmentedControl(QWidget):
             self.update()
 
     def mode(self) -> str:
-        return self._mode
+        """返回当前激活档位（兼容旧调用）"""
+        return self._value
+
+    def value(self) -> str:
+        return self._value
 
     def is_switching(self) -> bool:
         return self._switching
@@ -169,8 +183,8 @@ class ModeSegmentedControl(QWidget):
     def mousePressEvent(self, event):
         if event.button() == Qt.LeftButton and not self._switching:
             x = event.position().x()
-            target = "collect" if x >= self.width() / 2.0 else "sync"
-            if target != self._mode:
+            target = self._values[1] if x >= self.width() / 2.0 else self._values[0]
+            if target != self._value:
                 self.mode_switch_requested.emit(target)
         super().mousePressEvent(event)
 
@@ -196,7 +210,7 @@ class ModeSegmentedControl(QWidget):
         painter.drawRoundedRect(QRectF(0, 0, w, h), r, r)
 
         # 未选中半区的悬浮反馈：鼠标悬浮在未选中的选项上时，其下垫一层淡淡灰底
-        active_i = 0 if self._mode == "sync" else 1
+        active_i = 0 if self._value == self._values[0] else 1
         if (self._hovered and not self._switching
                 and self._hover_side >= 0 and self._hover_side != active_i):
             m0 = self._MARGIN
@@ -220,11 +234,8 @@ class ModeSegmentedControl(QWidget):
         painter.drawRoundedRect(bubble, (h - 2 * m) / 2.0, (h - 2 * m) / 2.0)
 
         # 两个选项文字：激活侧深色（气泡为白系，深浅模式均易读），未激活侧灰
-        for i, (label, active) in enumerate((
-            (I18n.tr('mode_switch_to_sync'), self._mode == "sync"),
-            (I18n.tr('mode_switch_to_collect'), self._mode == "collect"),
-        )):
-            if active:
+        for i, label in enumerate(self._labels):
+            if i == active_i:
                 painter.setPen(QColor("#1f2328"))
             else:
                 painter.setPen(QColor("#767d86" if not dark else "#a0a0a0"))
@@ -232,32 +243,135 @@ class ModeSegmentedControl(QWidget):
                              Qt.AlignCenter, label)
 
 
-class ModeToggleCard(QFrame):
-    """同步模式切换卡片（主机端专用）
+class PermSegmentedControl(ModeSegmentedControl):
+    """只读/读写 权限分段切换胶囊
 
-    状态卡与日志卡之间的窄卡片：卡片短标题与分段胶囊同一行，紧凑精致。
+    复用模式切换胶囊组件：左右滑动焦点气泡、纯文案双档（只读/读写），
+    去 ⇄ 图标保持极简；切换中（等待对端 ACK）禁用点击，由使用方决定是否执行。
     """
 
-    mode_switch_requested = Signal(str)
+    perm_switch_requested = Signal(str)  # 目标权限 "ro"（只读） / "rw"（读写）
+
+    def __init__(self, parent=None):
+        super().__init__(
+            values=("ro", "rw"),
+            labels=(I18n.tr('perm_read_only'), I18n.tr('perm_read_write')),
+            parent=parent,
+        )
+        self.mode_switch_requested.connect(self.perm_switch_requested)
+
+    def set_perm(self, perm: str, animate: bool = True):
+        """设置激活权限档位，气泡（可选）动画滑向对应侧"""
+        self.set_value(perm, animate)
+
+    def perm(self) -> str:
+        return self.value()
+
+
+class PermManageButton(QPushButton):
+    """权限管理按钮（胶囊形纯文字，无图标、无悬浮提示）
+
+    与左侧模式切换胶囊等宽同高（宽度由使用方统一设置），文字水平居中，
+    与「同步/收集」双档胶囊形成等宽节奏，均衡协调；
+    透明底 + hover 浅灰反馈，文字随深浅模式适配。
+    """
+
+    _HEIGHT = 26  # 与模式切换胶囊同高，顶部对齐不割裂
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setFixedHeight(self._HEIGHT)
+        self.setCursor(Qt.PointingHandCursor)
+        self.setFlat(True)
+        self._hovered = False
+        self.setText(I18n.tr('perm_manage_btn'))
+        self.setAttribute(Qt.WA_Hover, True)
+        self.setStyleSheet("border: none; background: transparent;")
+
+    def _is_dark(self) -> bool:
+        win = self.window()
+        pal = win.palette() if win is not None and win is not self else QApplication.palette()
+        bg = pal.color(QPalette.Window)
+        return (bg.red() * 0.299 + bg.green() * 0.587 + bg.blue() * 0.114) < 128
+
+    def enterEvent(self, event):
+        self._hovered = True
+        self.update()
+        super().enterEvent(event)
+
+    def leaveEvent(self, event):
+        self._hovered = False
+        self.update()
+        super().leaveEvent(event)
+
+    def paintEvent(self, event):
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.Antialiasing, True)
+        dark = self._is_dark()
+        w, h = self.width(), self.height()
+        r = h / 2.0
+
+        # 常驻底板：与模式切换胶囊底板一致的玻璃色，保证按钮有明确底样式
+        bg = QColor(0, 0, 0, 12) if not dark else QColor(255, 255, 255, 26)
+        painter.setPen(Qt.NoPen)
+        painter.setBrush(bg)
+        painter.drawRoundedRect(QRectF(0, 0, w, h), r, r)
+
+        # 悬浮反馈：在常驻底板上再叠一层更明显的底（不被底板淹没，干扰悬浮样式）
+        if self._hovered:
+            painter.setBrush(QColor(0, 0, 0, 26) if not dark else QColor(255, 255, 255, 42))
+            painter.drawRoundedRect(QRectF(0, 0, w, h), r, r)
+
+        # 文字水平居中，颜色随深浅模式适配
+        painter.setPen(QColor("#a0a0a0" if dark else "#666"))
+        painter.setFont(self.font())
+        painter.drawText(QRectF(0, 0, w, h), Qt.AlignCenter, self.text())
+
+        painter.end()
+
+
+class RoomManageCard(QFrame):
+    """房间管理卡片（主机端专用，两行布局）
+
+    状态卡与日志卡之间的窄卡片：第一行短标题「房间管理」居左，
+    第二行 模式切换胶囊靠左、权限管理按钮靠右，中间 stretch 弹性撑开
+    （沿用原版切换卡片的贴边对齐方式），左右留白由 margins 统一对称；
+    紧凑精致，不挤占下方日志区。
+    """
+
+    _BTN_W = 120  # 模式切换胶囊与权限按钮等宽（略长于胶囊收敛宽度，视觉均衡）
+
+    mode_switch_requested = Signal(str)   # 模式切换目标 "sync" / "collect"
+    perm_manage_clicked = Signal()        # 点击权限管理按钮（弹出权限管理面板）
 
     def __init__(self, mode: str = "sync", parent=None):
         super().__init__(parent)
-        self.setFrameShape(QFrame.StyledPanel)
-        layout = QHBoxLayout(self)
-        layout.setContentsMargins(10, 5, 10, 5)
-        layout.setSpacing(8)
+        self.setFrameShape(QFrame.StyledPanel)  # 底板与其余卡片一致
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(10, 6, 10, 6)
+        layout.setSpacing(5)
 
-        # 标题靠左、胶囊靠右的经典设置行布局
-        self._title = QLabel(I18n.tr('mode_card_title'))
+        # 第一行：短标题（居左，随深浅模式适配）
+        self._title = QLabel(I18n.tr('room_manage_title'))
         self._title.setAlignment(Qt.AlignVCenter | Qt.AlignLeft)
         layout.addWidget(self._title)
 
-        layout.addStretch()
-
+        # 第二行：seg 靠左、perm 靠右（原版右对齐方式），中间 stretch 弹性
+        btn_row = QHBoxLayout()
+        btn_row.setContentsMargins(0, 0, 0, 0)
+        btn_row.setSpacing(8)
         self.seg = ModeSegmentedControl()
-        self.seg.setFixedWidth(132)  # 窄胶囊：左右更收敛
+        self.seg.setFixedWidth(self._BTN_W)
         self.seg.mode_switch_requested.connect(self.mode_switch_requested)
-        layout.addWidget(self.seg)
+        btn_row.addWidget(self.seg)
+
+        btn_row.addStretch()
+
+        self.perm_btn = PermManageButton()
+        self.perm_btn.setFixedWidth(self._BTN_W)  # 与胶囊等宽，大小一致
+        self.perm_btn.clicked.connect(self.perm_manage_clicked)
+        btn_row.addWidget(self.perm_btn)
+        layout.addLayout(btn_row)
 
         self._refresh_title_color()
         self.seg.set_mode(mode, animate=False)
@@ -321,6 +435,7 @@ class SyncWindow(QMainWindow):
         # 模式状态（"sync"同步 / "collect"收集；主机端=server.mode，连接端=client.mode）
         self._mode = "sync"
         self._mode_switching = False  # 模式切换进行中（等待连接端 ACK）
+        self._perm_dialog = None      # 权限管理面板（懒创建，仅主机端）
 
         # 顶部拖拽放置区（快捷添加文件）：仅在房间连接就绪后创建
         self._drop_zone = None
@@ -480,11 +595,12 @@ class SyncWindow(QMainWindow):
 
         left_layout.addWidget(info_frame)
 
-        # 模式切换卡片（仅主机端，位于状态卡与日志卡之间）
+        # 房间管理卡片（仅主机端，位于状态卡与日志卡之间：标题行 + 模式切换/权限管理按钮行）
         if self.is_host:
-            self.mode_toggle_card = ModeToggleCard(self._mode)
-            self.mode_toggle_card.mode_switch_requested.connect(self.on_mode_switch_clicked)
-            left_layout.addWidget(self.mode_toggle_card)
+            self.room_card = RoomManageCard(self._mode)
+            self.room_card.mode_switch_requested.connect(self.on_mode_switch_clicked)
+            self.room_card.perm_manage_clicked.connect(self.on_perm_manage_clicked)
+            left_layout.addWidget(self.room_card)
 
         # 左侧下方：同步记录表格（使用 stretch=1 自动扩展）
         log_frame = QFrame()
@@ -732,6 +848,8 @@ class SyncWindow(QMainWindow):
             self.client.files_notify_received.connect(self.on_files_notify)
             # 连接端模式变更信号
             self.client.mode_changed.connect(self.on_client_mode_changed)
+            # 连接端权限变更信号（只读/读写热切换 → UI 禁用/恢复列表修改入口）
+            self.client.perm_changed.connect(self.on_client_perm_changed)
 
             # 连接到服务器（复用模式下 client 已验证通过，直接记录日志）
             host = self.host_address or "127.0.0.1"
@@ -744,6 +862,9 @@ class SyncWindow(QMainWindow):
                     self.on_client_mode_changed(self.client.mode)
                     if self.client.mode == "sync":
                         self._perform_full_sync()
+                # 复用连接：PERM_UPDATE 同样早于 UI 信号连接，补偿只读/读写 UI 状态
+                if self.client.perm_received:
+                    self.on_client_perm_changed(self.client.perm)
             elif self.client.connect_to_server(host, port):
                 self._add_record(f"{host}:{port}", "连接", "")
             else:
@@ -1850,16 +1971,16 @@ class SyncWindow(QMainWindow):
             return
         if self.server.switch_mode(target_mode):
             # 乐观更新：气泡立即滑向目标侧，随后的切换中置灰持续到全部 ACK 到齐
-            if hasattr(self, 'mode_toggle_card'):
-                self.mode_toggle_card.set_mode(target_mode, animate=True)
+            if hasattr(self, 'room_card'):
+                self.room_card.set_mode(target_mode, animate=True)
 
     def on_server_mode_switching(self, new_mode: str):
         """主机端模式切换发起（等待连接端 ACK 期间）"""
         self._mode_switching = True
         self._update_sync_btn_state()
         # 切换中：置灰分段胶囊，等待全部连接端 ACK
-        if self.is_host and hasattr(self, 'mode_toggle_card'):
-            self.mode_toggle_card.set_switching(True)
+        if self.is_host and hasattr(self, 'room_card'):
+            self.room_card.set_switching(True)
 
     def on_server_mode_changed(self, old_mode: str, new_mode: str):
         """主机端模式切换完成（全部连接端确认后触发）"""
@@ -1867,7 +1988,7 @@ class SyncWindow(QMainWindow):
         self._mode = new_mode
         self._update_mode_label()
         self._update_sync_btn_state()
-        self._add_record("", "系统", f"{self._mode_name(old_mode)} -> {self._mode_name(new_mode)}")
+        self._add_record(f"{self._mode_name(old_mode)} → {self._mode_name(new_mode)}", "系统")
         # 本端 UI 传输队列同步处理：收集转同步取消全部，同步转收集仅清空排队
         if new_mode == "sync":
             self.transfer_queue.cancel_all_tasks()
@@ -1876,10 +1997,10 @@ class SyncWindow(QMainWindow):
                 self.transfer_queue.queue.clear()
         # 切换完成：恢复分段胶囊可点击；若乐观动画未对齐目标（如被拒绝/异常），
         # 再以动画补位，避免打断进行中的气泡过渡
-        if self.is_host and hasattr(self, 'mode_toggle_card'):
-            self.mode_toggle_card.set_switching(False)
-            if self.mode_toggle_card.mode() != new_mode:
-                self.mode_toggle_card.set_mode(new_mode, animate=True)
+        if self.is_host and hasattr(self, 'room_card'):
+            self.room_card.set_switching(False)
+            if self.room_card.mode() != new_mode:
+                self.room_card.set_mode(new_mode, animate=True)
 
     def on_client_mode_changed(self, new_mode: str):
         """连接端模式变更（收到主机 MODE_RESP/MODE_SWITCH）"""
@@ -1892,6 +2013,26 @@ class SyncWindow(QMainWindow):
         else:
             with self.transfer_queue.lock:
                 self.transfer_queue.queue.clear()
+
+    def on_client_perm_changed(self, perm: str):
+        """连接端权限变更（收到主机 PERM_UPDATE）：应用只读/读写 UI 状态
+
+        - 只读：禁用添加/新建/复制/剪切/粘贴/重命名/删除等全部列表修改入口
+          （_reject_readonly 提示 + 操作栏禁用），拖拽保存/右键保存不受限；
+        - 读写：恢复全部操作。
+        """
+        self.file_list.set_readonly(perm == "ro")
+
+    def on_perm_manage_clicked(self):
+        """房间管理卡片「权限」按钮：打开权限管理面板（懒创建，非模态）"""
+        if not self.is_host or self.server is None:
+            return
+        if self._perm_dialog is None:
+            from ui.perm_dialog import PermManageDialog
+            self._perm_dialog = PermManageDialog(self.server, self)
+        self._perm_dialog.show()
+        self._perm_dialog.raise_()
+        self._perm_dialog.activateWindow()
 
     def _init_drop_zone(self):
         """创建屏顶放置条，启用「把文件/文件夹拖到屏幕顶部」快捷添加。
@@ -1951,7 +2092,7 @@ class SyncWindow(QMainWindow):
         message = Protocol.pack_message(MessageType.FILE_LIST_RESP, '', len(content), False, content)
         self.client.send_bytes(message)
         
-        self._add_record("", "发送", f"发送文件列表: {len(file_list)} 个文件")
+        self._add_record(f"发送文件列表: {len(file_list)} 个文件", "发送")
     
     def on_auth_failed(self, message: str):
         """验证失败"""
@@ -2047,13 +2188,13 @@ class SyncWindow(QMainWindow):
         files_to_request = self._compare_file_lists(local_file_list, remote_file_list)
         
         if files_to_request:
-            self._add_record("", "同步", f"需要同步 {len(files_to_request)} 个文件")
+            self._add_record(f"需要同步 {len(files_to_request)} 个文件", "同步")
             
             # 将文件请求加入传输队列
             for filename in files_to_request:
                 self._request_file_from_server(filename)
         else:
-            self._add_record("", "同步", "无需同步")
+            self._add_record("无需同步", "同步")
     
     def _compare_file_lists(self, local_files: list, remote_files: list) -> list:
         """对比文件列表，找出需要请求的文件
@@ -2408,7 +2549,7 @@ class SyncWindow(QMainWindow):
         # 刷新文件列表
         self.file_list.refresh()
         
-        self._add_record(f"{old_name} -> {new_name}", I18n.tr("log_change"), "")
+        self._add_record(f"{old_name} → {new_name}", I18n.tr("log_change"), "")
         # 只有当没有其他文件正在同步时，才更新状态为"已连接"（连接端保留延迟显示）
         if not self._transfer_rows:
             if self.is_host:
@@ -2525,7 +2666,7 @@ class SyncWindow(QMainWindow):
             with open(file_path, 'w', encoding='utf-8') as f:
                 f.write('\n'.join(lines))
 
-            self._add_record("", "导出", f"日志已导出: {file_path}")
+            self._add_record(f"日志已导出: {file_path}", "导出")
 
         except Exception as e:
             from PySide6.QtWidgets import QMessageBox
@@ -2892,7 +3033,7 @@ class SyncWindow(QMainWindow):
         
         old_name = Path(old_path).name
         new_name = Path(new_path).name
-        self.add_log(I18n.tr("log_change"), f"{old_name} -> {new_name}")
+        self.add_log(I18n.tr("log_change"), f"{old_name} → {new_name}")
         
         # 取消旧文件的传输（如果正在传输）
         old_rel_path = os.path.relpath(old_path, self.room_folder).replace('\\', '/')
@@ -2940,29 +3081,48 @@ class SyncWindow(QMainWindow):
         rel_path = os.path.relpath(dir_path, self.room_folder).replace('\\', '/')
         self.transfer_queue.add_task('dir_create', sync_dir_create, rel_path)
 
-    def on_disconnect(self):
-        """断开连接"""
+    def _confirm_leave(self) -> bool:
+        """退出房间二次确认（勾选「退出且不再询问」后不再弹窗）
+
+        Returns:
+            True 表示确认离开；False 表示取消
+        """
+        if UserConfig.get_confirm_leave_no_ask():
+            return True
+
         # 创建自定义消息框
         msg_box = QMessageBox(self)
         msg_box.setWindowTitle(I18n.tr('confirm_leave'))
         msg_box.setText(I18n.tr('confirm_leave_msg'))
         msg_box.setIcon(QMessageBox.Question)
-        
+
+        # 「退出且不再询问」勾选框（勾选确认后保存到 config.json，之后退出不再二次询问）
+        cb = QCheckBox(I18n.tr('confirm_leave_no_ask'))
+        msg_box.setCheckBox(cb)
+
         # 添加自定义按钮
         yes_btn = msg_box.addButton(I18n.tr('yes'), QMessageBox.YesRole)
         no_btn = msg_box.addButton(I18n.tr('no'), QMessageBox.NoRole)
-        
+
         # 应用全局按钮样式
         yes_btn.setStyleSheet(BUTTON_STYLES['danger'])
         no_btn.setStyleSheet(BUTTON_STYLES['secondary'])
         # 统一按钮宽度，与文件替换的“确定/取消”按钮保持一致
         yes_btn.setFixedWidth(80)
         no_btn.setFixedWidth(80)
-        
+
         msg_box.setDefaultButton(no_btn)
         msg_box.exec()
 
         if msg_box.clickedButton() == yes_btn:
+            if cb.isChecked():
+                UserConfig.set_confirm_leave_no_ask(True)
+            return True
+        return False
+
+    def on_disconnect(self):
+        """断开连接"""
+        if self._confirm_leave():
             self._close_confirmed = True
             self.close()
     
@@ -2979,29 +3139,11 @@ class SyncWindow(QMainWindow):
     def closeEvent(self, event):
         """窗口关闭事件"""
         # 未确认时弹出确认弹窗（点击叉号或外部触发关闭时）
-        if not self._close_confirmed:
-            msg_box = QMessageBox(self)
-            msg_box.setWindowTitle(I18n.tr('confirm_leave'))
-            msg_box.setText(I18n.tr('confirm_leave_msg'))
-            msg_box.setIcon(QMessageBox.Question)
+        if not self._close_confirmed and not self._confirm_leave():
+            event.ignore()
+            return
 
-            yes_btn = msg_box.addButton(I18n.tr('yes'), QMessageBox.YesRole)
-            no_btn = msg_box.addButton(I18n.tr('no'), QMessageBox.NoRole)
-
-            yes_btn.setStyleSheet(BUTTON_STYLES['danger'])
-            no_btn.setStyleSheet(BUTTON_STYLES['secondary'])
-            # 统一按钮宽度（与“是否退出房间”的主对话框一致）
-            yes_btn.setFixedWidth(80)
-            no_btn.setFixedWidth(80)
-
-            msg_box.setDefaultButton(no_btn)
-            msg_box.exec()
-
-            if msg_box.clickedButton() != yes_btn:
-                event.ignore()
-                return
-
-            self._close_confirmed = True
+        self._close_confirmed = True
 
         # 清理传输队列
         self.transfer_queue.clear()

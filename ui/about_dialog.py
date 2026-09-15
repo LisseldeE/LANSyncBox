@@ -18,6 +18,31 @@ from config import Config
 from ui.widgets import AnimatedButton, BUTTON_STYLES, ClickableLabel
 
 
+def fetch_latest_version():
+    """从 GitHub Pages 纯文本文件拉取最新版本号（无 UI 依赖，供主界面自动检查复用）
+
+    返回: (版本号字符串, 错误信息字符串) 元组
+        成功时: ("R7.1.1.0", None)
+        失败时: (None, "错误描述")
+    """
+    ssl_context = ssl.create_default_context()
+    ssl_context.check_hostname = False
+    ssl_context.verify_mode = ssl.CERT_NONE
+
+    req = urllib.request.Request(Config.UPDATE_URL)
+    req.add_header('User-Agent', Config.APP_NAME)
+
+    try:
+        with urllib.request.urlopen(req, timeout=15, context=ssl_context) as response:
+            body = response.read().decode('utf-8').strip()
+        # io 文件为 R 前缀四段（如 R7.1.1.0），校验后直接返回。
+        if not re.match(r'R\d+(\.\d+){0,3}', body):
+            return None, None
+        return body, None
+    except Exception as e:
+        return None, str(e)
+
+
 class AboutDialog(QDialog):
     """关于弹窗"""
 
@@ -28,11 +53,6 @@ class AboutDialog(QDialog):
         flags = Qt.Dialog | Qt.WindowCloseButtonHint
         self.setWindowFlags(flags)
         self.setFixedSize(400, 260)  # 更紧凑的高度
-
-        # SSL 上下文（避免 SSL 证书校验错误导致无法更新）
-        self.ssl_context = ssl.create_default_context()
-        self.ssl_context.check_hostname = False
-        self.ssl_context.verify_mode = ssl.CERT_NONE
 
         self._init_ui()
 
@@ -179,23 +199,8 @@ class AboutDialog(QDialog):
         msg_box.exec_()
 
     def _get_latest_version(self):
-        """从 GitHub Pages 纯文本文件拉取最新版本号
-        返回值: (版本号字符串, 错误信息字符串) 元组
-            成功时: ("R7.1.1.0", None)
-            失败时: (None, "错误描述")
-        """
-        req = urllib.request.Request(Config.UPDATE_URL)
-        req.add_header('User-Agent', Config.APP_NAME)
-
-        try:
-            with urllib.request.urlopen(req, timeout=15, context=self.ssl_context) as response:
-                body = response.read().decode('utf-8').strip()
-            # io 文件为 R 前缀四段（如 R7.1.1.0），校验后直接返回。
-            if not re.match(r'R\d+(\.\d+){0,3}', body):
-                return None, None
-            return body, None
-        except Exception as e:
-            return None, str(e)
+        """从 GitHub Pages 纯文本文件拉取最新版本号（复用模块级函数）"""
+        return fetch_latest_version()
 
     def _check_update(self):
         """检查更新（从 github.io 拉取版本号，下载落地页按语言区分）"""

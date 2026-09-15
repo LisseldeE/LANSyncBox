@@ -4,33 +4,49 @@ Copyright (c) 2026 Lisselde_E <Lisselde.E@outlook.com>.
 Licensed under the GNU General Public License v3.0.
 """
 import os
+import re
+import threading
 from PySide6.QtWidgets import (
     QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
-    QPushButton, QLabel, QFrame, QSpacerItem, QSizePolicy, QMessageBox
+    QPushButton, QLabel, QFrame, QSpacerItem, QSizePolicy
 )
-from PySide6.QtCore import Qt, QSize, QUrl, QFileSystemWatcher, QTimer
+from PySide6.QtCore import Qt, QSize, QUrl, Signal, QFileSystemWatcher, QTimer
 from PySide6.QtGui import QFont, QDesktopServices
 
 from i18n import I18n
 from config import Config, UserConfig
 from ui.create_room_dialog import CreateRoomDialog
 from ui.join_room_dialog import JoinRoomDialog
-from ui.about_dialog import AboutDialog
-from ui.widgets import AnimatedButton, SnapOutlineButton, BUTTON_STYLES
+from ui.about_dialog import AboutDialog, fetch_latest_version
+from ui.settings_dialog import SettingsDialog
+from ui.capsule_notification import CapsuleNotification
+from ui.announcement import fetch_announcement, is_newer
+from ui.widgets import AnimatedButton, SnapOutlineButton, BUTTON_STYLES, ClickableLabel
 
 
 class MainWindow(QMainWindow):
     """主窗口"""
 
+    _update_fetched = Signal(str)  # 自动检查更新结果（新版本号；空串=无需提醒）
+    _announcement_fetched = Signal(str, str)  # 公告拉取结果（版本号, 正文；失败为空串）
+
     def __init__(self):
         super().__init__()
         self._sync_window = None  # 保持同步窗口引用
+        self._settings_dialog = None  # 设置对话框引用（非模态需持有防 GC）
         self._version_label = None  # 版本和缓存信息标签
+        self._update_label = None  # 发现新版本小字提醒标签
+        self._update_version = ""  # 已提醒的新版本号（用于语言切换后刷新文案）
         self._cache_watcher = None  # 文件系统监控器
         self._cache_refresh_timer = None  # 缓存刷新延迟定时器
+        self._announce_capsule = CapsuleNotification()  # 公告提示胶囊
         
         self.init_ui()
         self._setup_cache_watcher()
+        self._update_fetched.connect(self._on_update_fetched)
+        self._announcement_fetched.connect(self._on_announcement_fetched)
+        self._start_auto_update_check()
+        self._start_announcement_check()
 
     def _setup_cache_watcher(self):
         """设置缓存文件夹监控器"""
@@ -200,10 +216,10 @@ class MainWindow(QMainWindow):
         # 弹性空间 - 中间
         bottom_layout.addStretch()
         
-        # 管理缓存按钮（设备像素对齐边框，避免非整数缩放下边框被裁切）
-        self.manage_cache_btn = SnapOutlineButton(I18n.tr('manage_cache'))
+        # 设置按钮（设备像素对齐边框，避免非整数缩放下边框被裁切）
+        self.manage_cache_btn = SnapOutlineButton(I18n.tr('settings'))
         self.manage_cache_btn.setFixedSize(100, 34)
-        self.manage_cache_btn.clicked.connect(self.on_manage_cache)
+        self.manage_cache_btn.clicked.connect(self.on_open_settings)
         bottom_layout.addWidget(self.manage_cache_btn)
         
         # 弹性空间 - 中间
@@ -230,6 +246,19 @@ class MainWindow(QMainWindow):
         self._version_label.setStyleSheet("color: #999; font-size: 11px;")
         self._version_label.setTextFormat(Qt.RichText)  # 支持HTML格式
         main_layout.addWidget(self._version_label)
+
+        # 发现新版本小字提醒（默认隐藏，自动检查发现新版本后显示，可点击打开下载页）
+        self._update_label = ClickableLabel(
+            "",
+            normal_color="#339af0",
+            hover_color="#228be6",
+            underline_on_hover=True,
+        )
+        self._update_label.setAlignment(Qt.AlignCenter)
+        self._update_label.setStyleSheet("font-size: 11px;")
+        self._update_label.setVisible(False)
+        self._update_label.set_click_callback(self._on_update_clicked)
+        main_layout.addWidget(self._update_label)
     
     def on_create_room(self):
         """创建房间"""
@@ -271,15 +300,11 @@ class MainWindow(QMainWindow):
         # 刷新界面
         self._refresh_ui()
     
-    def on_manage_cache(self):
-        """打开 SyncFolder 缓存文件夹"""
-        sync_folder = Config.get_sync_folder()
-        if not sync_folder.exists():
-            QMessageBox.warning(self, I18n.tr('manage_cache'), I18n.tr('manage_cache_not_found'))
-            return
-        url = QUrl.fromLocalFile(str(sync_folder))
-        if not QDesktopServices.openUrl(url):
-            QMessageBox.warning(self, I18n.tr('manage_cache'), I18n.tr('manage_cache_error'))
+    def on_open_settings(self):
+        """打开设置对话框（非模态；缓存被清空时同步刷新主界面缓存占用）"""
+        self._settings_dialog = SettingsDialog(self)
+        self._settings_dialog.cache_changed.connect(self._refresh_cache_size)
+        self._settings_dialog.show()
     
     def _get_language_text(self) -> str:
         """获取语言按钮显示文本"""
@@ -322,10 +347,10 @@ class MainWindow(QMainWindow):
                 # 底部按钮（布局：stretch, lang_btn, stretch, manage_cache_btn, stretch, about_btn, stretch）
                 bottom_layout = layout.itemAt(5)
                 if bottom_layout:
-                    # manage_cache_btn 在索引 3
+                    # manage_cache_btn（设置入口）在索引 3
                     manage_cache_btn = bottom_layout.itemAt(3).widget()
                     if manage_cache_btn:
-                        manage_cache_btn.setText(I18n.tr('manage_cache'))
+                        manage_cache_btn.setText(I18n.tr('settings'))
                     # about_btn 在索引 5
                     about_btn = bottom_layout.itemAt(5).widget()
                     if about_btn:
@@ -338,6 +363,71 @@ class MainWindow(QMainWindow):
                     cache_color = self._get_cache_color(cache_size)
                     version_text = f"{I18n.tr('about_version', version=Config.APP_VERSION)}  |  <span style='color: {cache_color};'>{I18n.tr('cache_size', size=cache_size_str)}</span>"
                     self._version_label.setText(version_text)
+
+                # 发现新版本提醒（语言切换后按当前语言重设文案，可见性保持不变）
+                if self._update_label and self._update_version:
+                    self._update_label.setText(
+                        I18n.tr('settings_update_available', version=self._update_version)
+                    )
+
+    # ---------- 自动检查更新 ----------
+
+    def _start_auto_update_check(self):
+        """自动检查更新：开启后程序启动时后台静默检查一次，有新版本以主界面小字提醒"""
+        if not Config.ENABLE_CHECK_UPDATE or not UserConfig.get_auto_check_update():
+            return
+
+        def _fetch():
+            latest, _ = fetch_latest_version()
+            self._update_fetched.emit(latest or "")
+
+        threading.Thread(target=_fetch, daemon=True).start()
+
+    def _on_update_fetched(self, version: str):
+        """后台检查结果：仅当确实存在新版本时显示主界面小字提醒（静默失败）"""
+        if not version:
+            return
+        if not self._is_newer(version, Config.APP_VERSION):
+            return
+        self._update_version = version
+        self._update_label.setText(I18n.tr('settings_update_available', version=version))
+        self._update_label.setVisible(True)
+
+    @staticmethod
+    def _is_newer(latest: str, current: str) -> bool:
+        """四段式版本号比较（R 前缀），latest > current 返回 True"""
+        latest_match = re.search(r'R(\d+)\.(\d+)\.(\d+)\.(\d+)', latest)
+        current_match = re.search(r'R(\d+)\.(\d+)\.(\d+)\.(\d+)', current)
+        if not latest_match or not current_match:
+            return False
+        return tuple(map(int, latest_match.groups())) > tuple(map(int, current_match.groups()))
+
+    # ---------- 公告 ----------
+
+    def _start_announcement_check(self):
+        """公告拉取：开启接收后程序启动时后台静默拉取一次，新公告以顶部胶囊提示"""
+        if not UserConfig.get_receive_announcements():
+            return
+
+        def _fetch():
+            version, text = fetch_announcement()
+            self._announcement_fetched.emit(version or "", text or "")
+
+        threading.Thread(target=_fetch, daemon=True).start()
+
+    def _on_announcement_fetched(self, version: str, text: str):
+        """公告拉取结果：仅当版本新于已记录值时显示胶囊并更新记录（静默失败）"""
+        if not version or not text:
+            return
+        if not is_newer(version, UserConfig.get_last_announcement()):
+            return
+        self._announce_capsule.show_announcement(text)
+        UserConfig.set_last_announcement(version)
+
+    def _on_update_clicked(self, event):
+        """点击提醒标签：打开下载落地页（中文 Gitee / 其他 GitHub）"""
+        releases_url = Config.GITEE_RELEASES if I18n.get_language() == "zh_CN" else Config.GITHUB_RELEASES
+        QDesktopServices.openUrl(QUrl(releases_url))
     
     def on_about(self):
         """关于"""

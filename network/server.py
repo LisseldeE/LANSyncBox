@@ -44,6 +44,9 @@ class SyncServer(QObject):
     files_notify_received = Signal(bytes)    # 收到文件会话通知（content=JSON 字节），交 UI 展示远程文件胶囊
     mode_switching = Signal(str)      # 模式切换发起 (new_mode)，ACK 未收齐期间 UI 置灰切换按钮
     mode_changed = Signal(str, str)   # 模式切换完成 (old_mode, new_mode)
+    perm_switching = Signal(str, str)       # 权限切换发起 (client_id, new_perm)，ACK 未收齐期间 UI 置灰该行胶囊
+    perm_ack_received = Signal(str, str)    # 权限应用成功回执 (client_id, perm)，UI 落定胶囊
+    perm_switch_failed = Signal(str, str, str)  # 权限切换失败（对端无响应） (client_id, old_perm, new_perm)，UI 回滚胶囊 + toast
     
     # 数据块大小（64KB）
     CHUNK_SIZE = 64 * 1024
@@ -77,6 +80,13 @@ class SyncServer(QObject):
         self._mode_ack_stop = threading.Event()
         self._mode_ack_thread = None
         self._ip_folders_created = set()  # 收集模式下创建过的 IP 文件夹名集合（含已断开连接的遗留文件夹）
+
+        # 权限状态：主机端管理各连接端权限（默认读写，向后兼容）
+        # 权限存储于 self.clients[client_id]['perm'] = "rw"（读写）/ "ro"（只读）
+        self.perm_ack_pending = {}      # {client_id: {'perm': new_perm, 'old_perm': old_perm, 'tries': 重发次数}}
+        self._perm_ack_stop = threading.Event()
+        self._perm_ack_thread = None
+        self.PERM_ACK_MAX_TRIES = 3     # 权限 ACK 补发上限，超过后回滚旧档位并通知 UI
     
     def start(self, port: int = None, exclude_port: int = None) -> bool:
         """启动服务器，尝试多个端口（9527-9536）
@@ -200,7 +210,8 @@ class SyncServer(QObject):
                 break
             # 锁内收集已认证客户端，锁外执行网络IO（符合项目既有「锁内收集、锁外IO」约定）
             with self._lock:
-                targets = [(cid, info) for cid, info in list(self.clients.items()) if info.get('authenticated')]
+                targets = [(cid, info) for cid, info in list(self.clients.items())
+                           if info.get('authenticated')]
             for cid, info in targets:
                 try:
                     self._socket_send(info, Protocol.create_ping(time.time()))
@@ -324,6 +335,15 @@ class SyncServer(QObject):
 
         elif msg_type == MessageType.FILE_BEGIN:
             # 大文件传输开始 - 使用临时文件
+            # 主机兜底：只读端不允许上传（竞态窗口漏网拦截）
+            if self._is_readonly(client_id):
+                self._reject_readonly(client_id, "上传文件", filename)
+                cancel_msg = Protocol.create_file_cancel(filename)
+                try:
+                    self._socket_send(client_info, cancel_msg)
+                except Exception:
+                    pass
+                return
             # 收集模式下路由到连接端 IP 文件夹（接收端 key 仍用原始文件名，落盘路径记录在 target_filename）
             if self.mode == "collect":
                 ip = client_info.get('ip', '')
@@ -537,11 +557,23 @@ class SyncServer(QObject):
                 pass
             if mode == "collect":
                 self._ensure_client_ip_folder(client_id)
+            # 随握手补发当前权限（复用 mode_received 回补机制，防信号早于 UI 连接丢失）
+            perm = client_info.get('perm', "rw")
+            perm_msg = Protocol.create_perm_message(MessageType.PERM_UPDATE, perm)
+            try:
+                self._socket_send(client_info, perm_msg)
+            except Exception:
+                pass
 
         elif msg_type == MessageType.MODE_ACK:
             # 连接端确认切换完成：从等待集合移除，全部到齐后执行切换后续逻辑
             mode = content.decode('utf-8', errors='ignore').strip()
             self._handle_mode_ack(client_id, mode)
+
+        elif msg_type == MessageType.PERM_ACK:
+            # 连接端确认权限应用完成：从等待集合移除，UI 落定胶囊
+            perm = content.decode('utf-8', errors='ignore').strip()
+            self._handle_perm_ack(client_id, perm)
 
     def _handle_files_notify(self, client_id: str, content: bytes):
         """处理主机收到的文件会话通知（复制端→主机）
@@ -630,6 +662,7 @@ class SyncServer(QObject):
 
             # 验证成功
             self.clients[client_id]['authenticated'] = True
+            self.clients[client_id]['perm'] = "rw"  # 新连接端默认读写（向后兼容，老用户无感）
             response = Protocol.create_auth_response(True, "验证成功")
             self._socket_send(self.clients[client_id], response)
             self.log_message.emit(f"客户端 {client_id} 验证成功（版本 {version}）")
@@ -642,6 +675,10 @@ class SyncServer(QObject):
     
     def _handle_delete(self, client_id: str, filename: str):
         """处理删除请求（收集模式下路由到连接端 IP 文件夹，且不转发）"""
+        # 主机兜底：只读端不允许修改同步列表
+        if self._is_readonly(client_id):
+            self._reject_readonly(client_id, "删除文件", filename)
+            return
         # 收集模式下：连接端删除自身文件 → 在对应 IP 文件夹内删除
         target = filename
         if self.mode == "collect":
@@ -673,6 +710,10 @@ class SyncServer(QObject):
     
     def _handle_dir_create(self, client_id: str, dirname: str):
         """处理目录创建（收集模式下路由到连接端 IP 文件夹，且不转发）"""
+        # 主机兜底：只读端不允许修改同步列表
+        if self._is_readonly(client_id):
+            self._reject_readonly(client_id, "创建目录", dirname)
+            return
         target = dirname
         if self.mode == "collect":
             ip = self.clients.get(client_id, {}).get('ip', '')
@@ -696,6 +737,15 @@ class SyncServer(QObject):
     
     def _handle_rename(self, client_id: str, content: bytes):
         """处理变更（重命名/移动）（收集模式下路由到连接端 IP 文件夹，且不转发）"""
+        # 主机兜底：只读端不允许修改同步列表
+        if self._is_readonly(client_id):
+            try:
+                data = content.decode('utf-8').split('|')
+                detail = f"{data[0]} → {data[1]}" if len(data) > 1 else ''
+            except Exception:
+                detail = ''
+            self._reject_readonly(client_id, "变更文件", detail)
+            return
         try:
             data = content.decode('utf-8').split('|')
             old_name = data[0]
@@ -722,7 +772,7 @@ class SyncServer(QObject):
 
             os.rename(old_path, new_path)
 
-            self.log_message.emit(f"变更: {old_target} -> {new_target}")
+            self.log_message.emit(f"变更: {old_target} → {new_target}")
 
             # 发射变更信号
             self.file_renamed.emit(old_name, new_name)
@@ -773,6 +823,10 @@ class SyncServer(QObject):
         if self.mode == "collect":
             self.log_message.emit(f"收集模式，忽略 {client_id} 的文件列表")
             return
+        # 只读端仲裁：单向下拉（只核查本地相对远程缺少的内容）。
+        # 不推送本地改动（不请求其文件）、不覆盖差异文件、不删除本地多余文件、
+        # 不补建其上报的空目录；主机→连接端的缺失补齐与目录结构同步保留。
+        readonly = self._is_readonly(client_id)
         try:
             # 兼容解析新格式（dict）与旧格式（list）
             if isinstance(client_file_list, dict):
@@ -785,20 +839,22 @@ class SyncServer(QObject):
 
             # 同步连接端上报的空目录到主机端（连接端有、主机端缺失的空目录）
             # 每个目录独立容错：单目录失败（如与现有文件同名冲突）不影响其余目录的补建
-            for dirname in client_empty_dirs:
-                if not dirname:
-                    continue
-                try:
-                    dir_path = self._safe_join(dirname)
-                    if os.path.isdir(dir_path):
+            # 只读端不推送本地结构：跳过其空目录补建
+            if not readonly:
+                for dirname in client_empty_dirs:
+                    if not dirname:
                         continue
-                    os.makedirs(dir_path, exist_ok=True)
-                    self.log_message.emit(f"创建目录: {dirname}")
-                    # 发射目录创建信号，并广播给其他连接端（与收到 DIR_CREATE 行为一致）
-                    self.dir_created.emit(dirname)
-                    self._broadcast_dir_create(dirname, exclude_client=client_id)
-                except Exception as e:
-                    self.log_message.emit(f"同步目录结构失败: {e}")
+                    try:
+                        dir_path = self._safe_join(dirname)
+                        if os.path.isdir(dir_path):
+                            continue
+                        os.makedirs(dir_path, exist_ok=True)
+                        self.log_message.emit(f"创建目录: {dirname}")
+                        # 发射目录创建信号，并广播给其他连接端（与收到 DIR_CREATE 行为一致）
+                        self.dir_created.emit(dirname)
+                        self._broadcast_dir_create(dirname, exclude_client=client_id)
+                    except Exception as e:
+                        self.log_message.emit(f"同步目录结构失败: {e}")
 
             # 获取主机端的文件列表
             from sync.file_manager import FileManager
@@ -853,6 +909,10 @@ class SyncServer(QObject):
                 if filename not in host_dict:
                     # 主机端缺失的文件，请求连接端发送
                     files_to_request_from_client.append(filename)
+
+            # 只读端不推送本地改动：不请求其任何文件（单向下拉，主机侧不下发请求）
+            if readonly:
+                files_to_request_from_client = []
             
             # 同步空目录结构
             dir_diff_sent = False
@@ -1186,7 +1246,7 @@ class SyncServer(QObject):
         with self._lock:
             client_info = self.clients.get(client_id)
         if not client_info:
-            self.log_message.emit(f"重新发送失败: {filename} -> {client_id}（客户端已断开）")
+            self.log_message.emit(f"重新发送失败: {filename} → {client_id}（客户端已断开）")
             return
         try:
             if stop_event and stop_event.is_set():
@@ -1195,7 +1255,7 @@ class SyncServer(QObject):
             # 发送 FILE_BEGIN
             begin_msg = Protocol.pack_message(MessageType.FILE_BEGIN, filename, file_size, False, b'', mtime)
             if not self._send_with_cancel(client_info, begin_msg, stop_event):
-                self.log_message.emit(f"重新发送失败: {filename} -> {client_id}")
+                self.log_message.emit(f"重新发送失败: {filename} → {client_id}")
                 return
 
             # 发送数据块
@@ -1215,7 +1275,7 @@ class SyncServer(QObject):
                         self._socket_send(client_info, Protocol.create_file_cancel(filename))
                     except Exception:
                         pass
-                    self.log_message.emit(f"重新发送失败: {filename} -> {client_id}")
+                    self.log_message.emit(f"重新发送失败: {filename} → {client_id}")
                     return
                 sent_size += len(chunk)
 
@@ -1232,11 +1292,11 @@ class SyncServer(QObject):
                     self._socket_send(client_info, Protocol.create_file_cancel(filename))
                 except Exception:
                     pass
-                self.log_message.emit(f"重新发送失败: {filename} -> {client_id}")
+                self.log_message.emit(f"重新发送失败: {filename} → {client_id}")
                 return
-            self.log_message.emit(f"重新发送完成: {filename} -> {client_id}")
+            self.log_message.emit(f"重新发送完成: {filename} → {client_id}")
         except Exception as e:
-            self.log_message.emit(f"重新发送异常: {filename} -> {client_id}: {e}")
+            self.log_message.emit(f"重新发送异常: {filename} → {client_id}: {e}")
 
     def _send_file_to_client(self, client_id: str, filename: str, file_path: str, stop_event: threading.Event = None, is_forward: bool = False):
         """发送文件给特定客户端（流式传输）
@@ -1285,30 +1345,23 @@ class SyncServer(QObject):
         """
         发送数据给某客户端，支持取消（内部经其 send_guard 持锁发送，保证一条消息不被并发写交错）。
 
-        socket 为阻塞模式带 1 秒超时。sendall 最多阻塞 1 秒。
+        可恢复发送：背压超时（接收端处理慢导致发送缓冲区满）时不重发已发送字节、
+        短暂退避后续发剩余部分，直至整条消息完整写出。相比 sendall 超时后整条重发
+        的旧逻辑：重复数据流会加剧背压，把 PING/PONG 等控制消息长时间挡在发送锁外
+        （同步延迟虚高上万毫秒的根因；投递走端到端直连、数据不经过主机 socket，故无此干扰）。
         - stop_event 被设置：立即返回 False
-        - 连接错误（BrokenPipe/ConnectionReset/ConnectionAborted/OSError）：返回 False，不重试
-        - 超时（socket.timeout）：可能是背压（接收端处理慢），只要 stop_event 未设置就继续重试
+        - 连接错误（BrokenPipe/ConnectionReset/ConnectionAborted/OSError）：返回 False
 
         Returns:
             True 表示发送完成，False 表示被取消或连接异常
         """
         if stop_event and stop_event.is_set():
             return False
-        while True:
-            if stop_event and stop_event.is_set():
-                return False
-            try:
-                client_info['send_guard'].send(client_info['socket'], data)
-                return True
-            except socket.timeout:
-                # 背压超时：接收端处理慢导致发送缓冲区满
-                # 只要没被取消就继续重试，确保大文件传输不会因背压而失败
-                continue
-            except (BrokenPipeError, ConnectionResetError, ConnectionAbortedError, OSError):
-                return False
-            except Exception:
-                return False
+        try:
+            return client_info['send_guard'].send_resumable(
+                client_info['socket'], data, stop_event=stop_event)
+        except Exception:
+            return False
     
     def _send_large_file_to_client(self, client_id: str, filename: str, file_path: str, file_size: int, mtime: float, stop_event: threading.Event = None, is_forward: bool = False):
         """流式发送大文件给特定客户端
@@ -1458,6 +1511,9 @@ class SyncServer(QObject):
             else:
                 remaining = None
                 pending = None
+            # 该客户端若正等待权限 ACK，直接移除（断连无需回滚，UI 由断连信号清理）
+            if client_id in self.perm_ack_pending:
+                del self.perm_ack_pending[client_id]
         if pending is not None and remaining == 0:
             self._complete_mode_switch(pending)
     
@@ -1491,7 +1547,7 @@ class SyncServer(QObject):
         # 发射切换发起信号（UI 置灰切换按钮）
         self.mode_switching.emit(new_mode)
         self.log_message.emit(
-            f"切换模式: {old_mode} -> {new_mode}，等待 {len(targets)} 个连接端确认"
+            f"切换模式: {self._mode_cn(old_mode)} → {self._mode_cn(new_mode)}，等待 {len(targets)} 个连接端确认"
         )
 
         # 广播模式切换指令
@@ -1506,6 +1562,11 @@ class SyncServer(QObject):
             self._complete_mode_switch(new_mode)
         return True
 
+    @staticmethod
+    def _mode_cn(mode: str) -> str:
+        """模式中文名（日志显示用，避免残留英文）"""
+        return "同步" if mode == "sync" else "收集"
+
     def _handle_mode_ack(self, client_id: str, mode: str):
         """处理连接端模式切换完成回执"""
         with self._lock:
@@ -1517,7 +1578,7 @@ class SyncServer(QObject):
             del self.mode_ack_pending[client_id]
             pending = self._pending_mode
             remaining = len(self.mode_ack_pending)
-        self.log_message.emit(f"连接端 {client_id} 已切换至 {mode}")
+        self.log_message.emit(f"连接端 {client_id} 已切换至 {self._mode_cn(mode)}")
         if pending is not None and remaining == 0:
             self._complete_mode_switch(pending)
 
@@ -1543,7 +1604,7 @@ class SyncServer(QObject):
             self.request_sync_all()
 
         self.mode_changed.emit(old_mode, new_mode)
-        self.log_message.emit(f"模式切换完成: {old_mode} -> {new_mode}")
+        self.log_message.emit(f"模式切换完成: {self._mode_cn(old_mode)} → {self._mode_cn(new_mode)}")
 
     def _start_mode_ack_thread(self):
         """启动模式切换 ACK 定时补发线程"""
@@ -1585,6 +1646,136 @@ class SyncServer(QObject):
                     self._socket_send(info, msg)
                 except Exception:
                     pass
+
+    def _clear_queued_tasks(self):
+        """清空传输队列中的排队任务（保留正在传输的任务）"""
+        with self.transfer_queue.lock:
+            self.transfer_queue.queue.clear()
+
+    # ========== 权限管理 ==========
+
+    @staticmethod
+    def _perm_cn(perm: str) -> str:
+        """权限中文名（日志显示用，避免残留英文）"""
+        return "只读" if perm == "ro" else "读写"
+
+    def set_perm(self, client_id: str, new_perm: str) -> bool:
+        """主机端发起对某连接端的权限切换（读写 <-> 只读）
+
+        - 权限立即存储生效（主机兜底侧即刻按新权限执行：只读端发来的
+          FILE_BEGIN/DELETE/DIR_CREATE/RENAME 一律拒收）；
+        - 发送 PERM_UPDATE 给该连接端并记录 ACK 等待；
+        - ACK 到齐后发 perm_ack_received；重发超限无响应则回滚旧档位并发 perm_switch_failed。
+
+        Returns:
+            True 表示已发起切换；False 表示参数非法/客户端不在线/权限未变化。
+        """
+        if new_perm not in ("rw", "ro"):
+            return False
+        with self._lock:
+            client_info = self.clients.get(client_id)
+            if not client_info or not client_info.get('authenticated'):
+                return False
+            old_perm = client_info.get('perm', "rw")
+            if old_perm == new_perm:
+                return False  # 权限未变化，幂等
+            if client_id in self.perm_ack_pending:
+                return False  # 该端已有权限切换进行中
+            client_info['perm'] = new_perm  # 立即生效
+            self.perm_ack_pending[client_id] = {
+                'perm': new_perm,
+                'old_perm': old_perm,
+                'tries': 0,
+            }
+        # 发射切换发起信号（UI 置灰该行胶囊）
+        self.perm_switching.emit(client_id, new_perm)
+        self.log_message.emit(
+            f"切换权限: {client_id} {self._perm_cn(old_perm)} → {self._perm_cn(new_perm)}，等待连接端确认"
+        )
+        # 发送权限更新指令
+        msg = Protocol.create_perm_message(MessageType.PERM_UPDATE, new_perm)
+        try:
+            self._socket_send(client_info, msg)
+        except Exception:
+            pass
+        self._start_perm_ack_thread()
+        return True
+
+    def _handle_perm_ack(self, client_id: str, perm: str):
+        """处理连接端权限应用完成回执"""
+        with self._lock:
+            pending = self.perm_ack_pending.get(client_id)
+            if pending is None:
+                return  # 未在等待该客户端的 ACK（如重复回执/握手指令自证）
+            if perm and perm != pending['perm']:
+                return  # 回执权限与预期不符，忽略
+            del self.perm_ack_pending[client_id]
+            applied_perm = pending['perm']
+        self.perm_ack_received.emit(client_id, applied_perm)
+        self.log_message.emit(f"连接端 {client_id} 已应用权限 {self._perm_cn(applied_perm)}")
+
+    def _start_perm_ack_thread(self):
+        """启动权限 ACK 定时补发线程"""
+        if self._perm_ack_thread and self._perm_ack_thread.is_alive():
+            return
+        self._perm_ack_stop.clear()
+        self._perm_ack_thread = threading.Thread(target=self._perm_ack_loop, daemon=True)
+        self._perm_ack_thread.start()
+
+    def _stop_perm_ack_thread(self):
+        """停止权限 ACK 补发线程"""
+        self._perm_ack_stop.set()
+
+    def _perm_ack_loop(self):
+        """定时向未完成权限切换的连接端补发 PERM_UPDATE，直到 ACK 或重发超限回滚"""
+        while not self._perm_ack_stop.wait(2.0):
+            if not self.running:
+                break
+            with self._lock:
+                if not self.perm_ack_pending:
+                    break
+                targets = []      # 需要补发的 [(client_id, info, perm)]
+                to_rollback = []  # 重发超限需要回滚的 [(client_id, old_perm, new_perm)]
+                for cid, pend in list(self.perm_ack_pending.items()):
+                    info = self.clients.get(cid)
+                    if not info or not info.get('authenticated'):
+                        # 已断开：无需补发，直接移除（UI 由断连信号清理）
+                        del self.perm_ack_pending[cid]
+                        continue
+                    if pend['tries'] >= self.PERM_ACK_MAX_TRIES:
+                        to_rollback.append((cid, pend['old_perm'], pend['perm']))
+                        del self.perm_ack_pending[cid]
+                        continue
+                    pend['tries'] += 1
+                    targets.append((cid, info, pend['perm']))
+            for cid, old_perm, new_perm in to_rollback:
+                with self._lock:
+                    info = self.clients.get(cid)
+                    if info:
+                        info['perm'] = old_perm  # 回滚旧档位
+                self.perm_switch_failed.emit(cid, old_perm, new_perm)
+                self.log_message.emit(f"权限切换失败（对端无响应）: {cid} 回滚为 {old_perm}")
+            for cid, info, perm in targets:
+                msg = Protocol.create_perm_message(MessageType.PERM_UPDATE, perm)
+                try:
+                    self._socket_send(info, msg)
+                except Exception:
+                    pass
+
+    def get_perm(self, client_id: str) -> str:
+        """查询连接端当前权限（默认读写）"""
+        info = self.clients.get(client_id)
+        return info.get('perm', "rw") if info else "rw"
+
+    def _is_readonly(self, client_id: str) -> bool:
+        """连接端是否为只读权限"""
+        info = self.clients.get(client_id)
+        return bool(info and info.get('perm') == "ro")
+
+    def _reject_readonly(self, client_id: str, action: str, filename: str = ''):
+        """只读端越权操作：主机兜底拒收并记录日志（竞态窗口漏网拦截）"""
+        detail = f" {filename}" if filename else ''
+        self.log_message.emit(f"拒绝只读连接端 {client_id} 的{action}{detail}")
 
     def _clear_queued_tasks(self):
         """清空传输队列中的排队任务（保留正在传输的任务）"""
@@ -1904,7 +2095,7 @@ class SyncServer(QObject):
             old_ip = self._ip_folder_owner(old_rel)
             new_ip = self._ip_folder_owner(new_rel)
             if not old_ip or old_ip != new_ip:
-                self.log_message.emit(f"收集模式，忽略根目录变更: {old_rel} -> {new_rel}")
+                self.log_message.emit(f"收集模式，忽略根目录变更: {old_rel} → {new_rel}")
                 return
             old_target = old_rel[len(old_ip) + 1:]
             new_target = new_rel[len(new_ip) + 1:]
@@ -1915,10 +2106,10 @@ class SyncServer(QObject):
             )
             for cid in self._find_clients_by_ip(old_ip):
                 self._send_mode_msg_to(cid, msg)
-            self.log_message.emit(f"收集模式，通知 {old_ip} 变更: {old_target} -> {new_target}")
+            self.log_message.emit(f"收集模式，通知 {old_ip} 变更: {old_target} → {new_target}")
             return
         self._broadcast_rename(old_rel, new_rel)
-        self.log_message.emit(f"广播变更: {old_rel} -> {new_rel}")
+        self.log_message.emit(f"广播变更: {old_rel} → {new_rel}")
     
     def _broadcast_rename(self, old_name: str, new_name: str, exclude_client: str = None):
         """广播重命名（内部方法）"""

@@ -39,6 +39,8 @@ class Config:
 
     # 版本号托管于 GitHub Pages 纯文本文件，避免 raw 外链滥用/API tags 频率限制
     UPDATE_URL = "https://lisseldee.github.io/version/lansyncboxpro"
+    # 公告文件：首行版本号（如 26.9.15.1），其后为公告正文
+    ANNOUNCEMENT_URL = "https://lisseldee.github.io/announcement/lansyncboxpro"
     # 下载落地页（按语言区分，保持不变）
     GITHUB_RELEASES = f"https://github.com/{GITHUB_REPO}/releases"
     GITEE_RELEASES = f"https://gitee.com/{GITEE_REPO}/releases"
@@ -206,6 +208,8 @@ class Config:
         total_size = 0
         try:
             for dirpath, dirnames, filenames in os.walk(sync_folder):
+                # 忽略 preview 预览文件夹（不算缓存占用）
+                dirnames[:] = [d for d in dirnames if d != "preview"]
                 for filename in filenames:
                     filepath = os.path.join(dirpath, filename)
                     # 忽略符号链接等特殊情况
@@ -257,6 +261,10 @@ class UserConfig:
             "fixed_room_code_enabled": False,
             "fixed_room_code": "",
             "clean_cache_enabled": False,
+            "confirm_leave_no_ask": False,
+            "auto_check_update": False,
+            "receive_announcements": True,
+            "last_announcement": "",
             "room_history": []
         }
 
@@ -346,6 +354,46 @@ class UserConfig:
     def set_clean_cache_enabled(cls, enabled: bool):
         """设置清理缓存开关启用状态"""
         cls.set("clean_cache_enabled", bool(enabled))
+
+    @classmethod
+    def get_confirm_leave_no_ask(cls) -> bool:
+        """获取「退出且不再询问」启用状态（勾选后退出房间不再二次确认）"""
+        return bool(cls.get("confirm_leave_no_ask", False))
+
+    @classmethod
+    def set_confirm_leave_no_ask(cls, enabled: bool):
+        """设置「退出且不再询问」启用状态"""
+        cls.set("confirm_leave_no_ask", bool(enabled))
+
+    @classmethod
+    def get_auto_check_update(cls) -> bool:
+        """获取「自动检查更新」启用状态"""
+        return bool(cls.get("auto_check_update", False))
+
+    @classmethod
+    def set_auto_check_update(cls, enabled: bool):
+        """设置「自动检查更新」启用状态"""
+        cls.set("auto_check_update", bool(enabled))
+
+    @classmethod
+    def get_receive_announcements(cls) -> bool:
+        """获取「接收推送公告」启用状态"""
+        return bool(cls.get("receive_announcements", True))
+
+    @classmethod
+    def set_receive_announcements(cls, enabled: bool):
+        """设置「接收推送公告」启用状态"""
+        cls.set("receive_announcements", bool(enabled))
+
+    @classmethod
+    def get_last_announcement(cls) -> str:
+        """获取已显示公告的版本号（config.json 中的记录，空串表示从未显示）"""
+        return str(cls.get("last_announcement", ""))
+
+    @classmethod
+    def set_last_announcement(cls, version: str):
+        """记录已显示公告的版本号，避免下次启动重复显示"""
+        cls.set("last_announcement", str(version))
 
     @classmethod
     def update_reference_info(cls, exe_path: str):

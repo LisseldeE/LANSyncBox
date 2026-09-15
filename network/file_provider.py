@@ -258,8 +258,9 @@ class FileProvider(QObject):
         发送前取真实大小作为 FILE_BEGIN 的 file_size，分块流式发送、进度分母恒定，
         FILE_END 携带真实大小；成功发完 FILE_END 上报 send_finished(True) 并返回 True，
         任何中断返回 False（连接关闭时由 _handle_pull 兜底上报失败）。
-        每条消息经 _send_retry 发送：背压超时（socket.timeout）重试，网络差时大文件
-        传输不因一次 sendall 超时失败（与同步 _send_with_cancel 同一策略）。
+        每条消息经 _send_retry 发送：背压超时（socket.timeout）不重发已发送字节、
+        短暂退避后续发剩余部分，网络差/接收端处理慢时大文件传输不会因一次 sendall
+        超时失败（与同步 _send_with_cancel 同一策略）。
         """
         try:
             total_size = os.path.getsize(abs_path)
@@ -297,20 +298,16 @@ class FileProvider(QObject):
         return ok
 
     def _send_retry(self, conn_socket, send_guard: SendLock, data: bytes) -> bool:
-        """发送一条消息：背压超时（socket.timeout）重试，连接错误返回 False。
+        """发送一条消息：可恢复发送，连接错误返回 False。
 
-        与同步 server._send_with_cancel 同一策略：socket 阻塞模式 1s 超时下 sendall
-        最多阻塞 1s，背压超时重试，保证网络差/接收端处理慢时大文件传输不因一次
-        sendall 超时失败；连接错误（BrokenPipe/Reset/Aborted/OSError）立即返回 False。
+        与同步 server._send_with_cancel 同一策略：背压超时（接收端处理慢导致发送
+        缓冲区满）时不重发已发送字节、短暂退避后续发剩余部分，直至整条消息完整写出
+        （避免 sendall 超时后整条重发、重复数据流加剧背压）；连接错误
+        （BrokenPipe/Reset/Aborted/OSError）立即返回 False。
         """
         while self.running:
             try:
-                send_guard.send(conn_socket, data)
-                return True
-            except socket.timeout:
-                continue
-            except (BrokenPipeError, ConnectionResetError, ConnectionAbortedError, OSError):
-                return False
+                return send_guard.send_resumable(conn_socket, data)
             except Exception:
                 return False
         return False

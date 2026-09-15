@@ -40,6 +40,8 @@ class MessageType:
     MODE_ACK = 0x1B       # 模式切换完成回执（连接端→主机；content=切换后的模式）
     MODE_REQ = 0x1C       # 模式请求（连接端认证成功后→主机，请求当前模式）
     MODE_RESP = 0x1D      # 模式响应（主机→连接端；content="sync"/"collect"）
+    PERM_UPDATE = 0x1E    # 权限更新（主机→连接端；content="rw"（读写）/"ro"（只读））
+    PERM_ACK = 0x1F       # 权限应用回执（连接端→主机；content=应用后的权限）
 
 
 class Protocol:
@@ -254,6 +256,20 @@ class Protocol:
             消息字节
         """
         content = mode.encode('utf-8')
+        return Protocol.pack_message(msg_type, '', len(content), False, content)
+
+    @staticmethod
+    def create_perm_message(msg_type: int, perm: str) -> bytes:
+        """创建权限相关消息（PERM_UPDATE / PERM_ACK）
+
+        Args:
+            msg_type: 权限消息类型常量
+            perm: "rw"（读写）或 "ro"（只读）
+
+        Returns:
+            消息字节
+        """
+        content = perm.encode('utf-8')
         return Protocol.pack_message(msg_type, '', len(content), False, content)
 
     @staticmethod

@@ -16,7 +16,7 @@ LANSyncBox Pro is the upgraded version of [LANSyncBox](https://github.com/Lissel
 
 ## Version Statement
 
-The Pro edition will remain **open source** and will not become a paid product. Because this edition involves low-level changes, it may not be able to connect with the standard edition in future iterations.
+The Pro edition will remain **open source** and will not become a paid product. Because this edition involves low-level changes, it may not be able to connect with the standard edition in future iterations. The Pro edition will be updated independently from the standard edition, and will not be merged into the main branch of the repository.
 
 ## Version Comparison
 

@@ -43,6 +43,7 @@ class SyncClient(QObject):
     clipboard_received = Signal(str, bytes)  # 收到剪切板内容 (mime_type, data)，交 UI 写系统剪贴板
     files_notify_received = Signal(bytes)    # 收到文件会话通知（content=JSON 字节），交 UI 展示远程文件胶囊
     mode_changed = Signal(str)         # 模式变更 (new_mode)，"sync"/"collect"
+    perm_changed = Signal(str)         # 权限变更 (new_perm)，"rw"（读写）/ "ro"（只读），交 UI 应用禁操作/单向下拉
     
     # 数据块大小（64KB）
     CHUNK_SIZE = 64 * 1024
@@ -66,6 +67,10 @@ class SyncClient(QObject):
         # 当前模式：认证后由主机端下发（"sync"同步 / "collect"收集）
         self.mode = "sync"
         self.mode_received = False  # 是否已收到主机模式下发（复用连接时用于补偿 UI 状态）
+
+        # 当前权限：认证后由主机端下发（"rw"读写 / "ro"只读），默认读写（向后兼容）
+        self.perm = "rw"
+        self.perm_received = False  # 是否已收到主机权限下发（复用连接时用于补偿 UI 状态）
 
         # 延迟探测线程控制
         self._ping_stop = threading.Event()
@@ -428,6 +433,11 @@ class SyncClient(QObject):
             # 主机端模式切换指令：切换本端模式并回执 ACK
             mode = content.decode('utf-8', errors='ignore').strip()
             self._handle_mode_switch(mode)
+
+        elif msg_type == MessageType.PERM_UPDATE:
+            # 主机端权限更新指令：应用权限并回执 ACK（幂等，重复收到同档位无副作用）
+            perm = content.decode('utf-8', errors='ignore').strip()
+            self._handle_perm_update(perm)
     
     def _send_mode_request(self):
         """认证成功后向主机端请求当前模式"""
@@ -479,7 +489,49 @@ class SyncClient(QObject):
             pass
 
         self.mode_changed.emit(new_mode)
-        self.log_message.emit(f"模式切换: {old_mode} -> {new_mode}")
+        self.log_message.emit(f"模式切换: {self._mode_cn(old_mode)} → {self._mode_cn(new_mode)}")
+
+    @staticmethod
+    def _mode_cn(mode: str) -> str:
+        """模式中文名（日志显示用，避免残留英文）"""
+        return "同步" if mode == "sync" else "收集"
+
+    def _handle_perm_update(self, new_perm: str):
+        """处理主机端权限更新指令
+
+        - 仅 "rw"/"ro" 合法；同档位重复下发幂等（不重复取消、不重复回执副作用）
+        - 切只读时取消全部上传任务：在传任务于发送块间中止并补发 FILE_CANCEL，
+          主机端 _handle_file_cancel 关句柄/删临时文件/清状态，双端进度行随之清理；
+          排队任务直接清空，彻底无法上传（队列只装上传任务，不会误杀下载）
+        - 回执 PERM_ACK 给主机端，由主机端统计回执后落定 UI 胶囊
+        """
+        if new_perm not in ("rw", "ro"):
+            return
+        old_perm = self.perm
+        if old_perm == new_perm:
+            # 同档位重复下发：仍标记已收到并回执（幂等，供主机端补发/握手自证）
+            self.perm_received = True
+            try:
+                self._send_guard.send(self.socket, Protocol.create_perm_message(MessageType.PERM_ACK, new_perm))
+            except Exception:
+                pass
+            return
+        if new_perm == "ro":
+            # 只读：取消全部上传任务（在传中止补发 FILE_CANCEL，排队清空）
+            self.transfer_queue.cancel_all_tasks()
+        self.perm = new_perm
+        self.perm_received = True
+        try:
+            self._send_guard.send(self.socket, Protocol.create_perm_message(MessageType.PERM_ACK, new_perm))
+        except Exception:
+            pass
+        self.perm_changed.emit(new_perm)
+        self.log_message.emit(f"权限切换: {self._perm_cn(old_perm)} → {self._perm_cn(new_perm)}")
+
+    @staticmethod
+    def _perm_cn(perm: str) -> str:
+        """权限中文名（日志显示用，避免残留英文）"""
+        return "只读" if perm == "ro" else "读写"
     
     def _handle_auth_response(self, content: bytes):
         """处理验证响应"""
@@ -580,7 +632,7 @@ class SyncClient(QObject):
 
             os.rename(old_path, new_path)
 
-            self.log_message.emit(f"变更: {old_name} -> {new_name}")
+            self.log_message.emit(f"变更: {old_name} → {new_name}")
 
             # 发射变更信号
             self.file_renamed.emit(old_name, new_name)
@@ -656,30 +708,22 @@ class SyncClient(QObject):
         """
         发送数据，支持取消（已内置发送锁，保证一条消息不被并发写交错）。
 
-        socket 为阻塞模式带 1 秒超时。sendall 最多阻塞 1 秒。
+        可恢复发送：背压超时（接收端处理慢导致发送缓冲区满）时不重发已发送字节、
+        短暂退避后续发剩余部分，直至整条消息完整写出。相比 sendall 超时后整条重发
+        的旧逻辑：重复数据流会加剧背压，把 PING/PONG 等控制消息长时间挡在发送锁外
+        （同步延迟虚高上万毫秒的根因；投递走端到端直连、数据不经过主机 socket，故无此干扰）。
         - stop_event 被设置：立即返回 False
-        - 连接错误（BrokenPipe/ConnectionReset/ConnectionAborted/OSError）：返回 False，不重试
-        - 超时（socket.timeout）：可能是背压（接收端处理慢），只要 stop_event 未设置就继续重试
+        - 连接错误（BrokenPipe/ConnectionReset/ConnectionAborted/OSError）：返回 False
 
         Returns:
             True 表示发送完成，False 表示被取消或连接异常
         """
         if stop_event and stop_event.is_set():
             return False
-        while True:
-            if stop_event and stop_event.is_set():
-                return False
-            try:
-                self._send_guard.send(self.socket, data)
-                return True
-            except socket.timeout:
-                # 背压超时：接收端处理慢导致发送缓冲区满
-                # 只要没被取消就继续重试，确保大文件传输不会因背压而失败
-                continue
-            except (BrokenPipeError, ConnectionResetError, ConnectionAbortedError, OSError):
-                return False
-            except Exception:
-                return False
+        try:
+            return self._send_guard.send_resumable(self.socket, data, stop_event=stop_event)
+        except Exception:
+            return False
     
     def _send_large_file_to_server(self, filename: str, file_path: str, file_size: int, mtime: float, stop_event: threading.Event = None):
         """流式发送大文件给主机端
@@ -1065,7 +1109,7 @@ class SyncClient(QObject):
         
         old_rel = os.path.relpath(old_path, self.sync_folder).replace('\\', '/')
         new_rel = os.path.relpath(new_path, self.sync_folder).replace('\\', '/')
-        self.log_message.emit(f"发送变更指令: {old_rel} -> {new_rel}")
+        self.log_message.emit(f"发送变更指令: {old_rel} → {new_rel}")
     
     def request_file_list(self):
         """请求文件列表"""

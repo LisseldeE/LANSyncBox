@@ -628,6 +628,9 @@ class FileListWidget(QWidget):
         # 取消传输回调（由 SyncWindow 设置，直接调用避免 Qt 信号异步性问题）
         self._cancel_transfer_callback = None
 
+        # 只读权限（连接端由主机端权限帧驱动）：禁止添加/修改同步列表，拖拽保存不受限
+        self._readonly = False
+
         # 屏顶放置条（DropZone）。同步窗口最小化时，替换确认/复制进度/完成动画
         # 由放置胶囊承接，替代本窗口内的确认弹窗与进度对话框。
         self._drop_zone = None
@@ -908,12 +911,21 @@ class FileListWidget(QWidget):
         """刷新快捷操作栏按钮启用状态与右侧状态指示（与右键菜单同一套判定逻辑）。"""
         has_selection = len(self.get_selected_files()) > 0
         selected_rows = self.table.selectionModel().selectedRows()
-        self._new_folder_btn.setEnabled(not has_selection)
-        self._copy_btn.setEnabled(has_selection)
-        self._cut_btn.setEnabled(has_selection)
-        self._paste_btn.setEnabled(len(self.clipboard_files) > 0)
-        self._rename_btn.setEnabled(len(selected_rows) == 1)
-        self._delete_btn.setEnabled(has_selection)
+        if self._readonly:
+            # 只读：禁用全部修改类操作（添加/新建/复制/剪切/粘贴/重命名/删除）
+            self._new_folder_btn.setEnabled(False)
+            self._copy_btn.setEnabled(False)
+            self._cut_btn.setEnabled(False)
+            self._paste_btn.setEnabled(False)
+            self._rename_btn.setEnabled(False)
+            self._delete_btn.setEnabled(False)
+        else:
+            self._new_folder_btn.setEnabled(not has_selection)
+            self._copy_btn.setEnabled(has_selection)
+            self._cut_btn.setEnabled(has_selection)
+            self._paste_btn.setEnabled(len(self.clipboard_files) > 0)
+            self._rename_btn.setEnabled(len(selected_rows) == 1)
+            self._delete_btn.setEnabled(has_selection)
 
         # 右侧状态指示
         self._sel_status_label.setText(
@@ -1036,6 +1048,25 @@ class FileListWidget(QWidget):
             # 禁用时清除可能残留的悬浮红色警示，避免灰色态误显红色
             self.sync_btn.setStyleSheet("")
         self.sync_btn.setEnabled(enabled)
+
+    def set_readonly(self, ro: bool):
+        """设置只读权限：禁用添加/修改同步列表的全部入口，并刷新操作栏状态。
+
+        只读端仍可接收文件、拖拽保存到电脑任意位置、右键保存至电脑位置；
+        无法添加（右键/顶部快捷/拖入窗口）、无法修改列表（重命名/删除/剪切粘贴/新建文件夹）。
+        """
+        self._readonly = ro
+        self._update_action_states()
+
+    def is_readonly(self) -> bool:
+        return self._readonly
+
+    def _reject_readonly(self) -> bool:
+        """只读时拦截修改操作：提示后返回 True，由调用方中止执行。"""
+        if self._readonly:
+            self._show_toast(I18n.tr('toast_readonly'))
+            return True
+        return False
 
     def _show_toast(self, message: str):
         """顶部悬浮提示：淡入→停留→淡出"""
@@ -1221,50 +1252,51 @@ class FileListWidget(QWidget):
 
         # 是否有选中的文件（用于控制菜单项的启用状态）
         has_selection = len(self.get_selected_files()) > 0
+        ro = self._readonly
 
-        # 添加文件（选中文件时禁用）
+        # 添加文件（选中文件时禁用；只读时禁用）
         add_file_action = QAction(I18n.tr('drag_add'), self)
         add_file_action.triggered.connect(self.on_add_files)
-        add_file_action.setEnabled(not has_selection)
+        add_file_action.setEnabled(not has_selection and not ro)
         menu.addAction(add_file_action)
 
-        # 添加文件夹（选中文件时禁用）
+        # 添加文件夹（选中文件时禁用；只读时禁用）
         add_folder_action = QAction(I18n.tr('add_folder'), self)
         add_folder_action.triggered.connect(self.on_add_folder)
-        add_folder_action.setEnabled(not has_selection)
+        add_folder_action.setEnabled(not has_selection and not ro)
         menu.addAction(add_folder_action)
 
         menu.addSeparator()
 
-        # 新建文件夹（选中文件时禁用）
+        # 新建文件夹（选中文件时禁用；只读时禁用）
         new_folder_action = QAction(I18n.tr('new_folder'), self)
         new_folder_action.triggered.connect(self.on_new_folder)
-        new_folder_action.setEnabled(not has_selection)
+        new_folder_action.setEnabled(not has_selection and not ro)
         menu.addAction(new_folder_action)
 
         menu.addSeparator()
 
-        # 复制
+        # 复制（只读时禁用）
         copy_action = QAction(I18n.tr('copy'), self)
         copy_action.triggered.connect(self.copy_files)
-        copy_action.setEnabled(has_selection)
+        copy_action.setEnabled(has_selection and not ro)
         menu.addAction(copy_action)
 
-        # 剪切
+        # 剪切（只读时禁用）
         cut_action = QAction(I18n.tr('cut'), self)
         cut_action.triggered.connect(self.cut_files)
-        cut_action.setEnabled(has_selection)
+        cut_action.setEnabled(has_selection and not ro)
         menu.addAction(cut_action)
 
-        # 粘贴
+        # 粘贴（只读时禁用）
         paste_action = QAction(I18n.tr('paste'), self)
         paste_action.triggered.connect(self.paste_files)
-        paste_action.setEnabled(len(self.clipboard_files) > 0)
+        paste_action.setEnabled(len(self.clipboard_files) > 0 and not ro)
         menu.addAction(paste_action)
 
         menu.addSeparator()
 
-        # 保存至
+        # 保存至（只读可用：拖拽保存/右键保存至电脑不受权限限制）
         save_to_action = QAction(I18n.tr('save_to'), self)
         save_to_action.triggered.connect(self.save_to)
         save_to_action.setEnabled(has_selection)
@@ -1272,17 +1304,17 @@ class FileListWidget(QWidget):
 
         menu.addSeparator()
 
-        # 删除
+        # 删除（只读时禁用）
         delete_action = QAction(I18n.tr('delete'), self)
         delete_action.triggered.connect(self.delete_files)
-        delete_action.setEnabled(has_selection)
+        delete_action.setEnabled(has_selection and not ro)
         menu.addAction(delete_action)
 
-        # 重命名 - 检查选中的行数
+        # 重命名（只读时禁用） - 检查选中的行数
         rename_action = QAction(I18n.tr('rename'), self)
         rename_action.triggered.connect(self.rename_file)
         selected_rows = self.table.selectionModel().selectedRows()
-        rename_action.setEnabled(len(selected_rows) == 1)
+        rename_action.setEnabled(len(selected_rows) == 1 and not ro)
         menu.addAction(rename_action)
         
         menu.exec(self.table.viewport().mapToGlobal(pos))
@@ -1311,6 +1343,8 @@ class FileListWidget(QWidget):
     def paste_files(self):
         """粘贴文件（使用进度对话框避免界面卡死）"""
         if not self.clipboard_files:
+            return
+        if self._reject_readonly():
             return
 
         # 同目录粘贴或复制进源自身子树（自嵌套）无实际意义，且 copytree 自递归会崩溃：
@@ -1545,6 +1579,8 @@ class FileListWidget(QWidget):
     
     def delete_files(self):
         """删除文件"""
+        if self._reject_readonly():
+            return
         files = self.get_selected_files()
         if not files:
             return
@@ -1670,6 +1706,8 @@ class FileListWidget(QWidget):
         流程：弹出重命名对话框（预填默认名）→ 确认名称后正式创建并触发同步；
         对话框阶段按 ESC 或取消则不创建任何文件夹。
         """
+        if self._reject_readonly():
+            return
         from PySide6.QtWidgets import QDialog, QVBoxLayout, QLabel, QDialogButtonBox
 
         dialog = QDialog(self)
@@ -1756,6 +1794,8 @@ class FileListWidget(QWidget):
 
     def rename_file(self):
         """重命名文件"""
+        if self._reject_readonly():
+            return
         files = self.get_selected_files()
         if len(files) != 1:
             return
@@ -2178,6 +2218,9 @@ class FileListWidget(QWidget):
         （替换确认/复制进度/完成动画持续展开），放置条不随即收起；
         否则（对话框流程或未启用胶囊）返回 False，放置条正常收起。
         """
+        # 只读：禁止添加（右键/顶部快捷/拖入窗口均汇聚到此）
+        if self._reject_readonly():
+            return False
         # 如果没有指定目标目录，使用当前目录
         if target_dir is None:
             target_dir = self.current_path
