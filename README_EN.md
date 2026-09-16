@@ -9,7 +9,7 @@
 </div>
 
 <p align="center">
-  <a href="https://github.com/LisseldeE/LANSyncBox/releases"><img src="https://img.shields.io/github/v/release/LisseldeE/LANSyncBox" alt="Latest Release"></a>
+  <a href="https://github.com/LisseldeE/LANSyncBox/releases/tag/R7.1.6.0"><img src="https://img.shields.io/badge/releases-R7.1.6.0-3b82f6" alt="releases R7.1.6.0"></a>
   <a href="https://github.com/LisseldeE/LANSyncBox/releases"><img src="https://img.shields.io/github/release-date/LisseldeE/LANSyncBox" alt="Release Date"></a>
   <a href="LICENSE"><img src="https://img.shields.io/github/license/LisseldeE/LANSyncBox" alt="License"></a>
   <img src="https://img.shields.io/badge/platform-Windows-blue?logo=windows" alt="Platform">
@@ -28,7 +28,7 @@
 
 LANSyncBox is a cross-platform file synchronization tool built specifically for LAN scenarios. It enables multiple users on the same local network to share and sync files safely and smoothly, with no public network connection required. Built with Qt6, it supports large-file streaming transfers, serialized sending, and resumable transfers to keep data reliable and transfers stable under multi-connection concurrency.
 
-> 💡 Looking for [**LANSyncBox Pro**](https://github.com/LisseldeE/LANSyncBox/tree/pro) ? The more advanced **Pro edition** (an in-iteration Beta release featuring cross-device copy & paste **Delivery**, top-edge **Quick-Add**, **Collect mode**, and more) lives on the [`pro` branch](https://github.com/LisseldeE/LANSyncBox/tree/pro).
+> 💡 Looking for [**LANSyncBox Pro**](https://github.com/LisseldeE/LANSyncBox/tree/pro) ? The more advanced **Pro edition** (an in-iteration Beta release featuring cross-device copy & paste **Delivery**, top-edge **Quick-Add**, **Collect mode**, and more) lives on the `pro` branch
 
 ## Project Screenshots
 | Main Interface | Sync Interface |

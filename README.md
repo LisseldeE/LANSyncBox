@@ -9,7 +9,7 @@
 </div>
 
 <p align="center">
-  <a href="https://github.com/LisseldeE/LANSyncBox/releases"><img src="https://img.shields.io/github/v/release/LisseldeE/LANSyncBox" alt="最新版本"></a>
+  <a href="https://github.com/LisseldeE/LANSyncBox/releases/tag/R7.1.6.0"><img src="https://img.shields.io/badge/releases-R7.1.6.0-3b82f6" alt="releases R7.1.6.0"></a>
   <a href="https://github.com/LisseldeE/LANSyncBox/releases"><img src="https://img.shields.io/github/release-date/LisseldeE/LANSyncBox" alt="发布时间"></a>
   <a href="LICENSE"><img src="https://img.shields.io/github/license/LisseldeE/LANSyncBox" alt="开源协议"></a>
   <img src="https://img.shields.io/badge/platform-Windows-blue?logo=windows" alt="支持平台">
@@ -28,7 +28,7 @@
 
 LANSyncBox 是一款跨平台、专为局域网场景设计的文件实时同步工具，让多人只需在同一局域网内即可完成安全、流畅的文件共享与同步，全程无需公网。基于 Qt6 构建，支持大文件流式传输、串行化发送与断点续传，保证多连接高并发场景下的数据可靠与传输稳定。
 
-> 💡 寻找 [**LANSyncBox Pro**](https://github.com/LisseldeE/LANSyncBox/tree/pro) ？ 更高阶的 **Pro 版**（正在迭代的 Beta 版，含跨设备复制粘贴**投递**、顶部**快捷添加**、**收集模式**等新能力）位于 [`pro` 分支](https://github.com/LisseldeE/LANSyncBox/tree/pro)。
+> 💡 寻找 [**LANSyncBox Pro**](https://github.com/LisseldeE/LANSyncBox/tree/pro) ？ 更高阶的 **Pro 版**（正在迭代的 Beta 版，含跨设备复制粘贴**投递**、顶部**快捷添加**、**收集模式**等新能力）位于 `pro` 分支
 
 ## 项目截图
 | 主界面 | 同步界面 |
