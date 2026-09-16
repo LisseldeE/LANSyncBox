@@ -43,6 +43,17 @@ class MessageType:
     PERM_UPDATE = 0x1E    # 权限更新（主机→连接端；content="rw"（读写）/"ro"（只读））
     PERM_ACK = 0x1F       # 权限应用回执（连接端→主机；content=应用后的权限）
 
+    # ---- 去中心化架构消息（content=JSON；0x20-0x27 均为网状/直连链路） ----
+    DISTRIBUTE_SIGNAL = 0x20  # 分发信号（端→网状各直连对端）：{src_id, op_no, op, file, state, clock, ts, dst?}
+    FILE_STATE_REQ = 0x21     # 文件状态请求（端→对端）：{src_id}
+    FILE_STATE_RESP = 0x22    # 文件状态响应（对端→端）：{src_id, entries:[{name, op_no, state, exists, clock, ts}]}
+    SYNC_PULL_REQ = 0x23      # 同步拉取请求（端→对端 FileProvider 会话）：{session_id, token, name}
+    END_INFO = 0x24           # 端身份信息（握手后交换）：{end_id, name, mesh_port}
+    MESH_PEER_LIST = 0x25     # 对端清单引导（主机→新加入端）：{peers:[{end_id, name, ip, mesh_port}]}
+    MESH_PEER_JOIN = 0x26     # 新端加入通告（主机→各端）：{peer:{end_id, name, ip, mesh_port}}
+    MESH_PEER_LEAVE = 0x27    # 端离线通告（主机→各端）：{end_id}
+    CLIPBOARD_NOTIFY_SIGNAL = 0x28  # 投递通知（端→网状各直连对端；阶段 5 替换主机转发）：content=JSON 会话元数据
+
 
 class Protocol:
     """自定义文件传输协议"""
@@ -336,12 +347,116 @@ class Protocol:
             content=content
         )
 
+    # ---- 去中心化架构消息（0x20-0x27，content=JSON，不动头格式） ----
+
+    @staticmethod
+    def _pack_json(msg_type: int, data: dict, filename: str = '') -> bytes:
+        """将 dict 打包为 JSON content 消息（统一入口，所有 0x20-0x27 走此方法）。"""
+        content = json.dumps(data, ensure_ascii=False).encode('utf-8')
+        return Protocol.pack_message(
+            msg_type, filename, len(content), False, content
+        )
+
+    @staticmethod
+    def create_distribute_signal(signal: dict) -> bytes:
+        """创建分发信号消息（0x20，端→网状各直连对端）
+
+        signal 结构：{src_id, op_no, op, file, state, clock, ts, dst?}
+        op 取值 add/delete/rename/move；rename/move 携带 old/new 字段。
+        """
+        return Protocol._pack_json(MessageType.DISTRIBUTE_SIGNAL, signal)
+
+    @staticmethod
+    def create_file_state_req(src_id: str) -> bytes:
+        """创建文件状态请求消息（0x21，端→对端）"""
+        return Protocol._pack_json(MessageType.FILE_STATE_REQ, {'src_id': src_id})
+
+    @staticmethod
+    def create_file_state_resp(src_id: str, entries: list, session: dict = None) -> bytes:
+        """创建文件状态响应消息（0x22，对端→端）
+
+        entries: [{name, op_no, state, exists, clock, ts}]（vv 由 src_id 隐式关联）
+        session（可选）: {session_id, token, host, port} 自同步会话——拉取方据此
+            直连本端 FileProvider 端到端拉取（阶段 2 自同步链路）。
+        """
+        data = {'src_id': src_id, 'entries': entries}
+        if session:
+            data['session'] = session
+        return Protocol._pack_json(MessageType.FILE_STATE_RESP, data)
+
+    @staticmethod
+    def create_sync_pull_req(session_id: str, token: str, name: str) -> bytes:
+        """创建同步拉取请求消息（0x23，端→对端 FileProvider 会话服务）
+
+        与 CLIPBOARD_FILE_PULL_REQ 同构，复用 FileProvider 会话校验与流式传输通道。
+        """
+        return Protocol._pack_json(
+            MessageType.SYNC_PULL_REQ,
+            {'session_id': session_id, 'token': token, 'name': name},
+            filename=name,
+        )
+
+    @staticmethod
+    def create_end_info(end_id: str, name: str, mesh_port: int) -> bytes:
+        """创建端身份信息消息（0x24，握手后交换）"""
+        return Protocol._pack_json(
+            MessageType.END_INFO,
+            {'end_id': end_id, 'name': name, 'mesh_port': mesh_port},
+            filename=end_id,
+        )
+
+    @staticmethod
+    def create_mesh_peer_list(peers: list) -> bytes:
+        """创建对端清单引导消息（0x25，主机→新加入端）
+
+        peers: [{end_id, name, ip, mesh_port}, ...]（不含接收端自身）
+        """
+        return Protocol._pack_json(MessageType.MESH_PEER_LIST, {'peers': peers})
+
+    @staticmethod
+    def create_mesh_peer_join(peer: dict) -> bytes:
+        """创建新端加入通告消息（0x26，主机→各端）
+
+        peer: {end_id, name, ip, mesh_port}
+        """
+        return Protocol._pack_json(MessageType.MESH_PEER_JOIN, {'peer': peer})
+
+    @staticmethod
+    def create_mesh_peer_leave(end_id: str) -> bytes:
+        """创建端离线通告消息（0x27，主机→各端）"""
+        return Protocol._pack_json(MessageType.MESH_PEER_LEAVE, {'end_id': end_id})
+
+    @staticmethod
+    def create_clipboard_notify_signal(notify_dict: dict) -> bytes:
+        """创建投递通知消息（0x28，端→网状各直连对端，阶段 5）
+
+        与 CLIPBOARD_FILES_NOTIFY 同构（content=JSON 会话元数据），但走网状
+        直连分发（不经主机转发）；文件字节仍由接收端端到端直连复制端拉取。
+        """
+        return Protocol._pack_json(MessageType.CLIPBOARD_NOTIFY_SIGNAL, notify_dict)
+
     # 注：P2P_FILE_DATA(0x19) 为预留类型，投递已改走 FILE_BEGIN/FILE_DATA/FILE_END 端到端 TCP 流式传输，不再使用。
 
 
 class MessageReceiver:
     """消息接收器 - 处理TCP流式数据的分包"""
-    
+
+    # content 为 JSON 字典的消息类型（get_message 时自动 json.loads 为 dict）
+    # 仅限去中心化新类型（0x20-0x28）；0x17/0x18 剪贴板会话类保持原始 bytes，
+    # 由调用方自行 json.loads（file_provider._process_pull_message 与
+    # client.files_notify_received 信号均依赖 bytes 语义）。
+    JSON_CONTENT_TYPES = {
+        MessageType.DISTRIBUTE_SIGNAL,
+        MessageType.FILE_STATE_REQ,
+        MessageType.FILE_STATE_RESP,
+        MessageType.SYNC_PULL_REQ,
+        MessageType.END_INFO,
+        MessageType.MESH_PEER_LIST,
+        MessageType.MESH_PEER_JOIN,
+        MessageType.MESH_PEER_LEAVE,
+        MessageType.CLIPBOARD_NOTIFY_SIGNAL,
+    }
+
     def __init__(self):
         self.buffer = b''
     
@@ -407,6 +522,14 @@ class MessageReceiver:
         if msg_type == MessageType.FILE_LIST_RESP:
             file_list = json.loads(content.decode('utf-8'))
             return msg_type, filename, file_size, mtime, hide_flag, file_list
+
+        # 对于 JSON content 类型（0x20-0x27 及剪贴板会话类），解析为 dict
+        if msg_type in MessageReceiver.JSON_CONTENT_TYPES:
+            try:
+                data = json.loads(content.decode('utf-8'))
+            except (ValueError, UnicodeDecodeError):
+                data = {}
+            return msg_type, filename, file_size, mtime, hide_flag, data
 
         return msg_type, filename, file_size, mtime, hide_flag, content
     

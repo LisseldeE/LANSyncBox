@@ -1,0 +1,588 @@
+"""
+去中心化同步：分发链路引擎（阶段 1）
+Copyright (c) 2026 Lisselde_E <Lisselde.E@outlook.com>.
+Licensed under the GNU General Public License v3.0.
+
+职责（对应实施计划阶段 1）：
+- 本地操作 → DISTRIBUTE_SIGNAL 沿网状直连传播（不再依赖主机转发）
+- 收到信号 → 去重（同文件同 src_id 同 op_no 已应用则丢弃）→ 本地应用 →
+  向除 src_id 外所有直连对端转发（防回声）
+- 排队队列：信号串行处理，同 (src_id, file, op_no) 排队去重（冗余设计，防积压）
+- 传输互操作：传输中收到 delete → 取消传输 + 状态置 CHANGE；
+  传输中收到 rename/move → 进旁队列等传输完成再执行，执行时文件不存在则跳过
+  （防止排在 delete 后）
+- 端内文件状态表（内存，FileState）：记录每个文件最新 op_no/state/clock/ts/vv，
+  供阶段 2 自同步链路复用
+- 三层冲突解决（阶段 3）：信号携带 vv；收到远端信号按三层规则（版本向量 →
+  逻辑钟 → 时间戳 → end_id 兜底）决定应用/忽略/覆盖；被覆盖端日志提示
+  「本地修改被远端覆盖」并请求自同步链路拉取胜方内容；拉取回执（pulled）
+  仅记知识防回声风暴
+
+传输约定与全库一致：线程 + socket 1s 超时 + SendLock.send_resumable 背压退避。
+"""
+import os
+import threading
+import time
+from typing import Callable, Optional
+
+from PySide6.QtCore import QObject, Signal
+
+from network.protocol import Protocol, MessageType
+from sync.vector import (FileState, STATE_ADD, STATE_CHANGE, merge_vv,
+                         compare_states)
+
+
+class Distributor(QObject):
+    """分发链路引擎：信号生成、去重、转发与本地应用（每端一个）。
+
+    阶段 3：收到远端信号按三层冲突规则（版本向量 → 逻辑钟 → 时间戳 → end_id
+    兜底）决定应用/忽略/覆盖；被覆盖端日志提示「本地修改被远端覆盖」；覆盖时
+    经冲突拉取回调请求对端内容（自同步链路端到端拉取）。
+    """
+
+    log_message = Signal(str)
+    # 一条信号已在本地应用（含本端 emit 与远端信号）；dict = 信号
+    signal_applied = Signal(dict)
+    # 传输中收到 delete：请求调用方取消该文件传输
+    transfer_cancel_requested = Signal(str)
+    # 冲突覆盖（远端胜出且本端已有旧内容）：请求拉取胜方内容 file, src_id
+    conflict_pull_requested = Signal(str, str)
+    # 投递通知（阶段 5）：收到对端复制文件会话通知（content=JSON 字节），交 UI 展示远程文件胶囊
+    files_notify_received = Signal(bytes)
+
+    # 操作类型（DISTRIBUTE_SIGNAL 的 op 字段取值）
+    OP_ADD = 'add'
+    OP_DELETE = 'delete'
+    OP_RENAME = 'rename'
+    OP_MOVE = 'move'
+    OP_DIR_CREATE = 'dir_create'
+
+    def __init__(self, end_id: str, sync_folder: str, mesh=None, parent=None):
+        super().__init__(parent)
+        self.end_id = end_id
+        self.sync_folder = os.path.abspath(sync_folder)
+        self.mesh = mesh  # MeshManager；None 时仅本地（单测/离线场景）
+
+        self._lock = threading.Lock()
+        self._op_counters = {}    # file -> 本端已发出 op_no（源端递增）
+        self._clocks = {}         # file -> 本端逻辑钟（每修改一次 +1）
+        self._states = {}         # file -> FileState（端内文件状态表）
+        self._queue = []          # 待处理信号（远端，FIFO）
+        self._queue_keys = set()  # 排队中 (src_id, file, op_no)
+        self._cond = threading.Condition(self._lock)
+        self._stop = threading.Event()
+        self._transferring = set()    # 传输中的文件（接收/发送中）
+        self._side_queue = {}         # file -> [rename/move 信号...]（旁队列）
+        self._cancel_handler = None   # 取消传输回调 cb(file)
+        self._applied_handler = None  # 本地应用回调（无事件循环场景/单测）
+        self._conflict_pull_handler = None  # 冲突覆盖回调 cb(file, src_id)
+        self._log_handler = None      # 日志回调（无事件循环场景/单测）
+        self._files_notify_handler = None  # 投递通知回调 cb(content_bytes)（阶段 5，测试/无事件循环场景）
+
+        self._worker = threading.Thread(target=self._worker_loop, daemon=True)
+        self._worker.start()
+
+    # ---- 回调注册 ----
+
+    def set_applied_handler(self, cb: Callable[[dict], None]):
+        """设置信号应用回调（在分发工作线程调用；GUI 场景用 Qt 信号）。"""
+        self._applied_handler = cb
+
+    def set_cancel_handler(self, cb: Callable[[str], None]):
+        """设置传输取消回调：传输中收到 delete 时调用 cb(file)。"""
+        self._cancel_handler = cb
+
+    def set_conflict_pull_handler(self, cb: Callable[[str, str], None]):
+        """设置冲突覆盖回调 cb(file, src_id)：远端胜出且本端已有旧内容时，
+        请求自同步链路拉取胜方文件内容（阶段 3）。"""
+        self._conflict_pull_handler = cb
+
+    def set_log_handler(self, cb: Callable[[str], None]):
+        """设置日志回调（在分发工作线程调用；GUI 场景用 Qt 信号 log_message）。"""
+        self._log_handler = cb
+
+    def set_files_notify_handler(self, cb: Callable[[bytes], None]):
+        """设置投递通知回调 cb(content_bytes)（在 mesh 连接线程调用；GUI 场景用
+        Qt 信号 files_notify_received）。阶段 5。"""
+        self._files_notify_handler = cb
+
+    def _notify_log(self, msg: str):
+        try:
+            self._notify_log(msg)
+        except Exception:
+            pass
+        if self._log_handler:
+            try:
+                self._log_handler(msg)
+            except Exception:
+                pass
+
+    # ---- 属性 ----
+
+    def get_state(self, file: str) -> Optional[FileState]:
+        with self._lock:
+            return self._states.get(file)
+
+    def states(self) -> dict:
+        with self._lock:
+            return dict(self._states)
+
+    def mark_transfer(self, file: str):
+        """标记某文件传输中（接收/发送开始）。"""
+        with self._lock:
+            self._transferring.add(file)
+
+    def unmark_transfer(self, file: str):
+        """传输结束：解除标记并冲刷该文件的旁队列（按序重新入队应用）。"""
+        with self._lock:
+            self._transferring.discard(file)
+            side = self._side_queue.pop(file, [])
+        for signal in side:
+            self._enqueue(signal)
+
+    # ---- 本地操作入口 ----
+
+    def emit(self, op: str, file: str, old: str = None) -> Optional[dict]:
+        """本地文件操作 → 生成 DISTRIBUTE_SIGNAL 沿网状传播并记录本端状态。
+
+        本地 FS 已由调用方完成（本方法不重复执行 FS 操作，仅记录状态 + 传播）。
+        返回生成的信号 dict（无法传播时仍返回，供上层记录/测试）。
+        """
+        if not file:
+            return None
+        with self._lock:
+            op_no = self._op_counters.get(file, 0) + 1
+            self._op_counters[file] = op_no
+            clock = self._clocks.get(file, 0) + 1
+            self._clocks[file] = clock
+            prev = self._states.get(file)
+            vv = dict(prev.vv) if prev else {}
+        vv[self.end_id] = op_no
+        signal = {
+            'src_id': self.end_id,
+            'op_no': op_no,
+            'op': op,
+            'file': file,
+            'state': STATE_ADD if op == self.OP_ADD else STATE_CHANGE,
+            'clock': clock,
+            'ts': time.time(),
+            'vv': vv,
+        }
+        if old is not None:
+            signal['old'] = old
+        self._record_local(signal)
+        if self.mesh is not None:
+            try:
+                self.mesh.send_to_all(Protocol.create_distribute_signal(signal),
+                                      except_end_id=self.end_id)
+            except Exception as e:
+                self._notify_log(f"分发信号失败: {e}")
+        return signal
+
+    def remove_state(self, file: str):
+        """移除端内文件状态条目（自同步链路列表收敛：双方均已删除的文件）。"""
+        with self._lock:
+            self._states.pop(file, None)
+            self._op_counters.pop(file, None)
+            self._clocks.pop(file, None)
+
+    def emit_pulled(self, file: str, remote_src_id: str, remote_op_no: int):
+        """自同步拉取完成：记录本端已持有该文件并广播 add 状态（阶段 2）。
+
+        本地 FS 已由 pull_file 落盘完成；状态表 vv 推进到远端 op_no（本端已应用
+        该版本），并计入本端源计数，避免后续对比重复拉取。
+        """
+        with self._lock:
+            op_no = self._op_counters.get(file, 0) + 1
+            self._op_counters[file] = op_no
+            clock = self._clocks.get(file, 0) + 1
+            self._clocks[file] = clock
+        ts = time.time()
+        st = FileState(name=file, op_no=op_no, state=STATE_ADD, exists=True,
+                       clock=clock, ts=ts,
+                       vv={self.end_id: op_no, remote_src_id: remote_op_no})
+        self._store(st)
+        signal = {
+            'src_id': self.end_id,
+            'op_no': op_no,
+            'op': self.OP_ADD,
+            'file': file,
+            'state': STATE_ADD,
+            'clock': clock,
+            'ts': ts,
+            'vv': {self.end_id: op_no, remote_src_id: remote_op_no},
+            'pulled': True,  # 拉取完成回执：对端仅记知识，不再触发冲突覆盖拉取
+        }
+        if self.mesh is not None:
+            try:
+                self.mesh.send_to_all(Protocol.create_distribute_signal(signal),
+                                      except_end_id=self.end_id)
+            except Exception as e:
+                self._notify_log(f"分发信号失败: {e}")
+        self._notify_applied(signal)
+        return signal
+
+    # ---- 投递通知（阶段 5）：复制文件信号改走分发链路，替换主机转发 ----
+
+    def emit_files_notify(self, notify_dict: dict) -> bool:
+        """本地复制文件 → 投递通知沿网状直连广播（不经主机转发）。
+
+        文件字节仍由接收端端到端直连复制端 FileProvider 拉取（不动）。
+        返回 True 表示已沿网状发出；分发链路未就绪或无直连对端返回 False，
+        调用方应回退旧路径（经主机转发，阶段 5 迁移兜底）。
+        """
+        if self.mesh is None:
+            return False
+        if not self.mesh.connected_end_ids():
+            return False
+        try:
+            self.mesh.send_to_all(
+                Protocol.create_clipboard_notify_signal(notify_dict),
+                except_end_id=self.end_id)
+        except Exception as e:
+            self._notify_log(f"投递通知广播失败: {e}")
+            return False
+        return True
+
+    def on_files_notify(self, content):
+        """收到对端投递通知（网状直连，阶段 5）：转 bytes 交 UI 展示远程文件胶囊。
+
+        双通道：回调（mesh 连接线程直接调用，测试/无事件循环场景）+ Qt 信号
+        （GUI 主线程）。投递通知是一次性广播（接收端不转发），不进入文件状态/
+        冲突裁决，与同步信号（需洪泛去重）语义不同。
+        """
+        if isinstance(content, dict):
+            import json
+            content = json.dumps(content, ensure_ascii=False).encode('utf-8')
+        if not isinstance(content, (bytes, bytearray)):
+            return
+        payload = bytes(content)
+        if self._files_notify_handler:
+            try:
+                self._files_notify_handler(payload)
+            except Exception:
+                pass
+        try:
+            self.files_notify_received.emit(payload)
+        except Exception:
+            pass
+
+    # ---- 远端信号入口 ----
+
+    def on_signal(self, signal: dict):
+        """收到对端 DISTRIBUTE_SIGNAL：去重后入队，由工作线程应用并转发。"""
+        if not isinstance(signal, dict):
+            return
+        with self._lock:
+            self._enqueue_locked(signal)
+
+    # ---- 内部：排队 ----
+
+    def _enqueue(self, signal: dict):
+        with self._lock:
+            self._enqueue_locked(signal)
+
+    def _enqueue_locked(self, signal: dict):
+        """锁内入队：非法/自身信号（回声）丢弃；已应用/已在队列则去重。"""
+        src_id = signal.get('src_id', '')
+        op_no = int(signal.get('op_no', 0) or 0)
+        file = signal.get('file', '')
+        if not src_id or src_id == self.end_id or not file or op_no <= 0:
+            return  # 非法信号 / 自身信号回声
+        st = self._states.get(file)
+        if st and st.vv.get(src_id, 0) >= op_no:
+            return  # 该源该编号（或更新）已应用过，丢弃
+        key = (src_id, file, op_no)
+        if key in self._queue_keys:
+            return  # 排队去重：同文件同编号已在队列
+        self._queue_keys.add(key)
+        self._queue.append(signal)
+        self._cond.notify()
+
+    def _worker_loop(self):
+        while not self._stop.is_set():
+            with self._cond:
+                while not self._queue and not self._stop.is_set():
+                    self._cond.wait(timeout=0.5)
+                if self._stop.is_set():
+                    break
+                signal = self._queue.pop(0)
+                src_id = signal.get('src_id', '')
+                file = signal.get('file', '')
+                op_no = int(signal.get('op_no', 0) or 0)
+                self._queue_keys.discard((src_id, file, op_no))
+            try:
+                self._process_signal(signal)
+            except Exception as e:
+                self._notify_log(f"处理信号失败: {e}")
+
+    # ---- 信号处理 ----
+
+    def _process_signal(self, signal: dict):
+        src_id = signal.get('src_id', '')
+        op_no = int(signal.get('op_no', 0) or 0)
+        file = signal.get('file', '')
+        op = signal.get('op', '')
+        # 冗余校验：可能已被其他路径（旁队列/并发）应用
+        with self._lock:
+            st = self._states.get(file)
+            if st and st.vv.get(src_id, 0) >= op_no:
+                return
+        if op in (self.OP_RENAME, self.OP_MOVE):
+            # 传输中 rename/move：进旁队列等传输完成再执行（同源同编号去重）。
+            # 传输以「当前名」标记，rename/move 的源名（old）即当前名。
+            transfer_key = signal.get('old') or file
+            if self._is_transferring(transfer_key):
+                with self._lock:
+                    side = self._side_queue.setdefault(transfer_key, [])
+                    if any(s.get('src_id') == src_id
+                           and int(s.get('op_no', 0) or 0) == op_no for s in side):
+                        return
+                    side.append(signal)
+                return
+        if op == self.OP_DELETE and self._is_transferring(file):
+            # 传输中 delete：取消传输 + 状态置 CHANGE（随后正常应用删除）
+            self._request_cancel(file)
+        self._apply(file, op, signal, src_id, op_no)
+
+    def _request_cancel(self, file: str):
+        if self._cancel_handler:
+            try:
+                self._cancel_handler(file)
+            except Exception:
+                pass
+        try:
+            self.transfer_cancel_requested.emit(file)
+        except Exception:
+            pass
+
+    def _is_transferring(self, file: str) -> bool:
+        with self._lock:
+            return file in self._transferring
+
+    # ---- 应用 ----
+
+    def _apply(self, file: str, op: str, signal: dict, src_id: str, op_no: int):
+        """应用一条远端信号：三层冲突裁决 + FS 操作 + 状态表更新 + 防回声转发。
+
+        阶段 3 裁决（按实施计划第 4 节四层口径）：
+        - 本端无状态 / 远端胜出 → 应用（覆盖本地内容，被覆盖端日志提示，add 时
+          经冲突拉取回调请求对端字节）
+        - 本地胜出 / 已收敛 → 不执行 FS 操作，仅记录对端 vv 知识（防重放），仍转发
+        - 拉取回执（pulled=True）→ 仅记录知识，不触发覆盖拉取（防回声风暴）
+        """
+        clock = int(signal.get('clock', 0) or 0)
+        ts = float(signal.get('ts', 0.0) or 0.0)
+        old = signal.get('old')
+        vv_raw = signal.get('vv')
+        vv = dict(vv_raw) if isinstance(vv_raw, dict) else {src_id: op_no}
+        pulled = bool(signal.get('pulled'))
+        incoming = FileState(name=file, op_no=op_no,
+                             state=STATE_ADD if op == self.OP_ADD else STATE_CHANGE,
+                             exists=op != self.OP_DELETE,
+                             clock=clock, ts=ts, vv=vv)
+        # 三层冲突裁决
+        with self._lock:
+            local = self._states.get(file)
+        if local is not None:
+            if pulled:
+                # 拉取回执：仅合并对端知识，不应用、不覆盖（防回声风暴）
+                self._record_knowledge(file, vv)
+                self._forward(signal, src_id)
+                return
+            result = compare_states(incoming, local, src_id, self.end_id)
+            if result <= 0:
+                if result == -1:
+                    # 本地胜出：忽略远端信号，仅记对端 vv 知识
+                    self._record_knowledge(file, vv)
+                    self._notify_log(
+                        f"本地版本胜出，忽略远端 {src_id} 信号: {file}")
+                self._forward(signal, src_id)  # 已收敛也继续转发（其他端可能需应用）
+                return
+            # 远端胜出：覆盖本地内容
+            if local.clock > 0:
+                self._notify_log(f"本地修改被远端覆盖: {file}")
+        try:
+            if op == self.OP_ADD:
+                exists = os.path.exists(self._safe_join(file))
+                self._store(FileState(name=file, op_no=op_no, state=STATE_ADD,
+                                      exists=exists, clock=clock, ts=ts,
+                                      vv=vv))
+            elif op == self.OP_DELETE:
+                self._delete_local(file)
+                self._store(FileState(name=file, op_no=op_no, state=STATE_CHANGE,
+                                      exists=False, clock=clock, ts=ts,
+                                      vv=vv))
+            elif op in (self.OP_RENAME, self.OP_MOVE):
+                old_name = old or file
+                if not self._rename_local(old_name, file):
+                    return  # 源不存在（可能排在 delete 后）→ 跳过
+                prev = self._states.get(old_name)
+                vv_merged = dict(prev.vv) if prev else {}
+                vv_merged = merge_vv(vv_merged, vv)
+                self._store(FileState(name=file, op_no=op_no, state=STATE_CHANGE,
+                                      exists=True, clock=clock, ts=ts, vv=vv_merged),
+                            remove=old_name)
+            elif op == self.OP_DIR_CREATE:
+                os.makedirs(self._safe_join(file), exist_ok=True)
+                self._store(FileState(name=file, op_no=op_no, state=STATE_CHANGE,
+                                      exists=True, clock=clock, ts=ts,
+                                      vv=vv))
+            else:
+                return  # 未知操作：不应用、不转发
+        except ValueError as e:
+            self._notify_log(f"拒绝非法路径: {e}")
+            return
+        # 拉取触发：add 信号应用后，本端无该文件（缺失拉取，阶段 4）或
+        # 本端已有旧内容且远端胜出（冲突覆盖）→ 请求拉取源端字节
+        if op == self.OP_ADD:
+            exists = False
+            try:
+                exists = os.path.exists(self._safe_join(file))
+            except ValueError:
+                pass
+            if not exists:
+                # 阶段 4：本端无该文件（缺失）→ 直接向源端请求状态并拉取字节，
+                # 不再依赖主机转发（主机断线后其余端仍能互相同步）
+                self._request_conflict_pull(file, src_id)
+            elif local is not None:
+                self._request_conflict_pull(file, src_id)
+        self._forward(signal, src_id)
+        self._notify_applied(signal)
+
+    def _forward(self, signal: dict, except_end_id: str):
+        """防回声转发：向除 src_id 外所有直连对端（本地已收敛/忽略时同样转发）。"""
+        if self.mesh is not None:
+            try:
+                self.mesh.send_to_all(Protocol.create_distribute_signal(signal),
+                                      except_end_id=except_end_id)
+            except Exception as e:
+                self._notify_log(f"转发信号失败: {e}")
+
+    def _record_knowledge(self, file: str, vv: dict):
+        """仅合并对端 vv 知识（不改动本地 clock/ts/FS）：本地胜出或拉取回执时，
+        记录对端已到达的版本，保证去重且不抬高本地时钟偏置后续裁决。"""
+        with self._lock:
+            st = self._states.get(file)
+            if st is None:
+                return
+            st.vv = merge_vv(st.vv, vv)
+
+    def _request_conflict_pull(self, file: str, src_id: str):
+        """请求自同步链路拉取对端（胜方）文件内容覆盖本地旧版本。"""
+        try:
+            self.conflict_pull_requested.emit(file, src_id)
+        except Exception:
+            pass
+        if self._conflict_pull_handler:
+            try:
+                self._conflict_pull_handler(file, src_id)
+            except Exception:
+                pass
+
+    def _record_local(self, signal: dict):
+        """记录本端 emit 的状态（本地 FS 已由调用方完成，不重复执行）。"""
+        file = signal['file']
+        op = signal['op']
+        src_id = signal['src_id']
+        op_no = signal['op_no']
+        clock = signal['clock']
+        ts = signal['ts']
+        vv = signal.get('vv') or {src_id: op_no}
+        try:
+            if op == self.OP_ADD:
+                exists = os.path.exists(self._safe_join(file))
+                self._store(FileState(name=file, op_no=op_no, state=STATE_ADD,
+                                      exists=exists, clock=clock, ts=ts,
+                                      vv=vv))
+            elif op == self.OP_DELETE:
+                self._store(FileState(name=file, op_no=op_no, state=STATE_CHANGE,
+                                      exists=False, clock=clock, ts=ts,
+                                      vv=vv))
+            elif op in (self.OP_RENAME, self.OP_MOVE):
+                old = signal.get('old', file)
+                self._store(FileState(name=file, op_no=op_no, state=STATE_CHANGE,
+                                      exists=os.path.exists(self._safe_join(file)),
+                                      clock=clock, ts=ts, vv=vv),
+                            remove=old)
+            elif op == self.OP_DIR_CREATE:
+                self._store(FileState(name=file, op_no=op_no, state=STATE_CHANGE,
+                                      exists=True, clock=clock, ts=ts,
+                                      vv=vv))
+        except ValueError as e:
+            self._notify_log(f"拒绝非法路径: {e}")
+            return
+        self._notify_applied(signal)
+
+    def _notify_applied(self, signal: dict):
+        try:
+            self.signal_applied.emit(signal)
+        except Exception:
+            pass
+        if self._applied_handler:
+            try:
+                self._applied_handler(signal)
+            except Exception:
+                pass
+
+    def _store(self, new_state: FileState, remove: str = None):
+        """写入状态表：与既有条目合并 vv/clock/ts（保留历史推进方向）。"""
+        with self._lock:
+            prev = self._states.get(new_state.name)
+            if prev:
+                new_state.vv = merge_vv(prev.vv, new_state.vv)
+                new_state.clock = max(new_state.clock, prev.clock)
+                new_state.ts = max(new_state.ts, prev.ts)
+            self._states[new_state.name] = new_state
+            if remove:
+                self._states.pop(remove, None)
+
+    # ---- 本地 FS 操作 ----
+
+    def _safe_join(self, name: str) -> str:
+        """安全拼接同步文件夹路径（防路径穿越）。"""
+        if not name:
+            raise ValueError("文件名为空")
+        norm = os.path.normpath(name.replace('\\', '/'))
+        if norm in ('.', '') or norm.startswith('..') or os.path.isabs(norm):
+            raise ValueError(f"非法路径: {name}")
+        path = os.path.normpath(os.path.join(self.sync_folder, norm))
+        if path != self.sync_folder and not path.startswith(self.sync_folder + os.sep):
+            raise ValueError(f"非法路径: {name}")
+        return path
+
+    def _delete_local(self, file: str):
+        path = self._safe_join(file)
+        if os.path.isfile(path) or os.path.islink(path):
+            os.remove(path)
+        elif os.path.isdir(path):
+            from sync.file_manager import safe_rmtree
+            safe_rmtree(path)
+
+    def _rename_local(self, old: str, new: str) -> bool:
+        """重命名/移动：源不存在返回 False（跳过）；目标存在先删除。"""
+        old_path = self._safe_join(old)
+        new_path = self._safe_join(new)
+        if not os.path.exists(old_path):
+            return False
+        os.makedirs(os.path.dirname(new_path), exist_ok=True)
+        if os.path.exists(new_path):
+            if os.path.isdir(new_path) and not os.path.islink(new_path):
+                from sync.file_manager import safe_rmtree
+                safe_rmtree(new_path)
+            else:
+                os.remove(new_path)
+        os.rename(old_path, new_path)
+        return True
+
+    # ---- 生命周期 ----
+
+    def stop(self):
+        self._stop.set()
+        with self._cond:
+            self._cond.notify_all()
+        if self._worker and self._worker.is_alive():
+            try:
+                self._worker.join(timeout=2.0)
+            except Exception:
+                pass

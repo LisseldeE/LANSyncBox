@@ -12,8 +12,12 @@ import struct
 from typing import Optional
 from PySide6.QtCore import QObject, Signal
 
-from config import Config
+from config import Config, UserConfig
 from network.protocol import Protocol, MessageType, MessageReceiver
+from network.mesh import MeshManager
+from sync.distributor import Distributor
+from sync.file_state_store import FileStateStore
+from sync.vector import Endpoint
 from utils.transfer_queue import TransferQueue
 from utils.send_guard import SendLock
 
@@ -39,11 +43,13 @@ class SyncClient(QObject):
     file_list_received = Signal(list) # 收到文件列表
     sync_requested = Signal()          # 收到主机端手动同步请求，需重新上报文件列表
     sync_result = Signal(bool)         # 收到同步结果（True=存在差异需补齐，False=列表一致无需同步）
-    latency_updated = Signal(float)     # 延迟更新 (rtt_ms)，连接端="已连接"旁显示的延迟
     clipboard_received = Signal(str, bytes)  # 收到剪切板内容 (mime_type, data)，交 UI 写系统剪贴板
     files_notify_received = Signal(bytes)    # 收到文件会话通知（content=JSON 字节），交 UI 展示远程文件胶囊
     mode_changed = Signal(str)         # 模式变更 (new_mode)，"sync"/"collect"
     perm_changed = Signal(str)         # 权限变更 (new_perm)，"rw"（读写）/ "ro"（只读），交 UI 应用禁操作/单向下拉
+    # 去中心化阶段 2：自同步链路信号
+    state_sync_done = Signal(bool)     # 一轮端到端对比结束（True=有差异正在补齐，False=一致）
+    file_state_added = Signal(str)     # 自同步拉取完成落盘（相对路径），UI 刷新文件列表
     
     # 数据块大小（64KB）
     CHUNK_SIZE = 64 * 1024
@@ -56,13 +62,20 @@ class SyncClient(QObject):
         self.running = False
         self.authenticated = False
         self.receiver = MessageReceiver()
+        self.host_ip: Optional[str] = None        # 主机地址（连接对端，END_INFO 记录用）
+        self.mesh: Optional[MeshManager] = None   # 网状连接管理器（认证成功后启动）
+        self.host_endpoint: Optional[Endpoint] = None  # 主机端身份（END_INFO 交换结果）
+        self.distributor: Optional[Distributor] = None  # 分发链路引擎（认证成功后启动）
+        self.file_state_store: Optional[FileStateStore] = None  # 自同步链路（阶段 2，认证后启动）
+        self._file_provider = None   # 本端 FileProvider（UI 注入；会话服务能力）
         self.sync_folder = Config.get_room_folder(room_code)
         self.receiving_files = {}  # 大文件接收状态：{filename: {handle, file_size, mtime, received_size, temp_path}}
         self._receiving_lock = threading.Lock()  # 保护 receiving_files 的线程锁
         self._send_guard = SendLock()            # 发送串行化：同一 socket 并发写不交错
 
-        # 延迟缓存（连接端显示用），由 PING/PONG 在接收线程更新
-        self.latency = None
+        # 心跳状态（在线/离线判定）：PONG 在接收线程更新，_ping_loop 读取判超时
+        self._last_pong: Optional[float] = None
+        self._ping_lock = threading.Lock()
 
         # 当前模式：认证后由主机端下发（"sync"同步 / "collect"收集）
         self.mode = "sync"
@@ -72,10 +85,11 @@ class SyncClient(QObject):
         self.perm = "rw"
         self.perm_received = False  # 是否已收到主机权限下发（复用连接时用于补偿 UI 状态）
 
-        # 延迟探测线程控制
+        # 心跳探测线程控制：周期性 PING 主机并核对 PONG 回包，判定本端在线/离线
         self._ping_stop = threading.Event()
         self._ping_thread = None
         self.PING_INTERVAL = 1.0  # 每 1 秒发送一次 PING 给主机（连接端单机独立探测，主机端汇总不增加负担）
+        self.OFFLINE_TIMEOUT = 5.0  # 心跳超时阈值：连续超过该时长未收到主机 PONG → 判定离线并断开
 
         # 创建传输队列，控制并发传输数量
         self.transfer_queue = TransferQueue(max_concurrent=5)
@@ -109,6 +123,7 @@ class SyncClient(QObject):
             self.socket.settimeout(5.0)
             self.socket.connect((host, port))
             self.socket.settimeout(1.0)
+            self.host_ip = host
             
             self.running = True
             
@@ -131,6 +146,20 @@ class SyncClient(QObject):
         self.running = False
         self.authenticated = False
         self._ping_stop.set()
+
+        # 关闭网状连接（网状直连随本端退出一并拆除）
+        if self.mesh:
+            self.mesh.stop()
+
+        # 停止分发链路引擎
+        if self.distributor:
+            self.distributor.stop()
+            self.distributor = None
+
+        # 停止自同步链路
+        if self.file_state_store:
+            self.file_state_store.stop()
+            self.file_state_store = None
 
         # 清理大文件接收状态：关闭句柄、删除临时文件
         # 先在锁内收集所有需要清理的条目，然后在锁外执行 IO 操作
@@ -160,7 +189,7 @@ class SyncClient(QObject):
         self.socket = None
 
     def _start_ping_thread(self):
-        """启动延迟探测线程"""
+        """启动心跳探测线程"""
         if self._ping_thread and self._ping_thread.is_alive():
             return
         self._ping_stop.clear()
@@ -168,14 +197,23 @@ class SyncClient(QObject):
         self._ping_thread.start()
 
     def _ping_loop(self):
-        """延迟探测线程：每 2 秒发送一次 PING 给主机，用于显示连接端自身延迟"""
+        """心跳探测线程：每 1 秒 PING 主机一次；超过 OFFLINE_TIMEOUT 未收到 PONG 回包
+        即判定离线（主机拔线/杀进程等半开场景），主动断开连接触发 disconnected。"""
         while not self._ping_stop.is_set():
             if self._ping_stop.wait(self.PING_INTERVAL):
                 break
             if not self.socket or not self.authenticated:
                 continue
+            with self._ping_lock:
+                last = self._last_pong
+            if last is not None and time.time() - last > self.OFFLINE_TIMEOUT:
+                self.log_message.emit("主机心跳超时，判定离线")
+                self.disconnect()
+                break
             try:
-                self._send_guard.send(self.socket, Protocol.create_ping(time.time()))
+                # 可恢复发送：大文件传输背压时 PING 不丢失，避免误判离线
+                self._send_guard.send_resumable(
+                    self.socket, Protocol.create_ping(time.time()))
             except Exception:
                 pass
 
@@ -206,6 +244,15 @@ class SyncClient(QObject):
             self._send_guard.send(self.socket, Protocol.create_files_notify(notify_dict))
         except Exception:
             pass
+
+    def emit_files_notify(self, notify_dict: dict) -> bool:
+        """投递通知沿网状分发链路广播（阶段 5）：mesh 就绪返回 True，否则 False。
+
+        返回 False 时调用方回退旧路径（send_files_notify，经主机转发）。
+        """
+        if self.distributor:
+            return self.distributor.emit_files_notify(notify_dict)
+        return False
 
     def _receive_loop(self):
         """接收数据循环"""
@@ -391,6 +438,11 @@ class SyncClient(QObject):
             # 收集模式下不触发全量同步（不会同步各端列表）
             if self.mode == "collect":
                 return
+            # 阶段 4：同步模式 + 自同步链路就绪 → 端到端对比（替代上报主机仲裁）；
+            # 无网状对端/链路未就绪（旧版本混连等）时回退旧路径由 UI 上报列表
+            if (self.mode == "sync" and self.file_state_store
+                    and self.file_state_store.request_all() > 0):
+                return
             self.sync_requested.emit()
 
         elif msg_type == MessageType.SYNC_RESULT:
@@ -399,22 +451,18 @@ class SyncClient(QObject):
             self.sync_result.emit(has_diff)
 
         elif msg_type == MessageType.PING:
-            # 主机探测延迟：立即回 PONG 并原样带回发送时刻
+            # 主机心跳探测：立即回 PONG 并原样带回发送时刻（可恢复发送，背压不丢包）
             try:
                 send_time = struct.unpack('!d', content)[0]
-                self._send_guard.send(self.socket, Protocol.create_pong(send_time))
+                self._send_guard.send_resumable(
+                    self.socket, Protocol.create_pong(send_time))
             except Exception:
                 pass
 
         elif msg_type == MessageType.PONG:
-            # 收到主机回包：RTT = 当前时刻 - 发起时刻（同一端时钟，无跨机偏差）
-            try:
-                send_time = struct.unpack('!d', content)[0]
-                rtt_ms = (time.time() - send_time) * 1000.0
-                self.latency = rtt_ms
-                self.latency_updated.emit(rtt_ms)
-            except Exception:
-                pass
+            # 收到主机心跳回包：记录时间戳供 _ping_loop 判定在线/离线
+            with self._ping_lock:
+                self._last_pong = time.time()
 
         elif msg_type == MessageType.CLIPBOARD_DATA:
             # 收到主机分发的剪切板内容（文本/图片）：交 UI 写系统剪贴板
@@ -438,6 +486,35 @@ class SyncClient(QObject):
             # 主机端权限更新指令：应用权限并回执 ACK（幂等，重复收到同档位无副作用）
             perm = content.decode('utf-8', errors='ignore').strip()
             self._handle_perm_update(perm)
+
+        elif msg_type == MessageType.END_INFO:
+            # 去中心化：主机端身份信息（含 mesh_port），记录主机端点供引导/建连
+            if isinstance(content, dict):
+                end_id = content.get('end_id', '')
+                if end_id and end_id != UserConfig.get_end_id():
+                    self.host_endpoint = Endpoint.from_dict({
+                        'end_id': end_id,
+                        'name': content.get('name', ''),
+                        'ip': self.host_ip or '',
+                        'mesh_port': int(content.get('mesh_port', 0) or 0),
+                    })
+
+        elif msg_type == MessageType.MESH_PEER_LIST:
+            # 去中心化：主机引导 → 批量登记对端并建立网状直连
+            if self.mesh and isinstance(content, dict):
+                self.mesh.bootstrap_peers(content.get('peers', []))
+
+        elif msg_type == MessageType.MESH_PEER_JOIN:
+            # 去中心化：新端加入通告 → 反向与新端建直连
+            if self.mesh and isinstance(content, dict):
+                peer = content.get('peer')
+                if isinstance(peer, dict):
+                    self.mesh.add_peer(Endpoint.from_dict(peer))
+
+        elif msg_type == MessageType.MESH_PEER_LEAVE:
+            # 去中心化：端离线通告 → 拆除与该端的直连
+            if self.mesh and isinstance(content, dict):
+                self.mesh.remove_peer(content.get('end_id', ''))
     
     def _send_mode_request(self):
         """认证成功后向主机端请求当前模式"""
@@ -447,6 +524,120 @@ class SyncClient(QObject):
             self._send_guard.send(self.socket, Protocol.create_mode_message(MessageType.MODE_REQ, "sync"))
         except Exception:
             pass
+
+    def _start_mesh_and_send_end_info(self):
+        """去中心化：认证成功后启动网状监听，并向主机交换 END_INFO（含本端 mesh_port）。
+
+        主机随后回 END_INFO 记录主机端点；新端加入的引导（MESH_PEER_LIST）与
+        其余端的 JOIN 通告均在此认证链路上接收。
+        """
+        if self.mesh is None:
+            self.mesh = MeshManager(parent=self)
+            self.mesh.log_message.connect(self.log_message)
+        self.mesh.start()
+        # 分发链路引擎：本地操作 → 网状直连传播；收到信号去重/应用/转发
+        self.distributor = Distributor(
+            UserConfig.get_end_id(), self.sync_folder,
+            mesh=self.mesh, parent=self)
+        self.distributor.log_message.connect(self.log_message)
+        self.distributor.signal_applied.connect(self._on_distributor_applied)
+        self.mesh.set_message_handler(self._on_mesh_message)
+        # 自同步链路（阶段 2）：端到端状态对比与拉取；直连建立自动补齐
+        self.file_state_store = FileStateStore(
+            UserConfig.get_end_id(), self.sync_folder,
+            mesh=self.mesh, distributor=self.distributor,
+            provider=self._file_provider, parent=self)
+        self.file_state_store.log_message.connect(self.log_message)
+        self.file_state_store.sync_done.connect(self.state_sync_done)
+        self.file_state_store.file_added.connect(self.file_state_added)
+        # 阶段 3：冲突覆盖（远端胜出）→ 自同步链路拉取胜方字节
+        self.distributor.set_conflict_pull_handler(
+            self.file_state_store.request_conflict_pull)
+        # 阶段 5：网状投递通知 → 复用既有 files_notify_received 信号回投 UI
+        self.distributor.files_notify_received.connect(self.files_notify_received)
+        self.mesh.peer_connected.connect(self._on_mesh_peer_connected)
+        if not self.socket or not self.mesh.mesh_port:
+            return
+        try:
+            self._send_guard.send(self.socket, Protocol.create_end_info(
+                UserConfig.get_end_id(), socket.gethostname(), self.mesh.mesh_port))
+        except Exception:
+            pass
+
+    # ---- 分发链路（去中心化阶段 1）：本地操作沿网状直连传播 ----
+
+    def emit_signal(self, op: str, file: str, old: str = None) -> Optional[dict]:
+        """本地文件操作 → 沿网状分发链路发出 DISTRIBUTE_SIGNAL。
+
+        返回生成的信号 dict；分发链路未就绪（无 distributor）时返回 None，
+        调用方应回退旧路径（收集模式/旧版本混连场景）。
+        """
+        if self.distributor:
+            return self.distributor.emit(op, file, old=old)
+        return None
+
+    def _on_mesh_message(self, end_id: str, message: tuple):
+        """网状直连消息入口（MeshManager 回调线程）：分发信号交给 Distributor，
+        文件状态请求/响应交给自同步链路（阶段 2）。"""
+        try:
+            msg_type, _filename, _file_size, _mtime, _hide, content = message
+        except Exception:
+            return
+        if msg_type == MessageType.DISTRIBUTE_SIGNAL and isinstance(content, dict):
+            if self.distributor:
+                self.distributor.on_signal(content)
+        elif msg_type == MessageType.FILE_STATE_REQ and isinstance(content, dict):
+            if self.file_state_store:
+                self.file_state_store.handle_state_req(end_id)
+        elif msg_type == MessageType.FILE_STATE_RESP and isinstance(content, dict):
+            if self.file_state_store:
+                self.file_state_store.handle_state_resp(end_id, content)
+        elif msg_type == MessageType.CLIPBOARD_NOTIFY_SIGNAL:
+            # 阶段 5：投递通知沿网状直连到达（不经主机转发）→ 交 UI 展示远程文件胶囊
+            if self.distributor:
+                self.distributor.on_files_notify(content)
+
+    def _on_mesh_peer_connected(self, end_id: str, name: str):
+        """网状直连建立：同步模式 + 非只读下自动发起一轮状态对比（断线重连自动补齐，阶段 2）。"""
+        if self.mode == "sync" and self.perm != "ro" and self.file_state_store:
+            self.file_state_store.request_all()
+
+    def set_file_provider(self, provider):
+        """注入本端 FileProvider（会话服务能力；UI 启动 provider 后调用）。"""
+        self._file_provider = provider
+        if self.file_state_store:
+            self.file_state_store.set_file_provider(provider)
+
+    def request_state_sync(self) -> int:
+        """端到端手动同步：向各网状对端请求 FILE_STATE_REQ 并对比补齐（阶段 2）。
+
+        Returns:
+            成功下发请求的对端数；链路未就绪返回 0（调用方回退旧路径）。
+        """
+        if not self.file_state_store:
+            return 0
+        return self.file_state_store.request_all()
+
+    def _on_distributor_applied(self, signal: dict):
+        """分发信号已应用：远端信号回投既有 UI 信号（文件列表刷新/记录）。
+
+        仅回投远端信号（src_id != 本端）；本端 emit 的本地信号由 UI 本地操作
+        入口自行处理，避免重复记录。
+        """
+        if not isinstance(signal, dict):
+            return
+        if signal.get('src_id') == UserConfig.get_end_id():
+            return
+        op = signal.get('op', '')
+        file = signal.get('file', '')
+        if op == Distributor.OP_DELETE:
+            self.file_deleted.emit(file)
+        elif op in (Distributor.OP_RENAME, Distributor.OP_MOVE):
+            self.file_renamed.emit(signal.get('old', file), file)
+        elif op == Distributor.OP_DIR_CREATE:
+            self.dir_created.emit(file)
+        # OP_ADD：阶段 1 字节仍走既有通道（FILE_NOTIFY → 拉取），远端 add 信号
+        # 仅更新状态表，UI 刷新由字节到达时触发，不回投避免重复。
 
     def _handle_mode_response(self, mode: str):
         """处理主机端返回的模式（认证后首次下发）
@@ -461,7 +652,12 @@ class SyncClient(QObject):
         self.mode_received = True  # 标记已收到模式下发（复用连接时供 UI 补偿状态）
         self.mode_changed.emit(mode)
         if mode == "sync":
-            # 同步模式下初次加入需补齐差异
+            # 阶段 4：同步模式下初次加入走端到端对比（自同步链路就绪且有网状
+            # 对端时）；网状对端未就绪时回退旧路径，由 _on_mesh_peer_connected
+            # 在直连建立后自动发起一轮对比补齐。
+            if (self.file_state_store
+                    and self.file_state_store.request_all() > 0):
+                return
             self.sync_requested.emit()
 
     def _handle_mode_switch(self, new_mode: str):
@@ -521,6 +717,9 @@ class SyncClient(QObject):
             self.transfer_queue.cancel_all_tasks()
         self.perm = new_perm
         self.perm_received = True
+        # 阶段 4：只读端不发起自同步推送（不供他端拉取其文件），仅单向下拉
+        if self.file_state_store:
+            self.file_state_store.set_readonly(new_perm == "ro")
         try:
             self._send_guard.send(self.socket, Protocol.create_perm_message(MessageType.PERM_ACK, new_perm))
         except Exception:
@@ -544,10 +743,14 @@ class SyncClient(QObject):
                 self.authenticated = True
                 self.connected.emit()
                 self.log_message.emit("验证成功")
-                # 认证成功后启动延迟探测，连接端才能周期性 PING 主机以显示延迟
+                # 认证成功：心跳计时起点（此后周期 PING 主机并核对 PONG 判定在线/离线）
+                with self._ping_lock:
+                    self._last_pong = time.time()
                 self._start_ping_thread()
                 # 认证成功后请求当前模式，由主机端决定本端模式
                 self._send_mode_request()
+                # 去中心化：启动网状监听并交换 END_INFO（本端身份 + 网状监听端口）
+                self._start_mesh_and_send_end_info()
             else:
                 self.log_message.emit(f"验证失败: {message}")
                 # 发射验证失败信号

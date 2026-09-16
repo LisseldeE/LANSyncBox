@@ -266,6 +266,7 @@ class UserConfig:
             "receive_announcements": True,
             "last_announcement": "",
             "last_announcement_text": "",
+            "end_id": "",
             "room_history": []
         }
 
@@ -315,6 +316,19 @@ class UserConfig:
         data = cls.load()
         data[key] = value
         cls.save()
+
+    @classmethod
+    def get_end_id(cls) -> str:
+        """获取本端唯一标识（uuid4，首次访问时生成并持久化到 config.json）
+
+        去中心化架构中作为端身份：版本向量、信号源、对端表的键。
+        """
+        end_id = cls.get("end_id", "")
+        if not end_id:
+            import uuid
+            end_id = str(uuid.uuid4())
+            cls.set("end_id", end_id)
+        return end_id
 
     @classmethod
     def get_language(cls) -> str:

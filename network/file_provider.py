@@ -58,16 +58,19 @@ class FileProvider(QObject):
 
     # ---- 会话登记 ----
 
-    def register_session(self, session_id: str, token: str, files: dict) -> FileSession:
-        """登记一个待投递会话；登记新会话时清空全部旧会话（"最新为主"）。
+    def register_session(self, session_id: str, token: str, files: dict,
+                         replace_all: bool = True) -> FileSession:
+        """登记一个待投递会话。
 
-        与 Windows 剪贴板语义一致：新内容一复制广播，旧会话即失效——已在进行
-        中的传输不受影响（_stream_file 已在开流前解析出绝对路径，之后不再查会话），
-        但迟到的旧会话拉取请求会被拒绝（会话无效），避免长期运行中会话无限累积。
+        replace_all=True（默认，剪贴板语义）：登记新会话时清空全部旧会话
+        （"最新为主"，与 Windows 剪贴板一致——已进行中的传输不受影响，迟到的
+        旧会话拉取会被拒绝）；replace_all=False（自同步会话）：保留既有会话，
+        多个对端可同时向本端拉取（阶段 2 自同步链路按请求方隔离会话）。
         """
         session = FileSession(session_id, token, files)
         with self._lock:
-            self.sessions.clear()
+            if replace_all:
+                self.sessions.clear()
             self.sessions[session_id] = session
         return session
 
@@ -219,10 +222,18 @@ class FileProvider(QObject):
         if not info:
             return
         msg_type, filename, file_size, mtime, hide, content = message
-        if msg_type != MessageType.CLIPBOARD_FILE_PULL_REQ:
+        # 剪贴板拉取（0x18，content=bytes JSON）与同步拉取（0x23，content 已由
+        # MessageReceiver 解析为 dict）同构：统一为 {session_id, token, name}。
+        if msg_type == MessageType.SYNC_PULL_REQ and isinstance(content, dict):
+            req = content
+        elif msg_type == MessageType.CLIPBOARD_FILE_PULL_REQ and isinstance(content, bytes):
+            try:
+                req = json.loads(content.decode('utf-8'))
+            except Exception:
+                return
+        else:
             return
         try:
-            req = json.loads(content.decode('utf-8'))
             session_id = req.get('session_id', '')
             token = req.get('token', '')
             name = req.get('name', '')
@@ -323,7 +334,7 @@ class FileProvider(QObject):
 
 
 def pull_file(host: str, port: int, session_id: str, token: str, name: str, dest_path: str,
-              progress_cb=None, stop_event=None):
+              progress_cb=None, stop_event=None, msg_type: int = None):
     """接收端单文件拉取：直连复制端目录端口，以 FILE_BEGIN/FILE_DATA/FILE_END 流式收文件。
 
     与同步接收同一套逻辑：FILE_BEGIN 携带真实大小作为进度分母（恒定），分块顺序写入，
@@ -336,6 +347,8 @@ def pull_file(host: str, port: int, session_id: str, token: str, name: str, dest
         dest_path: 接收端写入的最终路径
         progress_cb: 可选，回调 (received_bytes, total_bytes)
         stop_event: 可选，threading.Event。置位时中止拉取并清理临时文件（窗口关闭/传输取消）。
+        msg_type: 拉取请求消息类型。None=剪贴板（0x18）；阶段 2 同步拉取传
+            MessageType.SYNC_PULL_REQ（0x23，同构复用 FileProvider 会话校验）。
 
     Returns:
         (成功?, 实际接收字节数, 错误消息)
@@ -387,7 +400,10 @@ def pull_file(host: str, port: int, session_id: str, token: str, name: str, dest
     tmp_fd, tmp_path = tempfile.mkstemp(prefix='.tcp_', suffix='.part', dir=dest_dir)
     try:
         with os.fdopen(tmp_fd, 'wb') as fh:
-            conn.sendall(Protocol.create_pull_request(session_id, token, name))
+            if msg_type == MessageType.SYNC_PULL_REQ:
+                conn.sendall(Protocol.create_sync_pull_req(session_id, token, name))
+            else:
+                conn.sendall(Protocol.create_pull_request(session_id, token, name))
             while True:
                 if stop_event is not None and stop_event.is_set():
                     cancelled = True

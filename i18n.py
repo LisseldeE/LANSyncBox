@@ -152,9 +152,6 @@ class I18n:
             "manual_sync_operation": "操作",
             "manual_sync_consistent": "列表一致，无需同步",
             "manual_sync_diff": "正在补齐差异项",
-            # 延迟显示
-            "latency_ms": "ms",
-            "latency_unknown": "--",
             "no_clients_connected": "无连接端",
             
             # 文件列表
@@ -171,7 +168,8 @@ class I18n:
             "toast_invalid_drop": "无效操作",
             # 文件状态
             "status_synced": "已同步",
-            "status_connected": "已连接",
+            "status_online": "在线",
+            "status_offline": "离线",
             "status_ready": "已就绪",
             "clipboard_text_synced": "已同步文本剪切板",
             "tcp_provider_start_fail": "文件目录服务启动失败",
@@ -201,7 +199,6 @@ class I18n:
             "status_syncing": "正在同步",
             "status_conflict": "冲突",
             "status_failed": "同步失败",
-            "status_disconnected": "已断开连接",
             
             # 提示文字
             "click_to_copy_room": "点击复制房间号",
@@ -453,9 +450,6 @@ class I18n:
             "manual_sync_operation": "Operation",
             "manual_sync_consistent": "Lists are consistent, no sync needed",
             "manual_sync_diff": "Filling in differences...",
-            # Latency display
-            "latency_ms": "ms",
-            "latency_unknown": "--",
             "no_clients_connected": "No clients connected",
             
             # File list
@@ -472,7 +466,8 @@ class I18n:
             "toast_invalid_drop": "Invalid operation",
             # File status
             "status_synced": "Synced",
-            "status_connected": "Connected",
+            "status_online": "Online",
+            "status_offline": "Offline",
             "status_ready": "Ready",
             "clipboard_text_synced": "Clipboard text synced",
             "tcp_provider_start_fail": "File service failed to start",
@@ -502,7 +497,6 @@ class I18n:
             "status_syncing": "Syncing",
             "status_conflict": "Conflict",
             "status_failed": "Failed",
-            "status_disconnected": "Disconnected",
             
             # Tooltip texts
             "click_to_copy_room": "Click to copy room code",
