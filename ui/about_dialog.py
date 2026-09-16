@@ -216,7 +216,6 @@ class AboutDialog(QDialog):
 
         # 下载落地页按语言区分（中文 Gitee / 其他 GitHub）
         releases_url = Config.GITEE_RELEASES if I18n.get_language() == "zh_CN" else Config.GITHUB_RELEASES
-
         # 解析远程与当前版本号（四段式元组比较）
         latest_match = re.search(r'R(\d+)\.(\d+)\.(\d+)\.(\d+)', latest)
         current_match = re.search(r'R(\d+)\.(\d+)\.(\d+)\.(\d+)', Config.APP_VERSION)
@@ -257,9 +256,16 @@ class AboutDialog(QDialog):
 
             msg_box.exec_()
 
-            # 处理用户选择
+            # 处理用户选择：直达对应版本的下载页（tag 格式 pro-RX.X.X.X）
             if msg_box.clickedButton() == yes_btn:
-                QDesktopServices.openUrl(QUrl(releases_url))
+                tag = f"pro-R{'.'.join(map(str, latest_version))}"
+                if I18n.get_language() == "zh_CN":
+                    # Gitee：/releases/{tag}
+                    url = f"{releases_url}/{tag}"
+                else:
+                    # GitHub：/releases/tag/{tag}
+                    url = f"{releases_url}/tag/{tag}"
+                QDesktopServices.openUrl(QUrl(url))
         else:
             # 已是最新版本
             self._show_styled_message(

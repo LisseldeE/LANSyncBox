@@ -9,7 +9,7 @@
 </div>
 
 <p align="center">
-  <a href="https://github.com/LisseldeE/LANSyncBox/releases"><img src="https://img.shields.io/badge/releases-R1.0.0.0-3b82f6" alt="releases R1.0.0.0"></a>
+  <a href="https://github.com/LisseldeE/LANSyncBox/releases/tag/pro-R1.0.0.0"><img src="https://img.shields.io/badge/releases-R1.0.0.0-3b82f6" alt="releases R1.0.0.0"></a>
   <a href="LICENSE"><img src="https://img.shields.io/github/license/LisseldeE/LANSyncBox" alt="License"></a>
   <img src="https://img.shields.io/badge/platform-Windows-blue?logo=windows" alt="Platform">
   <img src="https://img.shields.io/badge/platform-Linux-orange?logo=linux" alt="Platform">
@@ -98,6 +98,12 @@ LANSyncBox Pro is the upgraded version of [LANSyncBox](https://github.com/Lissel
 > Currently covers Windows 10/11 and Linux (x64) only; macOS support is on the roadmap.
 
 ## Download
+
+<p align="center">
+  <a href="https://apps.microsoft.com/detail/9n4g6w3rm3q6?referrer=appbadge&mode=full" target="_blank"  rel="noopener noreferrer">
+	  <img src="https://get.microsoft.com/images/en-us%20dark.svg" width="200"/>
+  </a>
+</p>
 
 <p align="center">
   <a href="https://github.com/LisseldeE/LANSyncBox/releases">

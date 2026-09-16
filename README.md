@@ -9,7 +9,7 @@
 </div>
 
 <p align="center">
-  <a href="https://github.com/LisseldeE/LANSyncBox/releases"><img src="https://img.shields.io/badge/releases-R1.0.0.0-3b82f6" alt="releases R1.0.0.0"></a>
+  <a href="https://github.com/LisseldeE/LANSyncBox/releases/tag/pro-R1.0.0.0"><img src="https://img.shields.io/badge/releases-R1.0.0.0-3b82f6" alt="releases R1.0.0.0"></a>
   <a href="LICENSE"><img src="https://img.shields.io/github/license/LisseldeE/LANSyncBox" alt="开源协议"></a>
   <img src="https://img.shields.io/badge/platform-Windows-blue?logo=windows" alt="支持平台">
   <img src="https://img.shields.io/badge/platform-Linux-orange?logo=linux" alt="支持平台">
@@ -98,6 +98,12 @@ LANSyncBox Pro 是 [LANSyncBox](https://github.com/LisseldeE/LANSyncBox/tree/mai
 > 目前仅覆盖 Windows 10/11 与 Linux (x64)；macOS 支持已在计划中
 
 ## 下载
+
+<p align="center">
+  <a href="https://apps.microsoft.com/detail/9n4g6w3rm3q6?referrer=appbadge&mode=full" target="_blank"  rel="noopener noreferrer">
+	  <img src="https://get.microsoft.com/images/zh-cn%20dark.svg" width="200"/>
+  </a>
+</p>
 
 <p align="center">
   <a href="https://github.com/LisseldeE/LANSyncBox/releases">
