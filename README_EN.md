@@ -28,7 +28,7 @@
 
 LANSyncBox is a cross-platform file synchronization tool built specifically for LAN scenarios. It enables multiple users on the same local network to share and sync files safely and smoothly, with no public network connection required. Built with Qt6, it supports large-file streaming transfers, serialized sending, and resumable transfers to keep data reliable and transfers stable under multi-connection concurrency.
 
-> 💡 Looking for [**LANSyncBox Pro**](https://github.com/LisseldeE/LANSyncBox/tree/pro) ? The more advanced **Pro edition** (an in-iteration Beta release featuring cross-device copy & paste **Delivery**, top-edge **Quick-Add**, **Collect mode**, and more) lives on the `pro` branch
+> 💡 Looking for [**LANSyncBox Pro**](https://github.com/LisseldeE/LANSyncBox/tree/pro)? The more advanced **Pro version** (an evolving Beta release built on a brand-new **decentralized architecture**, featuring cross-device copy-paste **delivery**, top **quick-add**, **collection mode**, **permission management** and more) lives on the `pro` branch.
 
 ## Project Screenshots
 | Main Interface | Sync Interface |
