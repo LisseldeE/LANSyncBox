@@ -90,8 +90,8 @@ class I18n:
             "room_found": "已找到房间 ({ip})",
             "room_found_manual": "已找到房间",
             "ready_waiting": "就绪，等待输入...",
-            "version_mismatch": "版本不一致（本机 {local} / 主机 {remote}），请升级后连接",
-            "version_match": "版本一致，可连接",
+            "version_mismatch": "同步逻辑版本不一致（本机 {local} / 主机 {remote}），请升级后连接",
+            "version_match": "同步逻辑版本一致，可连接",
 
             # 密码输入对话框（点击连接后按需弹出）
             "password_dialog_title": "输入房间密码",
@@ -185,6 +185,13 @@ class I18n:
             "clipboard_deliver_send": "发送",
             "clipboard_deliver_sent": "投递完成",
             "clipboard_deliver_send_fail": "投递失败",
+            # 自同步传输（发送端）动作与状态文本
+            "sync_action": "同步",
+            "sync_transfer_done": "完成",
+            "sync_transfer_fail": "失败",
+            # 自同步进度条动作（恢复旧版"发送/接收"显示逻辑）
+            "sync_transfer_send": "发送",
+            "sync_transfer_receive": "接收",
             "clipboard_file_received": "已接收 {name}",
             "clipboard_file_pull_fail": "接收 {name} 失败：{msg}",
             "clipboard_file_unavailable": "远程 {name} 文件不可用",
@@ -388,8 +395,8 @@ class I18n:
             "room_found": "Room found ({ip})",
             "room_found_manual": "Room found",
             "ready_waiting": "Ready, waiting for input...",
-            "version_mismatch": "Version mismatch (local {local} / host {remote}), please upgrade before connecting",
-            "version_match": "Version matches, ready to connect",
+            "version_mismatch": "Sync logic version mismatch (local {local} / host {remote}), please upgrade before connecting",
+            "version_match": "Sync logic version matches, ready to connect",
 
             # Password dialog (shown on demand after clicking connect)
             "password_dialog_title": "Enter Room Password",
@@ -483,6 +490,13 @@ class I18n:
             "clipboard_deliver_send": "Sending",
             "clipboard_deliver_sent": "Delivered",
             "clipboard_deliver_send_fail": "Deliver failed",
+            # Sync transfer (sender side) action & status text
+            "sync_action": "Sync",
+            "sync_transfer_done": "Done",
+            "sync_transfer_fail": "Failed",
+            # Sync progress bar actions (restore old "Send/Receive" display)
+            "sync_transfer_send": "Sending",
+            "sync_transfer_receive": "Receiving",
             "clipboard_file_received": "Received {name}",
             "clipboard_file_pull_fail": "Failed to receive {name}: {msg}",
             "clipboard_file_unavailable": "Remote {name} unavailable",

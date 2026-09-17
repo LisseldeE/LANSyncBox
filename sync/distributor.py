@@ -107,8 +107,10 @@ class Distributor(QObject):
         self._files_notify_handler = cb
 
     def _notify_log(self, msg: str):
+        # 修正：原为 self._notify_log(msg) 自递归（永不 emit），导致分发层日志在
+        # GUI（log_message Qt 信号）中全部静默丢失。现改为 emit 到 Qt 信号。
         try:
-            self._notify_log(msg)
+            self.log_message.emit(msg)
         except Exception:
             pass
         if self._log_handler:
@@ -186,21 +188,56 @@ class Distributor(QObject):
             self._op_counters.pop(file, None)
             self._clocks.pop(file, None)
 
-    def emit_pulled(self, file: str, remote_src_id: str, remote_op_no: int):
+    def emit_pulled(self, file: str, remote_src_id: str, remote_op_no: int,
+                    remote_clock: int = 0, remote_ts: float = 0.0,
+                    content_fresh: bool = True,
+                    bytes_clock: int = 0, bytes_ts: float = 0.0):
         """自同步拉取完成：记录本端已持有该文件并广播 add 状态（阶段 2）。
 
-        本地 FS 已由 pull_file 落盘完成；状态表 vv 推进到远端 op_no（本端已应用
-        该版本），并计入本端源计数，避免后续对比重复拉取。
+        本地 FS 已由 pull_file 落盘完成。状态表 vv 推进到远端 op_no（本端已
+        应用该版本），并计入本端源计数，避免后续对比重复拉取。clock/ts 取
+        拉取版本的仲裁知识指纹（快照 clock/ts）——即当前仲裁胜者，状态表不
+        回退、对账指纹比对不失配；用本端自增 clock/now-ts 会污染仲裁指纹。
+
+        bytes_clock/bytes_ts 为源端磁盘字节指纹（落盘内容的真实版本）：与知识
+        指纹不一致说明源端知识推进但磁盘字节未到位，本端拉到的可能是过时字节。
+        bytes_vv 推进到落盘内容版本 {remote_src_id: remote_op_no}，但仅当
+        content_fresh=True（源端字节指纹 == 快照知识版本，实际拉到的内容即
+        仲裁胜者）。fresh=False 说明源端知识推进但磁盘字节未到位，本端拉到的
+        是过时字节——不推进 bytes_vv，使对账兜底（知识 vv 胜 bytes_vv）继续
+        从可信源补拉收敛，杜绝「期望指纹标记陈旧字节」的永久分叉。
+
+        广播回执 vv 仅含本端自 op（不携带远端 src 版本）：回执携带 src 版本
+        会虚增他端知识——他端据此把胜者真实信号误判为「已应用」而去重，
+        永不触发冲突拉取 → 字节分叉永久定格（本环境复现过的核心竞态）。
         """
         with self._lock:
             op_no = self._op_counters.get(file, 0) + 1
             self._op_counters[file] = op_no
-            clock = self._clocks.get(file, 0) + 1
-            self._clocks[file] = clock
-        ts = time.time()
+            prev = self._states.get(file)
+            prev_bytes = dict(prev.bytes_vv) if prev else {}
+        ts = float(remote_ts or 0.0) or time.time()
+        clock = int(remote_clock or 0)
+        # 防胜者端被低版本拉取降级（关键）：本端状态表 (clock, ts) 是当前仲裁
+        # 胜者指纹。拉取完成若直接用拉取版本指纹覆盖，胜者端拉到败者字节后其
+        # 状态表会被降级为败者指纹——该指纹与磁盘字节一致（bytes_clock==clock、
+        # bytes_ts==ts），会以「可信源」姿态把败者内容散布全网，胜者内容永久
+        # 销毁 → 字节分叉。仅当拉取版本严格强于本端状态（clock/ts 更高）时才
+        # 采纳拉取指纹；否则保留本端（胜者）指纹。字节缺口由对账 backfill 从
+        # 字节新鲜的端补拉收敛（_need_bytes_backfill 的字节指纹门控）。
+        if prev is not None:
+            if clock < prev.clock or (clock == prev.clock and ts < prev.ts):
+                clock = prev.clock
+                ts = prev.ts
+        self._clocks[file] = max(self._clocks.get(file, 0), clock)
         st = FileState(name=file, op_no=op_no, state=STATE_ADD, exists=True,
                        clock=clock, ts=ts,
-                       vv={self.end_id: op_no, remote_src_id: remote_op_no})
+                       vv={self.end_id: op_no, remote_src_id: remote_op_no},
+                       bytes_vv=(merge_vv(prev_bytes,
+                                          {remote_src_id: remote_op_no})
+                                 if content_fresh else prev_bytes),
+                       bytes_clock=int(bytes_clock or 0),
+                       bytes_ts=float(bytes_ts or 0.0) or ts)
         self._store(st)
         signal = {
             'src_id': self.end_id,
@@ -210,7 +247,7 @@ class Distributor(QObject):
             'state': STATE_ADD,
             'clock': clock,
             'ts': ts,
-            'vv': {self.end_id: op_no, remote_src_id: remote_op_no},
+            'vv': {self.end_id: op_no},
             'pulled': True,  # 拉取完成回执：对端仅记知识，不再触发冲突覆盖拉取
         }
         if self.mesh is not None:
@@ -420,9 +457,21 @@ class Distributor(QObject):
                 prev = self._states.get(old_name)
                 vv_merged = dict(prev.vv) if prev else {}
                 vv_merged = merge_vv(vv_merged, vv)
+                # 内容随重命名移动（字节未变）：bytes_vv / 字节指纹从旧名延续到新名
+                prev_bytes = dict(prev.bytes_vv) if prev else {}
                 self._store(FileState(name=file, op_no=op_no, state=STATE_CHANGE,
-                                      exists=True, clock=clock, ts=ts, vv=vv_merged),
-                            remove=old_name)
+                                      exists=True, clock=clock, ts=ts,
+                                      vv=vv_merged, bytes_vv=prev_bytes,
+                                      bytes_clock=prev.bytes_clock if prev else 0,
+                                      bytes_ts=prev.bytes_ts if prev else 0.0))
+                if old_name != file:
+                    # 旧名留墓碑（变更 + 不存在）：替代直接移除旧条目。对端未收到
+                    # rename 时其快照仍含旧名存在条目，本端若删掉旧名状态，会把
+                    # 旧文件反向拉回（删除-拉取震荡）；留墓碑使对端据快照补删旧名，
+                    # 双方均为「变更 + 不存在」后由对账清理条目收敛。
+                    self._store(FileState(name=old_name, op_no=op_no,
+                                          state=STATE_CHANGE, exists=False,
+                                          clock=clock, ts=ts, vv=vv_merged))
             elif op == self.OP_DIR_CREATE:
                 os.makedirs(self._safe_join(file), exist_ok=True)
                 self._store(FileState(name=file, op_no=op_no, state=STATE_CHANGE,
@@ -446,7 +495,18 @@ class Distributor(QObject):
                 # 不再依赖主机转发（主机断线后其余端仍能互相同步）
                 self._request_conflict_pull(file, src_id)
             elif local is not None:
-                self._request_conflict_pull(file, src_id)
+                # 防覆盖竞态：本端磁盘内容更新于远端信号（mtime > 信号 ts）→
+                # 本端是尚未 emit 的新内容（本地写入先于 watcher 上报），跳过
+                # 冲突拉取，交由本端 watcher emit 后仲裁——否则胜者本端自己的
+                # 新字节会被旧版本拉取覆盖，胜者内容永久丢失 → 永久分叉。
+                # 兜底：即便误判（本地实为旧内容），对账 backfill 仍会补拉收敛。
+                try:
+                    if os.path.getmtime(self._safe_join(file)) > ts + 1e-2:
+                        self._notify_log(f"本端内容更新，跳过覆盖拉取: {file}")
+                    else:
+                        self._request_conflict_pull(file, src_id)
+                except OSError:
+                    self._request_conflict_pull(file, src_id)
         self._forward(signal, src_id)
         self._notify_applied(signal)
 
@@ -489,22 +549,52 @@ class Distributor(QObject):
         clock = signal['clock']
         ts = signal['ts']
         vv = signal.get('vv') or {src_id: op_no}
+        with self._lock:
+            prev = self._states.get(file)
+            prev_bytes = dict(prev.bytes_vv) if prev else {}
         try:
             if op == self.OP_ADD:
                 exists = os.path.exists(self._safe_join(file))
+                # 本地 emit：字节真实为本端版本 → bytes_vv 推进到 {本端: op_no}，
+                # 字节指纹 = 本端 (clock, ts)。对齐磁盘 mtime = 声明 ts：拉取端
+                # 落盘后以实际 dest mtime 判别「实际收到内容是否即声明指纹」——
+                # 磁盘 mtime 与声明不符即证明该端字节已被其自身并发拉取覆盖
+                # （谎报源），拒绝采纳。OSError（文件被锁/瞬时不可达）忽略：
+                # 最坏退化为无 mtime 校准，接收端判 fresh=False 走对账补拉。
+                try:
+                    os.utime(self._safe_join(file), (ts, ts))
+                except OSError:
+                    pass
                 self._store(FileState(name=file, op_no=op_no, state=STATE_ADD,
                                       exists=exists, clock=clock, ts=ts,
-                                      vv=vv))
+                                      vv=vv,
+                                      bytes_vv=merge_vv(prev_bytes,
+                                                        {src_id: op_no}),
+                                      bytes_clock=clock, bytes_ts=ts))
             elif op == self.OP_DELETE:
                 self._store(FileState(name=file, op_no=op_no, state=STATE_CHANGE,
                                       exists=False, clock=clock, ts=ts,
                                       vv=vv))
             elif op in (self.OP_RENAME, self.OP_MOVE):
                 old = signal.get('old', file)
+                old_st = self._states.get(old)
+                old_bytes = dict(old_st.bytes_vv) if old_st else {}
                 self._store(FileState(name=file, op_no=op_no, state=STATE_CHANGE,
                                       exists=os.path.exists(self._safe_join(file)),
-                                      clock=clock, ts=ts, vv=vv),
-                            remove=old)
+                                      clock=clock, ts=ts, vv=vv,
+                                      bytes_vv=old_bytes,
+                                      bytes_clock=old_st.bytes_clock if old_st else 0,
+                                      bytes_ts=old_st.bytes_ts if old_st else 0.0))
+                if old and old != file:
+                    # 旧名留墓碑（变更 + 不存在）：对端未收到 rename 时据快照补删
+                    # 旧名，避免旧条目残留/反向拉回；双方均为「变更 + 不存在」
+                    # 后由对账清理条目。
+                    prev_old = self._states.get(old)
+                    old_vv = dict(prev_old.vv) if prev_old else {}
+                    old_vv = merge_vv(old_vv, vv)
+                    self._store(FileState(name=old, op_no=op_no,
+                                          state=STATE_CHANGE, exists=False,
+                                          clock=clock, ts=ts, vv=old_vv))
             elif op == self.OP_DIR_CREATE:
                 self._store(FileState(name=file, op_no=op_no, state=STATE_CHANGE,
                                       exists=True, clock=clock, ts=ts,
@@ -526,13 +616,36 @@ class Distributor(QObject):
                 pass
 
     def _store(self, new_state: FileState, remove: str = None):
-        """写入状态表：与既有条目合并 vv/clock/ts（保留历史推进方向）。"""
+        """写入状态表：与既有条目合并 vv/clock/ts（保留历史推进方向）。
+
+        bytes_vv 仅当条目存在（exists=True 或显式给出）时合并——删除/拉取待命态
+        （add 已应用、字节未到位）不延续旧字节版本，字节已不存在。
+        字节指纹（bytes_clock/bytes_ts）合并规则：新状态显式给出（非零）采纳；
+        否则 exists=True 延续 prev（磁盘字节未改写）、exists=False 清零（删除）。
+        """
         with self._lock:
             prev = self._states.get(new_state.name)
             if prev:
                 new_state.vv = merge_vv(prev.vv, new_state.vv)
-                new_state.clock = max(new_state.clock, prev.clock)
-                new_state.ts = max(new_state.ts, prev.ts)
+                # 状态表 clock/ts 采用仲裁胜者自身指纹（不再 max 合并）：max 合并
+                # 会把「低时钟高时间戳」的败者 ts 混入胜者指纹，形成无人持有的
+                # 混合指纹——对账指纹比对（remote.ts==local_st.ts）永远失配、
+                # 胜者字节永不补拉 → 永久分叉。每个 _store 的新状态都已在调用方
+                # 赢下仲裁（或为本地最新操作/已通过过时判定的拉取版本），其
+                # (clock, ts) 即当前仲裁胜者指纹，直接采纳。
+                if new_state.bytes_vv or new_state.exists:
+                    new_state.bytes_vv = merge_vv(prev.bytes_vv,
+                                                  new_state.bytes_vv)
+                else:
+                    new_state.bytes_vv = {}
+                if new_state.bytes_clock or new_state.bytes_ts:
+                    pass  # 显式给出（非零）→ 采纳
+                elif new_state.exists:
+                    new_state.bytes_clock = prev.bytes_clock
+                    new_state.bytes_ts = prev.bytes_ts
+                else:
+                    new_state.bytes_clock = 0
+                    new_state.bytes_ts = 0.0
             self._states[new_state.name] = new_state
             if remove:
                 self._states.pop(remove, None)

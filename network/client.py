@@ -50,6 +50,8 @@ class SyncClient(QObject):
     # 去中心化阶段 2：自同步链路信号
     state_sync_done = Signal(bool)     # 一轮端到端对比结束（True=有差异正在补齐，False=一致）
     file_state_added = Signal(str)     # 自同步拉取完成落盘（相对路径），UI 刷新文件列表
+    sync_pull_progress = Signal(str, 'qlonglong', 'qlonglong')  # 自同步拉取进度（相对路径, 已收字节, 总字节）
+    sync_pull_done = Signal(str, bool)  # 自同步拉取结束（相对路径, 成功?）
     
     # 数据块大小（64KB）
     CHUNK_SIZE = 64 * 1024
@@ -88,11 +90,45 @@ class SyncClient(QObject):
         # 心跳探测线程控制：周期性 PING 主机并核对 PONG 回包，判定本端在线/离线
         self._ping_stop = threading.Event()
         self._ping_thread = None
+        self._ping_gen = 0  # 心跳线程代际号：重连启动新线程后旧线程据让位退出
         self.PING_INTERVAL = 1.0  # 每 1 秒发送一次 PING 给主机（连接端单机独立探测，主机端汇总不增加负担）
         self.OFFLINE_TIMEOUT = 5.0  # 心跳超时阈值：连续超过该时长未收到主机 PONG → 判定离线并断开
 
         # 创建传输队列，控制并发传输数量
         self.transfer_queue = TransferQueue(max_concurrent=5)
+
+        # ---- 全网状管理平面（故障切换 / 主机回归挂回） ----
+        # 可用端点列表：首位=原始主机，其余=已登记对端（含各自管理端口）；
+        # 管理连接失效时按序试连（一个不可用立即试下一个），整轮失败 1s→30s 退避。
+        self._endpoint_list = []           # [{end_id, name, ip, mesh_port, mgmt_port}]
+        self._ep_lock = threading.Lock()   # 保护端点列表
+        self._attached_ep = None           # 当前管理连接挂接的端点（试连成功时记录）
+        self._reported_offline = False     # 是否已发过 disconnected（整轮失败才发一次）
+        self._mgmt_server = None           # 本端管理监听（reuse 模式 SyncServer）
+        self._auth_wait = threading.Condition()  # 认证结果等待（_try_attach 试连用）
+        self._auth_result = None           # 最近一次认证结果（True/False/None）
+        self._reconnect_stop = threading.Event()  # 停止自动重连
+        self._reconnect_wake = threading.Event()  # 唤醒重连循环
+        self._reconnect_lock = threading.Lock()   # 保护重连线程启动
+        self._reconnect_thread = None      # 重连循环线程
+        self._reconnect_active = False     # 自动重连是否接管管理连接（试连被拒不弹窗、
+                                           # 断连不直接发 disconnected，交由循环收敛）
+        self._backoff = 1.0                # 重连退避（整轮失败递增，1s→30s）
+        # 失败日志节流：同端点（ip:port）在窗口内去重，防断连风暴刷屏日志
+        self._last_fail_key = None
+        self._last_fail_time = 0.0
+        # 端点失败计数：连续失败达阈值且列表不止一项时降级移除该端点
+        # （对端离线后不再每轮超时干等；主机回归经 JOIN/END_INFO 重新登记）。
+        # 首位占位主机（end_id=''）永不降级。
+        self._fail_counts = {}
+
+        # 自动重连参数
+        self.RECONNECT_BASE = 1.0          # 整轮端点试连失败后的初始退避（秒）
+        self.RECONNECT_MAX = 30.0          # 最大退避（秒）
+        self.PREFERRED_REPROBE_INTERVAL = 10.0  # 挂非主机端点时周期回探主机（秒）
+        self.AUTH_WAIT_TIMEOUT = 3.0       # 单端点试连的认证等待上限（秒）
+        self.FAIL_LOG_THROTTLE = 10.0      # 端点连接失败日志节流窗口（秒）
+        self.FAIL_DROP_LIMIT = 3           # 端点连续失败降级阈值（次）
     
     def _safe_join(self, filename: str) -> str:
         """
@@ -108,10 +144,16 @@ class SyncClient(QObject):
             raise ValueError(f"非法路径: {filename}")
         return file_path
     
-    def connect_to_server(self, host: str, port: int = None) -> bool:
-        """连接到服务器"""
+    def connect_to_server(self, host: str, port: int = None, reset_list: bool = True) -> bool:
+        """连接到服务器（管理连接）
+
+        reset_list=True（UI 首次连/重连）：重建可用端点列表，首位=原始主机；
+        reset_list=False（自动重连试连）：保留列表，仅建连认证。
+        """
         port = port or Config.DEFAULT_PORT
-        
+        if reset_list:
+            self._reset_endpoint_list(host, port)
+
         try:
             self.socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
             # 增大 TCP 缓冲区，避免大文件传输时 sendall 因缓冲区满而 1 秒超时
@@ -120,32 +162,70 @@ class SyncClient(QObject):
                 self.socket.setsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF, 4 * 1024 * 1024)  # 4MB
             except Exception:
                 pass
-            self.socket.settimeout(5.0)
+            self.socket.settimeout(2.0 if self._reconnect_active else 5.0)
             self.socket.connect((host, port))
             self.socket.settimeout(1.0)
             self.host_ip = host
-            
+
             self.running = True
-            
-            # 发送验证请求
-            auth_msg = Protocol.create_auth_request(Config.APP_VERSION, self.room_code, self.password)
+            self._reported_offline = False
+
+            # 发送验证请求（一致性校验只比同步逻辑版本号，UI/展示变更不要求全员升级）
+            auth_msg = Protocol.create_auth_request(Config.SYNC_LOGIC_VERSION, self.room_code, self.password)
             self._send_guard.send(self.socket, auth_msg)
-            
+
             # 启动接收线程
             receive_thread = threading.Thread(target=self._receive_loop, daemon=True)
             receive_thread.start()
-            
+
             return True
-            
+
         except Exception as e:
-            self.error_occurred.emit(f"连接服务器失败: {e}")
+            # 建连失败：回收半开 socket，交调用方处理
+            try:
+                if self.socket:
+                    self.socket.close()
+            except Exception:
+                pass
+            self.socket = None
+            if self._reconnect_active:
+                # 自动重连试连失败：节流去重（同端点窗口内仅记一次，防断连风暴
+                # 刷屏），交重连循环试下一端点
+                now = time.time()
+                key = f"{host}:{port}"
+                if key != self._last_fail_key \
+                        or now - self._last_fail_time >= self.FAIL_LOG_THROTTLE:
+                    self._last_fail_key = key
+                    self._last_fail_time = now
+                    self.log_message.emit(f"端点连接失败: {e}")
+            else:
+                self.error_occurred.emit(f"连接服务器失败: {e}")
             return False
     
     def disconnect(self):
-        """断开连接"""
+        """断开连接（手动/退出）：停止自动重连、拆除全部链路并补发离线信号。"""
+        # 停止自动重连（唤醒循环线程让其尽快退出）
+        self._reconnect_stop.set()
+        self._reconnect_wake.set()
+        with self._reconnect_lock:
+            self._reconnect_active = False
+        with self._auth_wait:
+            self._auth_result = None
+            self._auth_wait.notify_all()
+
         self.running = False
         self.authenticated = False
         self._ping_stop.set()
+        self._attached_ep = None
+        self._reported_offline = True
+
+        # 关闭本端管理监听（reuse 模式 SyncServer：共享宿主对象，stop 不回收宿主数据平面）
+        if self._mgmt_server:
+            try:
+                self._mgmt_server.stop()
+            except Exception:
+                pass
+            self._mgmt_server = None
 
         # 关闭网状连接（网状直连随本端退出一并拆除）
         if self.mesh:
@@ -188,18 +268,30 @@ class SyncClient(QObject):
                 pass
         self.socket = None
 
+        # 手动断开：UI 落定离线态（原由接收线程退出时补发；现接收线程让位不越权）
+        self.disconnected.emit()
+
     def _start_ping_thread(self):
-        """启动心跳探测线程"""
-        if self._ping_thread and self._ping_thread.is_alive():
-            return
+        """启动心跳探测线程（每次连接建立新线程）。
+
+        快速重连时旧线程可能仍在收尾（disconnect 已置位 _ping_stop）：先清停拍
+        标志并递增代际号，旧线程在下一拍发现代际不符即让位退出——避免新连接
+        永久无心跳（静默失效），也避免新旧两线程并发 PING。
+        """
         self._ping_stop.clear()
-        self._ping_thread = threading.Thread(target=self._ping_loop, daemon=True)
+        self._ping_gen += 1
+        gen = self._ping_gen
+        self._ping_thread = threading.Thread(target=self._ping_loop, args=(gen,), daemon=True)
         self._ping_thread.start()
 
-    def _ping_loop(self):
-        """心跳探测线程：每 1 秒 PING 主机一次；超过 OFFLINE_TIMEOUT 未收到 PONG 回包
-        即判定离线（主机拔线/杀进程等半开场景），主动断开连接触发 disconnected。"""
+    def _ping_loop(self, gen: int):
+        """心跳探测线程：每 1 秒 PING 当前管理连接一次；超过 OFFLINE_TIMEOUT 未收到
+        PONG 回包即判定离线（主机拔线/杀进程等半开场景），触发故障切换
+        （_handle_management_lost：保留数据平面，按可用端点列表切至下一端点）。
+        gen 为线程代际号：新连接启动新线程后，旧线程据此让位退出（防重复 PING）。"""
         while not self._ping_stop.is_set():
+            if gen != self._ping_gen:
+                break  # 已被新连接的新线程取代，让位退出
             if self._ping_stop.wait(self.PING_INTERVAL):
                 break
             if not self.socket or not self.authenticated:
@@ -207,8 +299,8 @@ class SyncClient(QObject):
             with self._ping_lock:
                 last = self._last_pong
             if last is not None and time.time() - last > self.OFFLINE_TIMEOUT:
-                self.log_message.emit("主机心跳超时，判定离线")
-                self.disconnect()
+                self.log_message.emit("主机心跳超时，判定离线，切换下一端点")
+                self._handle_management_lost()
                 break
             try:
                 # 可恢复发送：大文件传输背压时 PING 不丢失，避免误判离线
@@ -216,6 +308,262 @@ class SyncClient(QObject):
                     self.socket, Protocol.create_ping(time.time()))
             except Exception:
                 pass
+
+    # ---- 全网状管理平面：故障切换 / 主机回归挂回 ----
+
+    def _handle_management_lost(self):
+        """管理连接失效：保留数据平面（mesh/distributor/store），关闭管理 socket，
+        进入自动重连（按序试连可用端点）。"""
+        self._close_mgmt_socket()
+        self._start_reconnect()
+
+    def _start_reconnect(self):
+        """启动自动重连循环（幂等：已有存活线程则仅唤醒，避免并发多个循环）。"""
+        with self._reconnect_lock:
+            if self._reconnect_thread is not None and self._reconnect_thread.is_alive():
+                self._reconnect_wake.set()
+                return
+            self._reconnect_stop.clear()
+            self._reconnect_wake.clear()
+            self._reconnect_active = True
+            self._reconnect_thread = threading.Thread(target=self._reconnect_loop, daemon=True)
+            self._reconnect_thread.start()
+            self._reconnect_wake.set()
+
+    def _reconnect_loop(self):
+        """自动重连循环：无管理连接时按序试连可用端点（一个不可用立即试下一个，
+        整轮失败 1s→30s 退避）；已保持管理连接且挂接非主机端点时，每 10s 回探
+        列表首位（主机），主机回归立即切回主机管理连接。"""
+        while self.running and not self._reconnect_stop.is_set():
+            try:
+                if self.socket and self.authenticated:
+                    # 已保持管理连接：仅当挂接非主机端点时周期回探主机
+                    idx = self._current_ep_index()
+                    if idx == 0 or idx == -1:
+                        # 已挂主机 / 无法识别挂接端点：仅等待不探活
+                        self._reconnect_wake.wait(self.PREFERRED_REPROBE_INTERVAL)
+                        self._reconnect_wake.clear()
+                        continue
+                    head = self._best_endpoint(0)
+                    if head and self._probe_endpoint(head):
+                        self.log_message.emit("主机已回归，切换回主机管理连接")
+                        self._close_mgmt_socket()
+                        continue
+                    self._reconnect_wake.wait(self.PREFERRED_REPROBE_INTERVAL)
+                    self._reconnect_wake.clear()
+                    continue
+                # 无管理连接：按序试连端点
+                eps = self._endpoint_snapshot()
+                if not eps:
+                    self._report_offline_once()
+                    self._reconnect_wake.wait(self.RECONNECT_BASE)
+                    self._reconnect_wake.clear()
+                    continue
+                if self._try_endpoints(eps):
+                    continue
+                self._report_offline_once()
+                self._backoff = min(self._backoff * 2, self.RECONNECT_MAX)
+                self._reconnect_wake.wait(self._backoff)
+                self._reconnect_wake.clear()
+            except Exception:
+                pass
+
+    def _try_endpoints(self, eps: list) -> bool:
+        """按序试连端点列表：一个不可用立即试下一个；首个成功返回 True。"""
+        for ep in eps:
+            if self._reconnect_stop.is_set() or not self.running:
+                return False
+            try:
+                if self._try_attach(ep):
+                    return True
+            except Exception:
+                continue
+        return False
+
+    def _try_attach(self, ep: dict) -> bool:
+        """试连单个端点（管理连接）：TCP 建连 + 等待认证结果。
+        失败返回 False 并累计失败计数（达阈值降级移除）；成功记录挂接端点并重置退避。"""
+        ip = ep.get('ip', '')
+        mgmt_port = int(ep.get('mgmt_port', 0) or 0)
+        if not ip or mgmt_port <= 0:
+            return False
+        with self._auth_wait:
+            self._auth_result = None
+        if not self.connect_to_server(ip, mgmt_port, reset_list=False):
+            self._note_ep_fail(ep)
+            return False
+        with self._auth_wait:
+            self._auth_wait.wait_for(
+                lambda: self._auth_result is not None
+                        or self._reconnect_stop.is_set() or not self.running,
+                timeout=self.AUTH_WAIT_TIMEOUT)
+            result = self._auth_result
+            self._auth_result = None
+        if not result:
+            self._close_mgmt_socket()
+            self._note_ep_fail(ep)
+            return False
+        self._note_ep_ok(ep)
+        self._attached_ep = dict(ep)
+        self._reported_offline = False
+        self._backoff = self.RECONNECT_BASE
+        self.log_message.emit(
+            f"端点切换: 已连接 {ep.get('name', '')} ({ep.get('end_id', '')}) {ip}")
+        return True
+
+    def _note_ep_fail(self, ep: dict):
+        """端点试连失败：累计连续失败计数，达阈值且列表不止一项 → 降级移除该端点。
+        首位占位主机（end_id=''）只计数不降级——主机离线后不应被永久丢，回归后
+        经 END_INFO/MESH_PEER_JOIN 重新登记（_upsert_endpoint 清除失败计数）。"""
+        end_id = ep.get('end_id', '')
+        with self._ep_lock:
+            self._fail_counts[end_id] = self._fail_counts.get(end_id, 0) + 1
+            if (end_id and self._fail_counts[end_id] >= self.FAIL_DROP_LIMIT
+                    and len(self._endpoint_list) > 1):
+                self._endpoint_list = [
+                    e for e in self._endpoint_list if e.get('end_id') != end_id
+                ]
+                self._fail_counts.pop(end_id, None)
+
+    def _note_ep_ok(self, ep: dict):
+        """端点试连成功：清除该端失败计数（重新计连续失败）。"""
+        with self._ep_lock:
+            self._fail_counts.pop(ep.get('end_id', ''), None)
+
+    @staticmethod
+    def _probe_endpoint(ep: dict) -> bool:
+        """裸 TCP 探活：仅建连即关，不认证（未认证连接不计入主机在线数，
+        避免周期回探导致主机在线数闪烁）。"""
+        ip = ep.get('ip', '')
+        mgmt_port = int(ep.get('mgmt_port', 0) or 0)
+        if not ip or mgmt_port <= 0:
+            return False
+        s = None
+        try:
+            s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            s.settimeout(2.0)
+            s.connect((ip, mgmt_port))
+            return True
+        except OSError:
+            return False
+        finally:
+            if s is not None:
+                try:
+                    s.close()
+                except Exception:
+                    pass
+
+    def _report_offline_once(self):
+        """整轮端点试连失败后补发一次离线信号（避免每轮退避重复弹离线）。"""
+        if not self._reported_offline:
+            self._reported_offline = True
+            self.disconnected.emit()
+
+    def _close_mgmt_socket(self):
+        """关闭当前管理连接（保留数据平面 mesh/distributor/store）。"""
+        self.authenticated = False
+        self._ping_stop.set()
+        self._attached_ep = None
+        sock = self.socket
+        self.socket = None
+        if sock:
+            try:
+                sock.close()
+            except Exception:
+                pass
+
+    def _reset_endpoint_list(self, host: str, port: int):
+        """重置可用端点列表：首位=原始主机（初始仅有主机，其余对端随
+        MESH_PEER_LIST/JOIN/END_INFO 逐步登记）。"""
+        with self._ep_lock:
+            self._endpoint_list = [{
+                'end_id': '',
+                'name': '主机',
+                'ip': host,
+                'mesh_port': 0,
+                'mgmt_port': int(port or 0),
+            }]
+        self._attached_ep = None
+
+    def _upsert_endpoint(self, info: dict):
+        """登记/更新可用端点（来自 END_INFO/MESH_PEER_LIST/MESH_PEER_JOIN）。
+
+        按 end_id 匹配合并（非空字段覆盖）；end_id 为空或本端跳过；新端点若与
+        首位占位（原主机）同 ip 则回填占位，否则追加到列表尾部（保持首位=主机）。
+        """
+        if not isinstance(info, dict):
+            return
+        end_id = info.get('end_id', '')
+        if not end_id or end_id == UserConfig.get_end_id():
+            return
+        entry = {
+            'end_id': end_id,
+            'name': info.get('name', ''),
+            'ip': info.get('ip', ''),
+            'mesh_port': int(info.get('mesh_port', 0) or 0),
+            'mgmt_port': int(info.get('mgmt_port', 0) or 0),
+        }
+        with self._ep_lock:
+            self._fail_counts.pop(end_id, None)  # 重新登记 → 重置失败计数
+            for i, ep in enumerate(self._endpoint_list):
+                if ep.get('end_id') == end_id:
+                    self._endpoint_list[i] = self._merge_endpoint(ep, entry)
+                    return
+            # 新端点：与首位占位同主机（ip 一致）→ 回填占位（主机回归登记）；
+            # 否则追加到列表尾部
+            for i, ep in enumerate(self._endpoint_list):
+                if not ep.get('end_id') and entry.get('ip') == ep.get('ip'):
+                    self._endpoint_list[i] = self._merge_endpoint(ep, entry)
+                    return
+            self._endpoint_list.append(entry)
+
+    @staticmethod
+    def _merge_endpoint(old: dict, new: dict) -> dict:
+        """合并端点信息：新字段非空则覆盖，缺省保留旧值。"""
+        merged = dict(old)
+        for k, v in new.items():
+            if v:
+                merged[k] = v
+        return merged
+
+    def _drop_endpoint(self, end_id: str):
+        """移除可用端点（MESH_PEER_LEAVE：对端离线）。"""
+        if not end_id:
+            return
+        with self._ep_lock:
+            self._fail_counts.pop(end_id, None)
+            self._endpoint_list = [
+                ep for ep in self._endpoint_list if ep.get('end_id') != end_id
+            ]
+
+    def _endpoint_snapshot(self) -> list:
+        """可用端点列表快照（线程安全拷贝，供重连循环遍历）。"""
+        with self._ep_lock:
+            return [dict(e) for e in self._endpoint_list]
+
+    def _best_endpoint(self, index: int = 0) -> Optional[dict]:
+        """取列表中第 index 个端点（默认首位=原始主机）；越界返回 None。"""
+        eps = self._endpoint_snapshot()
+        if 0 <= index < len(eps):
+            return eps[index]
+        return None
+
+    def _current_ep_index(self) -> int:
+        """当前挂接端点在列表中的下标；-1=无法识别（仅等待不探活，防误关正常连接）。"""
+        attached = self._attached_ep
+        if not attached:
+            return -1
+        with self._ep_lock:
+            if attached.get('end_id'):
+                for i, ep in enumerate(self._endpoint_list):
+                    if ep.get('end_id') == attached.get('end_id'):
+                        return i
+            else:
+                # 挂接端点无 end_id（占位主机）：按 ip 匹配
+                for i, ep in enumerate(self._endpoint_list):
+                    if ep.get('ip') == attached.get('ip'):
+                        return i
+        return -1
 
     def send_clipboard(self, mime_type: str, data: bytes):
         """连接端本端复制时，上报剪切板内容给主机（由主机分发给其余端）
@@ -255,29 +603,38 @@ class SyncClient(QObject):
         return False
 
     def _receive_loop(self):
-        """接收数据循环"""
-        while self.running:
+        """接收数据循环（每次连接独立 receiver，防新旧连接线程交错污染缓冲）"""
+        sock = self.socket
+        receiver = MessageReceiver()
+        while self.running and self.socket is sock:
             try:
-                data = self.socket.recv(65536)
+                data = sock.recv(65536)
                 if not data:
                     break
-                
-                self.receiver.feed(data)
-                
+
+                receiver.feed(data)
+
                 # 处理所有完整消息
-                while self.receiver.has_complete_message():
-                    message = self.receiver.get_message()
+                while receiver.has_complete_message():
+                    message = receiver.get_message()
                     if message:
                         self._process_message(message)
-                        
+
             except socket.timeout:
                 continue
             except Exception as e:
-                if self.running:
+                if self.running and self.socket is sock:
                     self.log_message.emit(f"接收错误: {e}")
                 break
-        
-        # 断开连接
+
+        # 退出路径
+        if not self.running or self.socket is not sock:
+            # 手动断开 / 已被新连接替换：旧线程让位，不越权清 authenticated/发信号
+            return
+        # 当前管理连接被对端关闭/异常：保留数据平面（mesh），进入自动重连
+        if self._reconnect_active:
+            self._handle_management_lost()
+            return
         self.authenticated = False
         self.disconnected.emit()
     
@@ -298,6 +655,19 @@ class SyncClient(QObject):
             temp_file_path = file_path + '.tmp'  # 临时文件
 
             os.makedirs(os.path.dirname(file_path), exist_ok=True)
+
+            # 同名重发防御（阶段 4 已移除 mtime 互取消）：上一同名会话尚未结束
+            # （句柄未关）时先回收旧条目，避免旧会话 DATA/END 与新会话错位写
+            # 同一临时文件造成字节交错、旧句柄泄漏；'wb' 打开天然截断旧 temp。
+            with self._receiving_lock:
+                old_rf = self.receiving_files.pop(filename, None)
+            if old_rf:
+                old_handle = old_rf.get('handle')
+                if old_handle:
+                    try:
+                        old_handle.close()
+                    except Exception:
+                        pass
 
             # 创建临时文件句柄，准备流式写入
             try:
@@ -488,7 +858,8 @@ class SyncClient(QObject):
             self._handle_perm_update(perm)
 
         elif msg_type == MessageType.END_INFO:
-            # 去中心化：主机端身份信息（含 mesh_port），记录主机端点供引导/建连
+            # 去中心化：主机端身份信息（含 mesh_port/mgmt_port），记录主机端点供
+            # 引导/建连，并登记进可用端点列表（故障切换候选）
             if isinstance(content, dict):
                 end_id = content.get('end_id', '')
                 if end_id and end_id != UserConfig.get_end_id():
@@ -498,23 +869,36 @@ class SyncClient(QObject):
                         'ip': self.host_ip or '',
                         'mesh_port': int(content.get('mesh_port', 0) or 0),
                     })
+                    self._upsert_endpoint({
+                        'end_id': end_id,
+                        'name': content.get('name', ''),
+                        'ip': self.host_ip or '',
+                        'mesh_port': int(content.get('mesh_port', 0) or 0),
+                        'mgmt_port': int(content.get('mgmt_port', 0) or 0),
+                    })
 
         elif msg_type == MessageType.MESH_PEER_LIST:
-            # 去中心化：主机引导 → 批量登记对端并建立网状直连
+            # 去中心化：主机引导 → 批量登记对端（含管理端口）并建立网状直连
             if self.mesh and isinstance(content, dict):
-                self.mesh.bootstrap_peers(content.get('peers', []))
+                peers = content.get('peers', []) or []
+                self.mesh.bootstrap_peers(peers)
+                for p in peers:
+                    if isinstance(p, dict):
+                        self._upsert_endpoint(p)
 
         elif msg_type == MessageType.MESH_PEER_JOIN:
-            # 去中心化：新端加入通告 → 反向与新端建直连
+            # 去中心化：新端加入通告 → 反向与新端建直连，并登记进可用端点列表
             if self.mesh and isinstance(content, dict):
                 peer = content.get('peer')
                 if isinstance(peer, dict):
                     self.mesh.add_peer(Endpoint.from_dict(peer))
+                    self._upsert_endpoint(peer)
 
         elif msg_type == MessageType.MESH_PEER_LEAVE:
-            # 去中心化：端离线通告 → 拆除与该端的直连
+            # 去中心化：端离线通告 → 拆除与该端的直连，并移除可用端点
             if self.mesh and isinstance(content, dict):
                 self.mesh.remove_peer(content.get('end_id', ''))
+                self._drop_endpoint(content.get('end_id', ''))
     
     def _send_mode_request(self):
         """认证成功后向主机端请求当前模式"""
@@ -526,43 +910,80 @@ class SyncClient(QObject):
             pass
 
     def _start_mesh_and_send_end_info(self):
-        """去中心化：认证成功后启动网状监听，并向主机交换 END_INFO（含本端 mesh_port）。
+        """去中心化：认证成功后确保网状链路与管理监听就绪，并向当前管理连接
+        交换 END_INFO（含本端 mesh_port/mgmt_port）。
 
-        主机随后回 END_INFO 记录主机端点；新端加入的引导（MESH_PEER_LIST）与
-        其余端的 JOIN 通告均在此认证链路上接收。
+        故障切换（主机下线切至对端）时复用同一 mesh/distributor/store（数据平面
+        保留不重建），仅重新交换 END_INFO；主机随后回 END_INFO 记录主机端点，
+        新端加入的引导（MESH_PEER_LIST）与其余端的 JOIN 通告均在此认证链路上接收。
         """
-        if self.mesh is None:
-            self.mesh = MeshManager(parent=self)
-            self.mesh.log_message.connect(self.log_message)
-        self.mesh.start()
-        # 分发链路引擎：本地操作 → 网状直连传播；收到信号去重/应用/转发
-        self.distributor = Distributor(
-            UserConfig.get_end_id(), self.sync_folder,
-            mesh=self.mesh, parent=self)
-        self.distributor.log_message.connect(self.log_message)
-        self.distributor.signal_applied.connect(self._on_distributor_applied)
-        self.mesh.set_message_handler(self._on_mesh_message)
-        # 自同步链路（阶段 2）：端到端状态对比与拉取；直连建立自动补齐
-        self.file_state_store = FileStateStore(
-            UserConfig.get_end_id(), self.sync_folder,
-            mesh=self.mesh, distributor=self.distributor,
-            provider=self._file_provider, parent=self)
-        self.file_state_store.log_message.connect(self.log_message)
-        self.file_state_store.sync_done.connect(self.state_sync_done)
-        self.file_state_store.file_added.connect(self.file_state_added)
-        # 阶段 3：冲突覆盖（远端胜出）→ 自同步链路拉取胜方字节
-        self.distributor.set_conflict_pull_handler(
-            self.file_state_store.request_conflict_pull)
-        # 阶段 5：网状投递通知 → 复用既有 files_notify_received 信号回投 UI
-        self.distributor.files_notify_received.connect(self.files_notify_received)
-        self.mesh.peer_connected.connect(self._on_mesh_peer_connected)
-        if not self.socket or not self.mesh.mesh_port:
+        self._ensure_mesh_chain()
+        self._ensure_mgmt_server()
+        if not self.socket or not self.mesh or not self.mesh.mesh_port:
             return
         try:
             self._send_guard.send(self.socket, Protocol.create_end_info(
-                UserConfig.get_end_id(), socket.gethostname(), self.mesh.mesh_port))
+                UserConfig.get_end_id(), socket.gethostname(), self.mesh.mesh_port,
+                mgmt_port=self._mgmt_server.port if self._mgmt_server else 0))
         except Exception:
             pass
+
+    def _ensure_mesh_chain(self):
+        """确保数据平面就绪：mesh/distributor/file_state_store（已存在则保留，
+        仅 mesh 停止时重新 start）。故障切换重复调用不重建、不重连信号。"""
+        if self.mesh is None:
+            self.mesh = MeshManager(parent=self)
+            self.mesh.log_message.connect(self.log_message)
+            self.mesh.start()
+            # 分发链路引擎：本地操作 → 网状直连传播；收到信号去重/应用/转发
+            self.distributor = Distributor(
+                UserConfig.get_end_id(), self.sync_folder,
+                mesh=self.mesh, parent=self)
+            self.distributor.log_message.connect(self.log_message)
+            self.distributor.signal_applied.connect(self._on_distributor_applied)
+            self.mesh.set_message_handler(self._on_mesh_message)
+            # 自同步链路（阶段 2）：端到端状态对比与拉取；直连建立自动补齐
+            self.file_state_store = FileStateStore(
+                UserConfig.get_end_id(), self.sync_folder,
+                mesh=self.mesh, distributor=self.distributor,
+                provider=self._file_provider, parent=self)
+            self.file_state_store.log_message.connect(self.log_message)
+            self.file_state_store.sync_done.connect(self.state_sync_done)
+            self.file_state_store.file_added.connect(self.file_state_added)
+            self.file_state_store.pull_progress.connect(self.sync_pull_progress)
+            self.file_state_store.pull_done.connect(self.sync_pull_done)
+            # 阶段 3：冲突覆盖（远端胜出）→ 自同步链路拉取胜方字节
+            self.distributor.set_conflict_pull_handler(
+                self.file_state_store.request_conflict_pull)
+            # 阶段 5：网状投递通知 → 复用既有 files_notify_received 信号回投 UI
+            self.distributor.files_notify_received.connect(self.files_notify_received)
+            self.mesh.peer_connected.connect(self._on_mesh_peer_connected)
+        elif not self.mesh.running:
+            self.mesh.start()
+
+    def _ensure_mgmt_server(self):
+        """确保本端管理监听就绪（reuse 模式 SyncServer：共享本端 mesh/distributor/
+        store，供其余端作为管理连接端点接入；模式与当前保持一致）。"""
+        if self._mgmt_server is not None:
+            # 复用已启动的管理监听：仅同步当前模式（认证/切换后保持一致）
+            self._mgmt_server.mode = self.mode
+            return
+        try:
+            from network.server import SyncServer
+            server = SyncServer(self.room_code, self.password)
+            # reuse 模式：注入宿主对象，start(reuse=True) 不重建数据平面
+            server.mesh = self.mesh
+            server.distributor = self.distributor
+            server.file_state_store = self.file_state_store
+            server._file_provider = self._file_provider
+            server.mode = self.mode
+            if not server.start(port=Config.DEFAULT_PORT, reuse=True):
+                self.log_message.emit("本端管理监听启动失败")
+                return
+            self._mgmt_server = server
+            self.log_message.emit(f"本端管理监听端口: {server.port}（全网状管理平面）")
+        except Exception as e:
+            self.log_message.emit(f"本端管理监听启动失败: {e}")
 
     # ---- 分发链路（去中心化阶段 1）：本地操作沿网状直连传播 ----
 
@@ -598,8 +1019,17 @@ class SyncClient(QObject):
                 self.distributor.on_files_notify(content)
 
     def _on_mesh_peer_connected(self, end_id: str, name: str):
-        """网状直连建立：同步模式 + 非只读下自动发起一轮状态对比（断线重连自动补齐，阶段 2）。"""
-        if self.mode == "sync" and self.perm != "ro" and self.file_state_store:
+        """网状直连建立：同步模式自动发起一轮状态对比（断线重连自动补齐，阶段 2）。
+
+        只读端同样发起（仅单向下拉：从对端拉取本端缺失文件，本端不供他端拉取
+        由 handle_state_req 回空 entries 保证）。
+        """
+        if self.mode == "sync" and self.file_state_store:
+            # 本地补扫兜底：mesh 未就绪窗口内添加/启动前已放置的文件入同步
+            try:
+                self.file_state_store.emit_local_missing()
+            except Exception:
+                pass
             self.file_state_store.request_all()
 
     def set_file_provider(self, provider):
@@ -650,6 +1080,8 @@ class SyncClient(QObject):
             mode = "sync"
         self.mode = mode
         self.mode_received = True  # 标记已收到模式下发（复用连接时供 UI 补偿状态）
+        if self._mgmt_server is not None:
+            self._mgmt_server.mode = self.mode  # 本端管理监听同步模式
         self.mode_changed.emit(mode)
         if mode == "sync":
             # 阶段 4：同步模式下初次加入走端到端对比（自同步链路就绪且有网状
@@ -678,6 +1110,8 @@ class SyncClient(QObject):
                 self.transfer_queue.queue.clear()
         self.mode = new_mode
         self.mode_received = True  # 切换指令同样视为已收到模式下发
+        if self._mgmt_server is not None:
+            self._mgmt_server.mode = self.mode  # 本端管理监听同步模式
 
         try:
             self._send_guard.send(self.socket, Protocol.create_mode_message(MessageType.MODE_ACK, new_mode))
@@ -741,6 +1175,13 @@ class SyncClient(QObject):
             
             if success:
                 self.authenticated = True
+                # 通知试连方（_try_attach）认证结果
+                with self._auth_wait:
+                    self._auth_result = True
+                    self._auth_wait.notify_all()
+                # 首次认证成功后自动重连接管管理连接（此后断连不直接弹窗/发离线，
+                # 交由重连循环收敛：先试可用端点，整轮失败才发一次离线）
+                self._reconnect_active = True
                 self.connected.emit()
                 self.log_message.emit("验证成功")
                 # 认证成功：心跳计时起点（此后周期 PING 主机并核对 PONG 判定在线/离线）
@@ -749,16 +1190,28 @@ class SyncClient(QObject):
                 self._start_ping_thread()
                 # 认证成功后请求当前模式，由主机端决定本端模式
                 self._send_mode_request()
-                # 去中心化：启动网状监听并交换 END_INFO（本端身份 + 网状监听端口）
+                # 去中心化：启动网状监听并交换 END_INFO（本端身份 + 网状/管理端口）
                 self._start_mesh_and_send_end_info()
             else:
                 self.log_message.emit(f"验证失败: {message}")
+                with self._auth_wait:
+                    self._auth_result = False
+                    self._auth_wait.notify_all()
+                if self._reconnect_active:
+                    # 自动重连试连被拒：不弹窗、不拆数据平面，交重连循环关闭并试下一端点
+                    return
                 # 发射验证失败信号
                 self.auth_failed.emit(message)
                 self.disconnect()
                 
         except Exception as e:
             self.log_message.emit(f"验证响应解析错误: {e}")
+            with self._auth_wait:
+                self._auth_result = False
+                self._auth_wait.notify_all()
+            if self._reconnect_active:
+                # 自动重连试连异常：不弹窗、不拆数据平面，交重连循环关闭并试下一端点
+                return
             self.auth_failed.emit(f"验证响应解析错误: {e}")
             self.disconnect()
 

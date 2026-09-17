@@ -9,7 +9,8 @@ Licensed under the GNU General Public License v3.0.
 - 收到 FILE_STATE_REQ → 回 FILE_STATE_RESP（entries + 自同步会话 session，
   拉取方据此直连本端 FileProvider 端到端拉取）
 - 收到 FILE_STATE_RESP → 对比差异：
-  - 本端缺失对端有的文件 → 加入拉取队列（state=ADD），排队去重，
+  - 本端缺失对端有的文件 → 加入拉取队列（state=ADD），版本感知槽复用
+    （每文件只保留当前仲裁胜者版本，新版本就地覆盖旧槽），
     复用 FileProvider 会话 + pull_file 端到端拉取
   - 对端条目 exists=False 而本端存在 → 补收删除（走分发链路删除应用，
     信号排除上游向下传递）
@@ -31,7 +32,8 @@ from PySide6.QtCore import QObject, Signal
 
 from network.protocol import Protocol, MessageType
 from network.file_provider import pull_file
-from sync.vector import FileState, STATE_CHANGE, compare_states
+from sync.vector import (FileState, STATE_ADD, STATE_CHANGE, compare_states,
+                         vv_covers)
 
 
 class FileStateStore(QObject):
@@ -42,8 +44,24 @@ class FileStateStore(QObject):
     sync_done = Signal(bool)
     # 自同步拉取完成落盘（相对路径；UI 刷新文件列表）
     file_added = Signal(str)
+    # 自同步拉取进度（相对路径, 已收字节, 总字节）：接收端绿色进度条驱动。
+    # 注意类型须与 server/client 转发信号一致（PySide6 信号对信号要求签名完全匹配）。
+    pull_progress = Signal(str, 'qlonglong', 'qlonglong')
+    # 自同步拉取结束（相对路径, 成功?）：接收端进度条收尾（转完成/失败记录）
+    pull_done = Signal(str, bool)
 
     ROUND_TIMEOUT = 10.0   # 一轮对比超时兜底（对端不应答时也结束本轮，秒）
+    RECONCILE_INTERVAL = 20.0  # 周期对账间隔（秒）：对在线对端周期 request_all，
+                               # 作为分发信号 fire-and-forget 丢失/多端竞态时的收敛背stop
+                               # （LAN 全量对比毫秒级开销；20s 把竞态最坏收敛延迟压到 ~20s）
+    PENDING_CONFLICT_TTL = 30.0  # 冲突覆盖待命条目 TTL（秒）：对端不可达未应答时
+                                 # 周期清理防残留增长
+    PULL_OVERALL_TIMEOUT = 600.0  # 自同步拉取数据阶段整体超时（秒）：对端半开
+                                  # （断电/拔线）时 recv 永不返回，单 worker 会被
+                                  # 永久阻塞致后续拉取停摆；超时中止并继续处理后续槽
+    PULL_CONCURRENCY = 5   # 自同步拉取并发 worker 数：一轮对比入队的多个差异
+                           # 文件并发拉取（设计：发送/接收端均支持 5 并发）；
+                           # 发送端 FileProvider 每条连接独立线程，天然并行服务
 
     def __init__(self, end_id: str, sync_folder: str, mesh=None, distributor=None,
                  provider=None, parent=None):
@@ -58,9 +76,15 @@ class FileStateStore(QObject):
 
         self._lock = threading.Lock()
         self._sync_tokens = {}   # src_id -> token（自同步会话令牌，每请求方固定）
-        self._pulls = {}         # name -> {name, end_id, op_no, session} 待拉取队列
+        # 待拉取队列：name -> {name, end_id, op_no, clock, ts, session}
+        # 每文件仅保留一个槽，槽内存当前仲裁胜者版本（版本化去重）
+        self._pulls = {}
         # 冲突覆盖拉取（阶段 3）：name -> src_id（等待该对端 RESP 会话后入队）
         self._pending_conflicts = {}
+        # 同名拉取串行化锁（name -> Lock）：worker 池跨文件 5 并发，但同一文件的
+        # 多份在途拉取（不同 RESP 槽先后弹出）必须串行——后者在前者完成后重新做
+        # 新鲜度裁决，防止低版本槽迟到落盘覆盖胜者字节（并发池化引入的拉取交错）
+        self._file_locks = {}
         self._cond = threading.Condition(self._lock)
         self._stop = threading.Event()
         # 轮次统计（request_all → 各 RESP 聚合 → sync_done）
@@ -72,8 +96,16 @@ class FileStateStore(QObject):
         self._sync_done_handler = None
         self._file_added_handler = None
 
-        self._worker = threading.Thread(target=self._worker_loop, daemon=True)
-        self._worker.start()
+        # 拉取 worker 池（PULL_CONCURRENCY 个）：每轮入队的多个差异文件并发拉取，
+        # _pulls 槽在 _cond 锁内弹出，多 worker 并发取件/拉取互不干扰
+        self._workers = []
+        for _ in range(self.PULL_CONCURRENCY):
+            t = threading.Thread(target=self._worker_loop, daemon=True)
+            t.start()
+            self._workers.append(t)
+        # 周期对账线程（收敛背stop）：分发信号在稳定连接中丢失时，靠它周期触发
+        # 端到端状态对比补拉，不依赖断线重连/手动同步。stop() 统一回收。
+        threading.Thread(target=self._reconcile_loop, daemon=True).start()
 
     # ---- 注入 ----
 
@@ -119,6 +151,16 @@ class FileStateStore(QObject):
 
     # ---- 状态快照（响应 FILE_STATE_REQ） ----
 
+    @staticmethod
+    def _is_transient_temp(rel: str) -> bool:
+        """传输临时文件判定：FileProvider 接收时 mkstemp(prefix='.tcp_',
+        suffix='.part')，仅在传输期间存在于目标目录，成功原子改名成正式文件、
+        失败/取消即删除。这类半成品一旦被补扫/快照纳入同步，会形成「接收端
+        产生 .part → 补扫 emit add → 对端再收再产生 .part」的互相投递死循环，
+        故两个入口均需过滤。"""
+        b = os.path.basename(rel)
+        return b.startswith('.tcp_') and b.endswith('.part')
+
     def snapshot(self) -> list:
         """本端文件状态（wire 格式）。
 
@@ -134,6 +176,8 @@ class FileStateStore(QObject):
             if not st.exists:
                 out.append(st.to_wire_dict())
                 continue
+            if self._is_transient_temp(st.name):
+                continue  # 传输临时文件不入快照（防对端当作缺失文件来回拉取）
             try:
                 if not os.path.isfile(self._safe_join(st.name)):
                     continue
@@ -224,51 +268,123 @@ class FileStateStore(QObject):
                 continue
             # 冲突覆盖拉取（阶段 3）：信号路径裁决覆盖后，此 RESP 为取会话的应答
             with self._lock:
-                pend_src = self._pending_conflicts.get(name)
-                if pend_src == src_id:
+                pend = self._pending_conflicts.get(name)
+                if isinstance(pend, dict) and pend.get('src') == src_id:
                     self._pending_conflicts.pop(name, None)
                 else:
-                    pend_src = None
-            if pend_src and remote.exists and session is not None:
-                if self._enqueue_pull(name, src_id, remote, session):
-                    has_diff = True
+                    pend = None
+            if pend and remote.exists and session is not None \
+                    and self._source_byte_fresh(remote):
+                # 冲突覆盖：仲裁已判 src_id 胜，force 覆盖版本槽（无视列表内旧槽）
+                if not self._state_delete_wins(name, remote, src_id):
+                    if self._enqueue_pull(name, src_id, remote, session, force=True):
+                        has_diff = True
             if remote.exists:
                 # 对端有该文件：本端缺失 → 入拉取队列（同文件排队去重）
                 if not local_exists:
-                    if self._enqueue_pull(name, src_id, remote, session):
+                    # 状态表已删除且删除版本严格胜出 → 该候选是过期 add，
+                    # 不入队（防删除-拉取-再删震荡）
+                    if self._state_delete_wins(name, remote, src_id):
+                        self.log_message.emit(
+                            f"忽略拉取 {name}: 本端已删除且版本更新")
+                        continue
+                    # 仅从持有胜者字节的可信源补拉（字节指纹 == 知识版本），
+                    # 拒绝陈旧字节端（bclk=0/指纹失配）→ 防装陈旧字节来回拉取
+                    if self._source_byte_fresh(remote) \
+                            and self._enqueue_pull(name, src_id, remote, session):
                         has_diff = True
                 # 本端已有：冲突收敛（阶段 3）——三层裁决远端胜出则拉取覆盖
                 else:
                     local_st = self.distributor.get_state(name)
                     if (local_st is not None and session is not None
+                            and self._source_byte_fresh(remote)
                             and compare_states(remote, local_st, src_id,
                                                self.end_id) == 1):
                         if self._enqueue_pull(name, src_id, remote, session):
                             has_diff = True
+                    # C 兜底（竞态修正）：知识 vv 胜于 bytes_vv 且无在途槽 →
+                    # 强制补拉胜者字节。覆盖两类残留：① 胜者信号被 pulled 回执
+                    # 提前合并（vv 已覆盖 → 信号去重、永不触发冲突拉取）；
+                    # ② 低版本槽迟到落盘回退覆盖胜者字节（_do_pull 落盘前裁决
+                    # 之外的漏网）。仅当响应端条目与本地仲裁胜者指纹（clock/ts）
+                    # 一致且本端尚无其字节时补拉，避免反复重拉败者版本。
+                    elif (session is not None
+                          and self._need_bytes_backfill(name, local_st,
+                                                        remote)):
+                        if self._enqueue_pull(name, src_id, remote, session,
+                                              force=True):
+                            has_diff = True
             else:
-                # 对端条目已删除：本端存在 → 补收删除（断网期间删除指令未达）
-                if local_exists:
+                # 对端条目已删除：本端存在 → 补收删除（断网期间删除指令未达）。
+                # 仅当对端条目确为「变更（已删）」才补删——对端若是「add 信号
+                # 已应用、字节未拉取」的待命态（ADD + exists=False），本端文件
+                # 不应被误删，否则删除-拉取震荡。
+                if local_exists and remote.state == STATE_CHANGE:
                     self._apply_remote_delete(name, src_id, remote)
                     has_diff = True
-                # 清理收敛：本地与对端均为 CHANGE 且已不存在 → 删除条目
+                # 清理收敛：本地与对端均为「变更」且已不存在 → 删除条目
+                # （防列表无限变长）。同样排除待命态：对端 ADD + exists=False
+                # 时保留本端删除知识，避免误清理后把已删文件反向拉回。
                 local_st = self.distributor.get_state(name)
                 if local_st is not None and not local_st.exists \
-                        and local_st.state == STATE_CHANGE:
+                        and local_st.state == STATE_CHANGE \
+                        and remote.state == STATE_CHANGE:
                     self._cleanup_entry(name)
         self._finish_round(end_id, has_diff)
 
-    def _enqueue_pull(self, name: str, src_id: str, remote: FileState, session) -> bool:
-        """拉取排队去重：同文件已有排队信息则跳过。返回是否新入队。"""
+    def _enqueue_pull(self, name: str, src_id: str, remote: FileState, session,
+                      force: bool = False) -> bool:
+        """拉取排队（版本感知槽）：每文件只保留一个当前仲裁胜者版本槽。
+
+        - 无槽 → 建槽。
+        - 有槽 → 用三层裁决比较现有槽 vs 新候选：新版本胜则就地覆盖槽
+          （保留更高版本，旧字节不入队、不占带宽）；现有槽不旧于新候选则
+          抛弃新候选（当前槽已是更优版本）。force 亦同：候选胜才覆盖——
+          冲突覆盖（仲裁已判 src_id 胜）的迟到败者版本不允许顶掉已入队的
+          胜者版本（防覆盖拉取通道竞态）。
+
+        Returns:
+            True = 槽被新建或升级（调用方据此累计 has_diff）；False = 抛弃。
+        """
         with self._cond:
-            if name in self._pulls:
-                return False
+            prev = self._pulls.get(name)
+            if prev is not None:
+                prev_st = FileState(
+                    name=name, op_no=int(prev['op_no'] or 0),
+                    state=STATE_ADD, exists=True,
+                    clock=int(prev.get('clock', 0) or 0),
+                    ts=float(prev.get('ts', 0.0) or 0.0),
+                    vv={prev['end_id']: int(prev['op_no'] or 0)})
+                # compare_states(prev, cand)：1=现有槽胜 / -1=候选胜 / 0=收敛
+                # force 亦同：候选胜才覆盖——防「迟到败者版本顶掉已入队的胜者
+                # 版本」的覆盖拉取通道竞态（本环境 45s 超时复现过）
+                if compare_states(prev_st, remote, prev['end_id'],
+                                  src_id) >= 0:
+                    return False  # 现有槽不旧于新候选 → 抛弃新候选
+                prev['end_id'] = src_id
+                prev['op_no'] = remote.op_no
+                prev['clock'] = remote.clock
+                prev['ts'] = remote.ts
+                # 槽升级同步记录源端磁盘字节指纹（落盘内容版本）：_do_pull
+                # 落盘后据此判别实际内容是否即仲裁胜者
+                prev['bytes_clock'] = remote.bytes_clock
+                prev['bytes_ts'] = remote.bytes_ts
+                prev['session'] = dict(session) if isinstance(session,
+                                                               dict) else None
+                self._cond.notify_all()
+                return True  # 槽被覆盖升级
             self._pulls[name] = {
                 'name': name,
                 'end_id': src_id,
                 'op_no': remote.op_no,
+                'clock': remote.clock,
+                'ts': remote.ts,
+                'bytes_clock': remote.bytes_clock,
+                'bytes_ts': remote.bytes_ts,
                 'session': dict(session) if isinstance(session, dict) else None,
             }
-            self._cond.notify()
+            # notify_all：一轮对比可能一次入队多个文件，多个等待 worker 可同时取件
+            self._cond.notify_all()
         return True
 
     def _apply_remote_delete(self, name: str, src_id: str, remote: FileState):
@@ -278,7 +394,7 @@ class FileStateStore(QObject):
             'op_no': remote.op_no,
             'op': 'delete',
             'file': name,
-            'state': STATE_CHANGE,
+            'state': remote.state,
             'clock': remote.clock,
             'ts': remote.ts,
         }
@@ -291,6 +407,133 @@ class FileStateStore(QObject):
             self.distributor.remove_state(name)
             self.log_message.emit(f"状态条目收敛移除: {name}")
 
+    def _need_bytes_backfill(self, name: str, local_st, remote: FileState) -> bool:
+        """C 兜底判定：知识 vv 严格胜于 bytes_vv 且无在途槽 → 补拉胜者字节。
+
+        条件（防反复重拉败者版本/空转）：
+        - 知识 vv 已覆盖 bytes_vv（存在已应用但字节未到位或被回退覆盖的版本）
+         且 bytes_vv 未覆盖知识（确实有版本缺口）；
+        - 该文件无在途槽（_pulls）且无待命冲突拉取（_pending_conflicts）；
+        - 响应端条目与本地仲裁胜者指纹（clock/ts）一致——仅补拉真正胜者，
+          不拉败者版本（避免回退）；
+        - 字节指纹判定（防交叉反复重拉）：文件存在且本端字节指纹 == 状态表
+          胜者指纹 → 本端字节已是仲裁胜者内容，无需补拉。各端 emit_pulled
+          每次自增本端 op_no 并广播回执，对端快照版本号其他端永远「没见过」
+          （bytes_vv 覆盖判定恒为缺口），若仅靠 bytes_vv 覆盖判定会对账轮
+          反复交叉补拉同一内容；指纹一致即证明内容已对，与对端快照版本无关。
+          指纹不一致（字节确非胜者内容）才回退到 bytes_vv 覆盖判定。
+        """
+        if local_st is None or not remote.exists:
+            return False
+        with self._cond:
+            if name in self._pulls or name in self._pending_conflicts:
+                return False
+        if not vv_covers(local_st.vv, local_st.bytes_vv):
+            return False
+        if vv_covers(local_st.bytes_vv, local_st.vv):
+            return False
+        if remote.clock != local_st.clock \
+                or abs(remote.ts - local_st.ts) > 1e-6:
+            return False
+        # 仅从「磁盘字节 == 其知识版本」的可信源补拉：知识指纹（clock/ts）全网
+        # 收敛后每端都相同，即使字节各异（各自陈旧内容）——只看知识会把陈旧
+        # 字节端也当作可信源，多端互相拉取陈旧字节、胜者内容被覆盖销毁 →
+        # 来回拉取震荡。字节指纹失配 → 该端磁盘不是胜者内容，拒绝补拉。
+        # 字节指纹必须严格匹配（不允许 bytes_clock=0 降级放行）：本版本所有
+        # 写/拉路径都会设置字节指纹，0 只可能是「从未写过也从未成功拉取」的
+        # 陈旧磁盘端——降级放行会把其陈旧字节当作可信源，覆盖销毁胜者内容。
+        if remote.bytes_clock != remote.clock \
+                or abs(remote.bytes_ts - remote.ts) > 1e-6:
+            return False
+        # 字节指纹一致 → 本端磁盘已是胜者内容，无需补拉（无论对端快照版本）
+        if local_st.bytes_clock and local_st.bytes_clock == local_st.clock \
+                and abs(local_st.bytes_ts - local_st.ts) <= 1e-6:
+            try:
+                if os.path.exists(self._safe_join(name)):
+                    return False
+            except ValueError:
+                return False
+        return not vv_covers(local_st.bytes_vv, remote.vv)
+
+    @staticmethod
+    def _source_byte_fresh(remote: FileState) -> bool:
+        """拉取源是否持有仲裁胜者字节（字节可信源判定）。
+
+        知识指纹（clock/ts）全网收敛后每端相同，即使字节各异（各自陈旧内容）——
+        只看知识会把陈旧字节端也当作可信源，多端互相拉取陈旧字节、胜者内容被
+        覆盖销毁 → 来回拉取震荡。仅当源端磁盘字节指纹 == 其知识版本（clock/ts）
+        时，其字节才是仲裁胜者内容，可作拉取源。所有写/拉路径都会设置字节指纹
+        （emit/emit_pulled），bytes_clock=0 只可能是「从未写过也从未成功拉取」
+        的陈旧磁盘端；字节指纹失配则是「知识推进、字节未到位」的中间态。
+        """
+        return bool(remote.bytes_clock) and remote.bytes_clock == remote.clock \
+            and abs(remote.bytes_ts - remote.ts) <= 1e-6
+
+    def _state_delete_wins(self, name: str, cand: FileState, cand_end: str) -> bool:
+        """状态表已删除且删除版本严格胜于候选 → 忽略该候选的拉取/落盘。
+
+        防「删除 → 对账拉到过期 add → 复活 → 下轮再删」震荡：对端快照可能是
+        删除信号到达前生成的过期数据，本端状态表若已记录更高版本的删除，则
+        候选 add 不应再入队拉取或落盘。候选严格更新（对端确实重新添加）时
+        compare_states 判候选胜，返回 False，正常拉取覆盖。
+
+        Args:
+            cand: 候选拉取条目（对端 add 版本）
+            cand_end: 候选归属端（用于冲突仲裁末位裁决）
+        """
+        st = self.distributor.get_state(name) if self.distributor else None
+        if st is None or st.exists:
+            return False
+        if st.state != STATE_CHANGE:
+            # exists=False 但状态是 ADD：这是"add 信号已应用、字节尚未拉取"的
+            # 拉取待命态，不是删除。其 vv 可能已合并其他端 emit_pulled 回执
+            # 知识而"覆盖"候选，误判删除胜出会拦截正常缺失拉取。仅真正删除
+            # （STATE_CHANGE + exists=False）才参与删除胜出裁决。
+            return False
+        # 本地删除条目的归属端：取 vv 中 op_no 最大的源端（删除发起端，
+        # 仅用于末位裁决兜底；常规路径由 vv/clock/ts 层判定）
+        st_end = self.end_id
+        if st.vv:
+            st_end = max(st.vv, key=lambda k: st.vv[k])
+        return compare_states(st, cand, st_end, cand_end) == 1
+
+    def emit_local_missing(self) -> int:
+        """本地补扫（建连时兜底）：扫描同步文件夹，对磁盘存在但状态表缺失的
+        文件 emit add 信号，纳入同步体系。
+
+        覆盖两类场景：① mesh 未就绪窗口内添加文件（信号未发出、状态未记录）
+        ——建连后补扫兜底；② 启动前已放置于文件夹的文件（状态表无条目）。
+        状态表已有条目（含已删除条目）跳过，不复活已删文件。只读端不发起
+        任何修改信号（返回 0，仅单向下拉）。
+
+        Returns:
+            新 emit 的文件数
+        """
+        if self.distributor is None or self._readonly:
+            return 0
+        count = 0
+        try:
+            for root, _dirs, files in os.walk(self.sync_folder):
+                _dirs[:] = [d for d in _dirs if not d.startswith('.')]
+                for fn in files:
+                    if self._is_transient_temp(fn):
+                        continue  # 传输临时文件不入同步（见 _is_transient_temp）
+                    full = os.path.join(root, fn)
+                    try:
+                        rel = os.path.relpath(full, self.sync_folder).replace('\\', '/')
+                        self._safe_join(rel)
+                    except ValueError:
+                        continue
+                    if self.distributor.get_state(rel) is not None:
+                        continue  # 状态表已有条目（存在/已删）→ 不重复 emit
+                    self.distributor.emit('add', rel)
+                    count += 1
+        except OSError:
+            pass
+        if count:
+            self.log_message.emit(f"本地补扫: 新发现 {count} 个文件入同步")
+        return count
+
     # ---- 拉取执行（后台线程） ----
 
     def _worker_loop(self):
@@ -302,16 +545,107 @@ class FileStateStore(QObject):
                     break
                 item = next(iter(self._pulls.values()))
                 self._pulls.pop(item['name'], None)
+            # 同名拉取串行化：同文件多份在途槽按序执行（跨文件仍 5 并发）。
+            # 等待期间 _stop 置位则放弃该槽（退出中）
+            lk = self._get_file_lock(item['name'])
+            acquired = False
+            while not self._stop.is_set():
+                acquired = lk.acquire(timeout=0.5)
+                if acquired:
+                    break
+            if not acquired:
+                continue
             try:
                 self._do_pull(item)
             except Exception as e:
                 self.log_message.emit(f"拉取任务失败: {e}")
+            finally:
+                lk.release()
+
+    def _get_file_lock(self, name: str) -> threading.Lock:
+        """获取同名拉取串行化锁（按需创建；会话内常驻，数量 = 被拉取的不同文件数）。"""
+        with self._lock:
+            lk = self._file_locks.get(name)
+            if lk is None:
+                lk = threading.Lock()
+                self._file_locks[name] = lk
+            return lk
+
+    def _is_pull_fresh(self, name: str, item: dict) -> bool:
+        """本份在途拉取版本是否仍应由本份落盘。
+
+        判定只对照列表（`_pulls`），不碰状态表——状态表 vv 是"已应用信号的分发
+        知识"，不等同"字节已到位"；若以状态表判过时，会误丢弃分态仍需要的字节。
+
+        item 已从列表弹出（在途）。若期间列表又入队了该文件**严格更高**的槽，
+        则本份过时（返回 False）→ 抛弃，交由更高版本槽收敛，避免旧版本回退
+        覆盖新版本。列表无更高槽（无槽 / 同版本）→ 本份新鲜，正常落盘。
+        """
+        with self._cond:
+            other = self._pulls.get(name)
+            if other is None:
+                return True
+            other_st = FileState(
+                name=name, op_no=int(other['op_no'] or 0), state=STATE_ADD,
+                exists=True, clock=int(other.get('clock', 0) or 0),
+                ts=float(other.get('ts', 0.0) or 0.0),
+                vv={other['end_id']: int(other['op_no'] or 0)})
+            item_st = FileState(
+                name=name, op_no=int(item['op_no'] or 0), state=STATE_ADD,
+                exists=True, clock=int(item.get('clock', 0) or 0),
+                ts=float(item.get('ts', 0.0) or 0.0),
+                vv={item['end_id']: int(item['op_no'] or 0)})
+            # compare_states(other, item)：1=列表槽严格更新 → 本份过时；否则应用
+            return compare_states(other_st, item_st, other['end_id'],
+                                  item['end_id']) != 1
+
+    def _pull_stale_by_state(self, name: str, item: dict) -> bool:
+        """状态表仲裁胜者严格胜于本份在途版本 → 本份过时，应丢弃。
+
+        竞态修正（三端并发改同一文件时低版本槽迟到落盘回退覆盖胜者字节）：
+        只比较第二/三层（逻辑钟、时间戳）——第一层 vv 会被 pulled 回执虚增
+        知识，直接对照会误丢「唯一字节源」的合法拉取；而状态表的 clock/ts
+        经 _store 取最大值合并，等于当前仲裁胜者的指纹。本份的 (clock, ts)
+        低于胜者 → 已收敛到更新版本，旧字节落盘即回退，丢弃交由胜者版本收敛；
+        与本份同指纹（同版本/待拉同版本）→ 不过时，正常落盘。
+        """
+        st = self.distributor.get_state(name) if self.distributor else None
+        if st is None:
+            return False
+        cand_clock = int(item.get('clock', 0) or 0)
+        cand_ts = float(item.get('ts', 0.0) or 0.0)
+        if st.clock != cand_clock:
+            return st.clock > cand_clock
+        if st.ts != cand_ts:
+            return st.ts > cand_ts
+        return False
+
+    def _mark_bytes_unknown(self, name: str):
+        """把本端字节指纹清零（bytes_clock=0）：磁盘内容不可信时的兜底。
+
+        并发拉取迟到败者落盘后，磁盘字节已非仲裁胜者内容——清零字节指纹使
+        本端不再被 _source_byte_fresh 判定为可信拉取源（不会把败者字节散布
+        全网），对账 backfill 据此从字节新鲜的端补拉当前胜者覆盖收敛。
+        """
+        if self.distributor is None:
+            return
+        st = self.distributor.get_state(name)
+        if st is None:
+            return
+        with self.distributor._lock:
+            st.bytes_clock = 0
+            st.bytes_ts = 0.0
 
     def _do_pull(self, item: dict):
         name = item['name']
         session = item.get('session')
         if not session:
             self.log_message.emit(f"拉取 {name}: 对端未提供会话")
+            return
+        # 应用前裁决（IO 前）：仲裁已推进到更高版本 → 本份过时，直接抛弃该槽
+        if not self._is_pull_fresh(name, item) \
+                or self._pull_stale_by_state(name, item):
+            self.log_message.emit(f"拉取 {name} 已过时，抛弃该槽")
             return
         host = session.get('host', '')
         port = int(session.get('port', 0) or 0)
@@ -326,25 +660,85 @@ class FileStateStore(QObject):
             self.log_message.emit(f"拒绝非法路径: {e}")
             return
         os.makedirs(os.path.dirname(dest) or '.', exist_ok=True)
-        ok, _received, err = pull_file(host, port, session_id, token, name, dest,
-                                       msg_type=MessageType.SYNC_PULL_REQ)
+        ok, _received, err = pull_file(
+            host, port, session_id, token, name, dest,
+            msg_type=MessageType.SYNC_PULL_REQ,
+            progress_cb=lambda recv, size: self.pull_progress.emit(name, recv, size),
+            overall_timeout=self.PULL_OVERALL_TIMEOUT)
         if ok:
-            # 记录本端已持有（vv 推进到远端 op_no）+ 广播 add 状态；UI 刷新
-            self.distributor.emit_pulled(name, item['end_id'], item['op_no'])
+            # 应用前裁决（IO 后）：状态表已删除且删除版本严格胜出 → 本份为
+            # 过期 add 复活，移除字节不落应用、不 emit_pulled（防删除-拉取震荡）
+            cand = FileState(
+                name=name, op_no=int(item['op_no'] or 0), state=STATE_ADD,
+                exists=True, clock=int(item.get('clock', 0) or 0),
+                ts=float(item.get('ts', 0.0) or 0.0),
+                vv={item['end_id']: int(item['op_no'] or 0)})
+            if self._state_delete_wins(name, cand, item['end_id']):
+                self.log_message.emit(
+                    f"拉取 {name} 落盘，但本地已删除该文件，移除复活字节")
+                try:
+                    os.remove(dest)
+                except OSError:
+                    pass
+                self.pull_done.emit(name, False)
+                return
+            # 应用后裁决（并发池化修正）：拉取期间状态表推进到更高版本（更高版本
+            # 信号应用/更高版本已落盘）→ 本份为迟到败者。磁盘已被本份覆盖为败者
+            # 字节（可能覆盖了更早落盘的胜者字节），内容不可信：标记字节指纹未知
+            # （bytes_clock=0，_source_byte_fresh 据此拒绝以本端为拉取源），不推进
+            # bytes_vv；立即触发一轮对账，从字节新鲜的端补拉当前胜者覆盖收敛。
+            if self._pull_stale_by_state(name, item):
+                self._mark_bytes_unknown(name)
+                self.pull_done.emit(name, False)
+                self.log_message.emit(
+                    f"拉取 {name} 落盘后已过时，标记字节未知待补拉")
+                try:
+                    self.request_all()
+                except Exception:
+                    pass
+                return
+            # 记录本端已持有（vv 推进到远端 op_no）+ 广播 add 状态；UI 刷新。
+            # clock/ts 取远端条目仲裁知识版本（快照 clock/ts）——即当前仲裁胜者，
+            # 状态表不回退、对账指纹比对不失配（用本端自增会污染仲裁指纹）。
+            # 关键：bytes_clock/bytes_ts 用源端磁盘字节指纹——源端知识推进但磁盘
+            # 字节未到位时两者失配（fresh=False），本端 bytes_vv 不推进，对账兜底
+            # 仍会从可信源（字节指纹 == 胜者指纹的端）补拉收敛。
+            src_clock = int(item.get('clock', 0) or 0)
+            src_ts = float(item.get('ts', 0.0) or 0.0)
+            bclock = int(item.get('bytes_clock', 0) or 0)
+            bts = float(item.get('bytes_ts', 0.0) or 0.0)
+            # 以「实际收到内容」判定新鲜度，不信源端声明：pull_file 已把源磁盘
+            # mtime 复制到 dest，dest mtime 即源端磁盘真实内容版本的可靠标记
+            # （emit 时 os.utime 校准）。源端磁盘若被其自身并发拉取临时覆盖为
+            # 旧字节，其磁盘 mtime 与声明指纹不符 → 收到内容非仲裁胜者 →
+            # fresh=False，bytes_vv 不推进、bytes_ts 如实记录收到内容，对账
+            # backfill 从字节真实的端补拉收敛（杜绝「谎报 fresh」永久分叉）。
+            received_ts = os.path.getmtime(dest)
+            fresh = bool(bclock) and bclock == src_clock \
+                and abs(received_ts - bts) <= 1e-6
+            self.distributor.emit_pulled(name, item['end_id'], item['op_no'],
+                                         src_clock, src_ts, fresh,
+                                         bclock, received_ts)
             self._notify_file_added(name)
+            self.pull_done.emit(name, True)
             self.log_message.emit(f"自同步拉取完成: {name}")
         else:
+            self.pull_done.emit(name, False)
             self.log_message.emit(f"自同步拉取失败 {name}: {err}")
 
     # ---- 触发一轮对比 ----
 
     def request_conflict_pull(self, name: str, src_id: str):
         """冲突覆盖拉取（阶段 3）：远端信号胜出覆盖本端旧内容后，请求该对端
-        状态以取得自同步会话，RESP 到达后入拉取队列端到端拉取胜方字节。"""
+        状态以取得自同步会话，RESP 到达后入拉取队列端到端拉取胜方字节。
+
+        待命条目带时间戳，事后由 _sweep_pending_conflicts 定期清理（对端不可达
+        时避免残留无限增长）。
+        """
         if self.mesh is None or not name or not src_id:
             return
         with self._lock:
-            self._pending_conflicts[name] = src_id
+            self._pending_conflicts[name] = {'src': src_id, 'ts': time.time()}
         try:
             self.mesh.send_to_peer(src_id, Protocol.create_file_state_req(self.end_id))
         except Exception as e:
@@ -352,8 +746,44 @@ class FileStateStore(QObject):
                 self._pending_conflicts.pop(name, None)
             self.log_message.emit(f"冲突拉取请求失败: {name} {e}")
 
+    def _sweep_pending_conflicts(self, ttl: float = PENDING_CONFLICT_TTL):
+        """清理过期冲突待命条目：对端长期不可达（未 RESP 应答）时移除，防内存增长。"""
+        cutoff = time.time() - ttl
+        stale = []
+        with self._lock:
+            for name, pend in list(self._pending_conflicts.items()):
+                if isinstance(pend, dict) and pend.get('ts', 0) < cutoff:
+                    stale.append(name)
+            for name in stale:
+                self._pending_conflicts.pop(name, None)
+        if stale:
+            self.log_message.emit(f"清理过期冲突待命: {len(stale)} 项")
+
+    def _reconcile_loop(self):
+        """周期对账（收敛背stop）：每 RECONCILE_INTERVAL 对在线对端 trigger
+        request_all；一轮对比进行中（_round_targets 非 None）则跳过本拍，避免
+        与在建轮次交叠互相覆盖 round 聚合；顺带清理过期冲突待命条目。stop() 后退出。"""
+        while not self._stop.wait(self.RECONCILE_INTERVAL):
+            try:
+                self._sweep_pending_conflicts()
+            except Exception:
+                pass
+            # 只读端同样周期对账（单向下拉补齐本端缺失文件；不供他端拉取由
+            # handle_state_req 回空 entries 保证）
+            if self.mesh is None:
+                continue
+            if not self.mesh.connected_end_ids():
+                continue
+            with self._lock:
+                if self._round_targets is not None:
+                    continue  # 上轮对比仍在聚合，跳过本拍防交叠
+            try:
+                self.request_all()
+            except Exception:
+                pass
+
     def request_all(self) -> int:
-        """向全部直连对端请求文件状态（手动同步/断线重连自动补齐）。
+        """向全部直连对端请求文件状态（手动同步/断线重连/周期对账自动补齐）。
 
         Returns:
             成功下发请求的对端数
@@ -424,8 +854,9 @@ class FileStateStore(QObject):
         self._stop.set()
         with self._cond:
             self._cond.notify_all()
-        if self._worker and self._worker.is_alive():
-            try:
-                self._worker.join(timeout=2.0)
-            except Exception:
-                pass
+        for w in getattr(self, '_workers', ()):
+            if w.is_alive():
+                try:
+                    w.join(timeout=2.0)
+                except Exception:
+                    pass

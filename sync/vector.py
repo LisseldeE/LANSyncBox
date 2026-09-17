@@ -38,10 +38,25 @@ class FileState:
     clock: int = 0
     ts: float = 0.0
     vv: dict = field(default_factory=dict)
+    # 字节版本向量：真实落盘字节对应的版本。仅本地 emit / 自同步拉取落盘时推进，
+    # 回执 merge（pulled / 知识合并）不动它。用于修正「知识已覆盖但字节被旧槽
+    # 回退覆盖」的三端并发竞态：_do_pull 落盘前对照裁决，对账时作为
+    # 「知识胜于字节 → 强制补拉」兜底的判定依据。旧端（无字段）置空、兜底不生效。
+    bytes_vv: dict = field(default_factory=dict)
+    # 字节指纹：磁盘真实字节对应的 (clock, ts)（落盘内容的版本指纹）。
+    # 本地 emit / 自同步拉取落盘时设置；rename/move 延续旧名；delete 清零。
+    # 用于对账补拉兜底：文件存在且字节指纹 == 状态表胜者指纹 → 本端字节已
+    # 是仲裁胜者内容，无需再向任何对端补拉（各端 emit_pulled 自增 op_no 导致
+    # 对端快照版本号其他端永远「没见过」，bytes_vv 覆盖判定会误判缺口而
+    # 交叉反复重拉同一内容——指纹一致即证明内容已对）。旧端（无字段）默认 0，
+    # 一次补拉后收敛。
+    bytes_clock: int = 0
+    bytes_ts: float = 0.0
 
     def to_dict(self) -> dict:
         d = asdict(self)
         d['vv'] = dict(self.vv)
+        d['bytes_vv'] = dict(self.bytes_vv)
         return d
 
     @classmethod
@@ -54,10 +69,18 @@ class FileState:
             clock=int(d.get('clock', 0) or 0),
             ts=float(d.get('ts', 0.0) or 0.0),
             vv=dict(d.get('vv', {}) or {}),
+            bytes_vv=dict(d.get('bytes_vv', {}) or {}),
+            bytes_clock=int(d.get('bytes_clock', 0) or 0),
+            bytes_ts=float(d.get('bytes_ts', 0.0) or 0.0),
         )
 
     def to_wire_dict(self) -> dict:
-        """对端间传输用精简结构（vv 由对端 src_id 隐式关联，不随条目传输）。"""
+        """对端间传输用精简结构（vv 由对端 src_id 隐式关联，不随条目传输；
+        bytes_vv 供新端参考，旧端无字段 → 对端置空、兜底降级）。
+
+        bytes_clock/bytes_ts 为磁盘真实字节指纹（落盘内容版本）：供拉取端在
+        落盘后判别「实际拉到的内容是否即仲裁胜者」——知识推进但磁盘字节未
+        到位时指纹失配，据此不推进 bytes_vv 并交由对账补拉可信源收敛。"""
         return {
             'name': self.name,
             'op_no': self.op_no,
@@ -65,6 +88,9 @@ class FileState:
             'exists': self.exists,
             'clock': self.clock,
             'ts': self.ts,
+            'bytes_vv': dict(self.bytes_vv),
+            'bytes_clock': self.bytes_clock,
+            'bytes_ts': self.bytes_ts,
         }
 
     @classmethod
@@ -72,6 +98,9 @@ class FileState:
         """由精简结构 + src_id 重建（vv 单条目 = {src_id: op_no}）。"""
         st = cls.from_dict(d)
         st.vv = {src_id: st.op_no}
+        bv = d.get('bytes_vv')
+        if isinstance(bv, dict):
+            st.bytes_vv = {str(k): int(v or 0) for k, v in bv.items()}
         return st
 
 

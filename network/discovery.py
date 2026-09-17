@@ -18,8 +18,10 @@ class RoomDiscovery(QObject):
     """房间发现服务（客户端运行，发现房间）"""
 
     # 信号
-    room_found = Signal(str, str, int, str)  # 发现房间 (ip, room_code, port, version)
-    discovery_finished = Signal(list)  # 发现完成 [(ip, room_code, port, version), ...]
+    # version = 展示用应用版本（APP_VERSION，不参与校验）
+    # sync_version = 同步逻辑版本号（加入房间只校验此号一致）
+    room_found = Signal(str, str, int, str, str)  # (ip, room_code, port, version, sync_version)
+    discovery_finished = Signal(list)  # 发现完成 [(ip, room_code, port, version, sync_version), ...]
     error_occurred = Signal(str)  # 错误消息
 
     # UDP端口范围
@@ -210,18 +212,20 @@ class RoomDiscovery(QObject):
                     room_code = response.get('room_code')
                     port = response.get('port', Config.DEFAULT_PORT)
                     version = response.get('version', '')
+                    sync_version = response.get('sync_version', '')
                     
                     with self._lock:
                         self.discovered_rooms[host_ip] = {
                             'room_code': room_code,
                             'port': port,
                             'version': version,
+                            'sync_version': sync_version,
                             'timestamp': time.time()
                         }
                     
                     # 安全发射信号
                     try:
-                        self.room_found.emit(host_ip, room_code, port, version)
+                        self.room_found.emit(host_ip, room_code, port, version, sync_version)
                     except RuntimeError:
                         # 对象已被删除，停止循环
                         break
@@ -241,7 +245,8 @@ class RoomDiscovery(QObject):
                     'ip': ip,
                     'room_code': info['room_code'],
                     'port': info['port'],
-                    'version': info.get('version', '')
+                    'version': info.get('version', ''),
+                    'sync_version': info.get('sync_version', '')
                 }
                 for ip, info in self.discovered_rooms.items()
             ]
@@ -261,7 +266,8 @@ class RoomDiscovery(QObject):
                     'ip': ip,
                     'room_code': info['room_code'],
                     'port': info['port'],
-                    'version': info.get('version', '')
+                    'version': info.get('version', ''),
+                    'sync_version': info.get('sync_version', '')
                 }
                 for ip, info in self.discovered_rooms.items()
             ]
@@ -356,12 +362,15 @@ class RoomResponder(QObject):
                         # 指定了房间号但不匹配，跳过
                         continue
 
-                    # target_room 为空或匹配时，发送响应（携带版本号供客户端核对）
+                    # target_room 为空或匹配时，发送响应（携带版本号供客户端核对：
+                    # version=展示用应用版本；sync_version=同步逻辑版本号，加入房间
+                    # 只校验后者一致，UI 等非同步变更不要求全员升级）
                     response = json.dumps({
                         'type': 'discovery_response',
                         'room_code': self.room_code,
                         'port': self.port,
-                        'version': Config.APP_VERSION
+                        'version': Config.APP_VERSION,
+                        'sync_version': Config.SYNC_LOGIC_VERSION
                     }).encode('utf-8')
 
                     self.socket.sendto(response, addr)

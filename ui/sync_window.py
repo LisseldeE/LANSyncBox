@@ -442,6 +442,7 @@ class SyncWindow(QMainWindow):
         
         # 传输进度跟踪
         self._transfer_rows = {}  # 文件名 -> 行号映射
+        self._sync_pull_rows = {}  # 自同步接收进度（相对路径） -> 行号映射
         self._cancelled_transfers = set()  # 已取消的文件名（忽略残留进度信号）
         
         # 传输队列管理器（限制同时传输5个文件）
@@ -697,10 +698,6 @@ class SyncWindow(QMainWindow):
         self.file_list.dir_created.connect(self.on_dir_created)
         # 设置取消传输回调（直接调用，避免 Qt 信号异步性问题）
         self.file_list.set_cancel_transfer_callback(self.on_cancel_transfer)
-        # 手动同步按钮
-        self.file_list.manual_sync_requested.connect(self.on_manual_sync_requested)
-        self._sync_btn_locked = False  # 手动同步按钮 3 秒冷却锁
-        self.file_list.set_sync_btn_enabled(False)  # 初始不可点，连接/在线后启用
         splitter.addWidget(self.file_list)
         
         # 设置分隔器比例
@@ -789,6 +786,8 @@ class SyncWindow(QMainWindow):
             # 自同步链路（阶段 2）：端到端对比完成通知 + 拉取落盘刷新
             self.server.state_sync_done.connect(self.on_state_sync_done)
             self.server.file_state_added.connect(self.on_file_state_added)
+            self.server.sync_pull_progress.connect(self._on_sync_pull_progress)
+            self.server.sync_pull_done.connect(self._on_sync_pull_done)
 
             # 先启动房间响应服务（占用发现端口）
             self.responder = RoomResponder(self)
@@ -807,7 +806,6 @@ class SyncWindow(QMainWindow):
                 # 房间就绪：开启局域网剪切板分发 + 启动本端目录服务（复制端 serve 用）
                 self._start_provider()
                 self._monitor.set_enabled(True)
-                self._update_sync_btn_state()
             else:
                 self._add_record("启动失败", "错误", "")
                 self.responder.stop()
@@ -851,6 +849,8 @@ class SyncWindow(QMainWindow):
             # 自同步链路（阶段 2）：端到端对比完成通知 + 拉取落盘刷新
             self.client.state_sync_done.connect(self.on_state_sync_done)
             self.client.file_state_added.connect(self.on_file_state_added)
+            self.client.sync_pull_progress.connect(self._on_sync_pull_progress)
+            self.client.sync_pull_done.connect(self._on_sync_pull_done)
 
             # 连接到服务器（复用模式下 client 已验证通过，直接记录日志）
             host = self.host_address or "127.0.0.1"
@@ -1669,9 +1669,20 @@ class SyncWindow(QMainWindow):
     @Slot(str, str, str, 'qlonglong', 'qlonglong')
     def _on_tcp_send_progress(self, conn_id: str, session_id: str, name: str,
                               sent: int, total: int):
-        """复制端发送进度：单文件一行，键为 session_id:name:连接标识（多接收端同文件
-        各占一行，互不打架）；分母为开流时确认的真实大小。"""
+        """发送进度（FileProvider 信号）：单文件一行，键为 session_id:name:连接标识
+        （多接收端同文件各占一行，互不打架）；进度条文本带对端 IP 前缀，与旧版
+        "转发进度含目标 IP"同款，肉眼即可区分各接收端；分母为开流时确认的真实大小。
+
+        session_id 区分两条链路：sync_ 前缀 = 自同步拉取（绿色同步样式），
+        否则 = 投递（淡蓝投递样式）。
+        """
+        sync = session_id.startswith("sync_")
+        act = I18n.tr('sync_transfer_send') if sync else I18n.tr('clipboard_deliver_send')
+        color = "#51cf66" if sync else "#74c0fc"
         key = f"{session_id}:{name}:{conn_id}"
+        # 连接标识 = "对端IP:端口"：进度条带 IP 前缀区分不同接收端（防互串），
+        # 与旧版"转发进度含目标 IP"同款；IPv6 用 rsplit 取 IP 段
+        peer_ip = conn_id.rsplit(':', 1)[0]
         display = os.path.basename(name)
         if len(display) > 25:
             display = display[:22] + "..."
@@ -1679,18 +1690,18 @@ class SyncWindow(QMainWindow):
         if info is None:
             row_count = self.records_table.rowCount()
             self.records_table.insertRow(row_count)
-            action_item = QTableWidgetItem(I18n.tr('clipboard_deliver_send'))
+            action_item = QTableWidgetItem(act)
             action_item.setTextAlignment(Qt.AlignCenter)
             self.records_table.setItem(row_count, 0, action_item)
             bar = QProgressBar()
             bar.setRange(0, 100)
             bar.setValue(0)
             bar.setTextVisible(True)
-            bar.setFormat(f"{I18n.tr('clipboard_deliver_send')} {display} - 0%")
+            bar.setFormat(f"{act} [{peer_ip}] {display} - 0%")
             bar.setAlignment(Qt.AlignLeft | Qt.AlignVCenter)
-            bar.setStyleSheet("""
-                QProgressBar { border: none; text-align: left; background-color: transparent; }
-                QProgressBar::chunk { background-color: #74c0fc; }
+            bar.setStyleSheet(f"""
+                QProgressBar {{ border: none; text-align: left; background-color: transparent; }}
+                QProgressBar::chunk {{ background-color: {color}; }}
             """)
             self.records_table.setCellWidget(row_count, 1, bar)
             self.records_table.setRowHeight(row_count, 25)
@@ -1708,11 +1719,17 @@ class SyncWindow(QMainWindow):
         bar.setValue(percent)
         cur_m = shown / 1024 / 1024
         tot_m = total_locked / 1024 / 1024
-        bar.setFormat(f"{I18n.tr('clipboard_deliver_send')} {display} - {percent}% ({cur_m:.1f}/{tot_m:.1f}M)")
+        bar.setFormat(f"{act} [{peer_ip}] {display} - {percent}% ({cur_m:.1f}/{tot_m:.1f}M)")
 
     @Slot(str, str, str, bool)
     def _on_tcp_send_finished(self, conn_id: str, session_id: str, name: str, ok: bool):
-        """复制端单文件发送结束：进度行移出钉住区，完成记录进入上方历史区流转。"""
+        """发送结束（FileProvider 信号）：进度行移出钉住区，完成记录进入上方历史区流转。
+
+        sync_ 会话（自同步拉取）用同步样式：动作"发送"、状态"完成/失败"、绿色；
+        投递会话保持淡蓝投递样式。
+        """
+        sync = session_id.startswith("sync_")
+        act = I18n.tr('sync_transfer_send') if sync else I18n.tr('clipboard_deliver_send')
         key = f"{session_id}:{name}:{conn_id}"
         info = self._send_rows.pop(key, None)
         if not info:
@@ -1723,12 +1740,23 @@ class SyncWindow(QMainWindow):
         pinned = self._pinned_count()
         insert_row = max(0, self.records_table.rowCount() - pinned)
         self.records_table.insertRow(insert_row)
-        action_item = QTableWidgetItem(I18n.tr('clipboard_deliver_send'))
+        action_item = QTableWidgetItem(act)
         action_item.setTextAlignment(Qt.AlignCenter)
         self.records_table.setItem(insert_row, 0, action_item)
-        status_item = QTableWidgetItem(
-            I18n.tr('clipboard_deliver_sent') if ok else I18n.tr('clipboard_deliver_send_fail'))
-        status_item.setForeground(QColor("#74c0fc") if ok else QColor("#ff922b"))
+        # 与接收端同款：完成记录带文件名前缀；IP 存 tooltip（同文件多接收端区分）
+        peer_ip = conn_id.rsplit(':', 1)[0]
+        display = os.path.basename(name)
+        if len(display) > 25:
+            display = display[:22] + "..."
+        if sync:
+            suffix = I18n.tr('sync_transfer_done') if ok else I18n.tr('sync_transfer_fail')
+            color = "#51cf66" if ok else "#ff922b"
+        else:
+            suffix = I18n.tr('clipboard_deliver_sent') if ok else I18n.tr('clipboard_deliver_send_fail')
+            color = "#74c0fc" if ok else "#ff922b"
+        status_item = QTableWidgetItem(f"{display} - {suffix}")
+        status_item.setToolTip(f"{name} ({peer_ip}) - {suffix}")  # 完整路径+对端 IP，供导出使用
+        status_item.setForeground(QColor(color))
         self.records_table.setItem(insert_row, 1, status_item)
         self.records_table.scrollToBottom()
         self._trim_history()
@@ -1737,6 +1765,82 @@ class SyncWindow(QMainWindow):
         """工作线程中安全地追加日志（排队回主线程）。"""
         QMetaObject.invokeMethod(self, "add_log", Qt.QueuedConnection,
                                  Q_ARG(str, section), Q_ARG(str, message))
+
+    # ---- 自同步接收进度（绿色，旧版"接收"样式；FileStateStore 拉取线程信号 → 主线程） ----
+
+    @Slot(str, 'qlonglong', 'qlonglong')
+    def _on_sync_pull_progress(self, name: str, received: int, total: int):
+        """自同步拉取（接收端）进度：单文件一行绿色进度条，动作"接收"。
+
+        行在首次收到进度时创建（此时才得知真实总字节），之后仅更新；
+        与同步发送进度行同区（投递区之上），键为相对路径（每文件一行）。
+        """
+        act = I18n.tr('sync_transfer_receive')
+        info = self._sync_pull_rows.get(name)
+        if info is None:
+            # 插在投递进度行（最底部钉住区）之上，与同步发送进度行同区
+            row_count = max(0, self.records_table.rowCount() - self._delivery_count())
+            self.records_table.insertRow(row_count)
+            action_item = QTableWidgetItem(act)
+            action_item.setTextAlignment(Qt.AlignCenter)
+            self.records_table.setItem(row_count, 0, action_item)
+            bar = QProgressBar()
+            bar.setRange(0, 100)
+            bar.setValue(0)
+            bar.setTextVisible(True)
+            bar.setAlignment(Qt.AlignLeft | Qt.AlignVCenter)
+            bar.setStyleSheet("""
+                QProgressBar { border: none; text-align: left; background-color: transparent; }
+                QProgressBar::chunk { background-color: #51cf66; }
+            """)
+            self.records_table.setCellWidget(row_count, 1, bar)
+            self.records_table.setRowHeight(row_count, 25)
+            self._sync_pull_rows[name] = {'row': row_count, 'total': int(total)}
+            self.records_table.scrollToBottom()
+            self._trim_history()
+            info = self._sync_pull_rows[name]
+        bar = self.records_table.cellWidget(info['row'], 1)
+        if not bar or not isinstance(bar, QProgressBar):
+            return
+        total_locked = info['total'] or int(total)
+        shown = min(int(received), total_locked)
+        percent = max(0, min(100, int(shown / total_locked * 100))) if total_locked > 0 else 0
+        bar.setValue(percent)
+        display = os.path.basename(name)
+        if len(display) > 25:
+            display = display[:22] + "..."
+        cur_m = shown / 1024 / 1024
+        tot_m = total_locked / 1024 / 1024
+        bar.setFormat(f"{act} {display} - {percent}% ({cur_m:.1f}/{tot_m:.1f}M)")
+
+    @Slot(str, bool)
+    def _on_sync_pull_done(self, name: str, ok: bool):
+        """自同步拉取结束（接收端）：进度行移出钉住区，完成记录进入上方历史区流转。
+
+        与旧版"文件名 - 完成"同款：动作"接收"、绿色完成 / 橙色失败。
+        无进度行（文件极小/拉取立即失败）时同样新增完成/失败记录。
+        """
+        act = I18n.tr('sync_transfer_receive')
+        info = self._sync_pull_rows.pop(name, None)
+        if info:
+            self.records_table.removeRow(info['row'])   # 移出钉住区（进度条随行销毁）
+        # 在钉住区之上插入完成记录，使其进入上方历史区流转
+        pinned = self._pinned_count()
+        insert_row = max(0, self.records_table.rowCount() - pinned)
+        self.records_table.insertRow(insert_row)
+        action_item = QTableWidgetItem(act)
+        action_item.setTextAlignment(Qt.AlignCenter)
+        self.records_table.setItem(insert_row, 0, action_item)
+        display = os.path.basename(name)
+        if len(display) > 25:
+            display = display[:22] + "..."
+        suffix = I18n.tr('sync_transfer_done') if ok else I18n.tr('sync_transfer_fail')
+        status_item = QTableWidgetItem(f"{display} - {suffix}")
+        status_item.setToolTip(f"{name} - {suffix}")  # 完整路径存入 tooltip，供导出使用
+        status_item.setForeground(QColor("#51cf66") if ok else QColor("#ff922b"))
+        self.records_table.setItem(insert_row, 1, status_item)
+        self.records_table.scrollToBottom()
+        self._trim_history()
 
     # ---- 远程文件进度条（淡蓝色，钉在已传输进度条下方） ----
 
@@ -1814,8 +1918,6 @@ class SyncWindow(QMainWindow):
                 count = len([c for c in self.server.clients.values() if c['authenticated']])
             # 主机端显示"已就绪 | 在线: X"，"已就绪"为绿色，其余为系统默认颜色
             self.status_label.setText(f'<span style="color: green;">{I18n.tr("status_ready")}</span> | {I18n.tr("online_count")}: {count}')
-            # 在线人数变化时刷新手动同步按钮可用性（在锁外调用，避免非可重入锁死锁）
-            self._update_sync_btn_state()
 
     def _on_status_label_hover(self, enter: bool):
         """主机端连接数标签悬停：显示/隐藏连接端详情浮层"""
@@ -2004,8 +2106,6 @@ class SyncWindow(QMainWindow):
             self._start_provider()
             self._monitor.set_enabled(True)
         
-        # 更新手动同步按钮可用状态
-        self._update_sync_btn_state()
         # 房间就绪：启用顶部拖拽放置区（快捷添加文件到当前同步列表/根目录）
         self._init_drop_zone()
 
@@ -2032,7 +2132,6 @@ class SyncWindow(QMainWindow):
     def on_server_mode_switching(self, new_mode: str):
         """主机端模式切换发起（等待连接端 ACK 期间）"""
         self._mode_switching = True
-        self._update_sync_btn_state()
         # 切换中：置灰分段胶囊，等待全部连接端 ACK
         if self.is_host and hasattr(self, 'room_card'):
             self.room_card.set_switching(True)
@@ -2042,7 +2141,6 @@ class SyncWindow(QMainWindow):
         self._mode_switching = False
         self._mode = new_mode
         self._update_mode_label()
-        self._update_sync_btn_state()
         self._add_record(f"{self._mode_name(old_mode)} → {self._mode_name(new_mode)}", "系统")
         # 本端 UI 传输队列同步处理：收集转同步取消全部，同步转收集仅清空排队
         if new_mode == "sync":
@@ -2061,7 +2159,6 @@ class SyncWindow(QMainWindow):
         """连接端模式变更（收到主机 MODE_RESP/MODE_SWITCH）"""
         self._mode = new_mode
         self._update_mode_label()
-        self._update_sync_btn_state()
         # 本端 UI 传输队列同步处理：收集转同步取消全部，同步转收集仅清空排队
         if new_mode == "sync":
             self.transfer_queue.cancel_all_tasks()
@@ -2164,51 +2261,17 @@ class SyncWindow(QMainWindow):
         # 连接端/主机端统一显示红色"离线"；恢复默认样式以便下次"在线"绿色正常渲染
         self.status_label.setText(f'<span style="color: red;">{I18n.tr("status_offline")}</span>')
         self.status_label.setStyleSheet("")
-        # 断开后手动同步不可用
-        self._update_sync_btn_state()
-
-    def on_manual_sync_requested(self):
-        """手动同步按钮：请求全量差异同步
-
-        同步模式 + 网状就绪（阶段 2）：向各对端请求 FILE_STATE_REQ 端到端对比补齐；
-        收集/旧路径回退：连接端重新上报文件列表给主机端仲裁，主机端通知各端重新上报。
-        """
-        if self._sync_btn_locked:
-            return
-        self._sync_btn_locked = True
-        self._update_sync_btn_state()
-        # 日志：操作列=操作，信息列=手动同步
-        self._add_record(I18n.tr('manual_sync'), I18n.tr('manual_sync_operation'))
-        # 3 秒后恢复可点击（重新评估连接/在线状态）
-        from PySide6.QtCore import QTimer
-        QTimer.singleShot(3000, self._release_sync_btn)
-
-        if self._mesh_sync_active():
-            if self.is_host and self.server:
-                self.server.request_state_sync()
-            elif self.client:
-                self.client.request_state_sync()
-        elif self.is_host:
-            if self.server:
-                self.server.request_sync_all()
-        else:
-            self._perform_full_sync()
 
     def on_state_sync_done(self, has_diff: bool):
-        """一轮端到端状态对比结束：显示"列表一致/正在补齐差异项"通知（阶段 2）。"""
+        """一轮端到端状态对比结束：仅在有差异时写日志（周期对账/建连自动补齐/
+        手动轮次统一不弹全局通知，避免频繁打扰）。「列表一致」不再刷日志——
+        对账每 20s 一轮，一致是常态，逐轮记录会淹没日志面板。"""
         if has_diff:
-            self.file_list.show_global_notification(I18n.tr('manual_sync_diff'))
-        else:
-            self.file_list.show_global_notification(I18n.tr('manual_sync_consistent'))
+            self.add_log("同步", I18n.tr('manual_sync_diff'))
 
     def on_file_state_added(self, rel_path: str):
         """自同步拉取完成落盘：刷新文件列表（阶段 2）。"""
         self.file_list.refresh()
-
-    def _release_sync_btn(self):
-        """手动同步按钮冷却结束"""
-        self._sync_btn_locked = False
-        self._update_sync_btn_state()
 
     def on_sync_requested(self):
         """收到主机端 SYNC_REQUEST：触发一次全量差异同步（仅连接端）
@@ -2224,32 +2287,9 @@ class SyncWindow(QMainWindow):
         self._perform_full_sync()
 
     def on_sync_result(self, has_diff: bool):
-        """收到主机端同步结果：显示"列表一致/正在补齐差异项"通知"""
+        """收到主机端同步结果：仅在有差异时写日志（列表一致不打扰）"""
         if has_diff:
-            self.file_list.show_global_notification(I18n.tr('manual_sync_diff'))
-        else:
-            self.file_list.show_global_notification(I18n.tr('manual_sync_consistent'))
-
-    def _update_sync_btn_state(self):
-        """根据连接状态更新手动同步按钮可用性（收集模式下始终不可用）"""
-        if self._sync_btn_locked:
-            self.file_list.set_sync_btn_enabled(False)
-            return
-        if self._mode == "collect":
-            # 收集模式下不会同步各端列表，手动同步不可用
-            self.file_list.set_sync_btn_enabled(False)
-            return
-        if self.is_host:
-            # 主机端：有在线连接端才可点击
-            online = 0
-            if self.server:
-                with self.server._lock:
-                    online = len([c for c in self.server.clients.values() if c['authenticated']])
-            self.file_list.set_sync_btn_enabled(online > 0)
-        else:
-            # 连接端：已连接且已验证才可点击
-            enabled = bool(self.client and self.client.authenticated)
-            self.file_list.set_sync_btn_enabled(enabled)
+            self.add_log("同步", I18n.tr('manual_sync_diff'))
     
     def on_file_list_received(self, remote_file_list: list):
         """收到文件列表响应（连接端）
@@ -2932,12 +2972,12 @@ class SyncWindow(QMainWindow):
     def _pinned_count(self):
         """返回当前钉在表格底部的活动进度行数量。
 
-        所有 _transfer_rows / _clipboard_rows / _send_rows 中的条目都是活动
-        进度行（完成/取消即 del），恒位于表格底部，故以其条目总数作为
-        钉住区行数。
+        所有 _transfer_rows / _sync_pull_rows / _clipboard_rows / _send_rows
+        中的条目都是活动进度行（完成/取消即 del），恒位于表格底部，故以其
+        条目总数作为钉住区行数。
         """
-        return (len(self._transfer_rows) + len(self._clipboard_rows)
-                + len(self._send_rows))
+        return (len(self._transfer_rows) + len(self._sync_pull_rows)
+                + len(self._clipboard_rows) + len(self._send_rows))
 
     def _delivery_count(self):
         """投递进度行数（接收 + 发送），恒位于同步进度行下方的最底部区。"""
@@ -2953,7 +2993,7 @@ class SyncWindow(QMainWindow):
         rc = self.records_table.rowCount()
         n_del = len(self._clipboard_rows) + len(self._send_rows)
         base_del = rc - n_del
-        base_sync = base_del - len(self._transfer_rows)
+        base_sync = base_del - len(self._transfer_rows) - len(self._sync_pull_rows)
         # 投递区（最底部）：接收行与发送行混合，按当前物理顺序统一映射
         ordered = sorted(
             [(info['row'], 'c', key) for key, info in self._clipboard_rows.items()]
@@ -2963,10 +3003,15 @@ class SyncWindow(QMainWindow):
                 self._clipboard_rows[key]['row'] = base_del + i
             else:
                 self._send_rows[key]['row'] = base_del + i
-        # 同步区：位于投递区之上
-        sync_ordered = sorted((info['row'], key) for key, info in self._transfer_rows.items())
-        for i, (_, key) in enumerate(sync_ordered):
-            self._transfer_rows[key]['row'] = base_sync + i
+        # 同步区：位于投递区之上（同步发送行与自同步接收行混合，按物理顺序统一映射）
+        sync_ordered = sorted(
+            [(info['row'], 't', key) for key, info in self._transfer_rows.items()]
+            + [(info['row'], 'p', key) for key, info in self._sync_pull_rows.items()])
+        for i, (_, kind, key) in enumerate(sync_ordered):
+            if kind == 't':
+                self._transfer_rows[key]['row'] = base_sync + i
+            else:
+                self._sync_pull_rows[key]['row'] = base_sync + i
 
     def _trim_history(self, cap: int = 100):
         """只裁剪顶部"历史记录"区，钉住区（同步 + 投递进度行）永不裁剪。
@@ -3095,8 +3140,16 @@ class SyncWindow(QMainWindow):
                     # 阶段 4：字节改由接收端缺失拉取（向源端直连拉取），不再经
                     # 主机上传/广播——主机断线后其余端仍能互相同步。
                     return
-                
-                # 旧字节传输路径（收集/只读/无 mesh 兜底：主机端广播、连接端上传主机）
+                # 同步模式但网状链路未就绪（启动窗口/对端未连）：分发引擎若已
+                # 存在则仍记录本端状态（无对端时零投递，靠建连补扫/周期对账
+                # 补拉收敛）；绝不回退投递通道（FILE_NOTIFY 0x17 仅用于剪贴板
+                # 复制场景，走投递链路会误触发接收端胶囊展示）。
+                if self._mode == "sync":
+                    # 只读端不发起任何修改信号（仅单向下拉）
+                    if not (self.client and self.client.perm == "ro"):
+                        self._emit_mesh_signal('add', rel_path)
+                    return
+                # 旧字节传输路径（收集模式兜底：主机端广播、连接端上传主机）
                 if self.is_host and self.server:
                     self.server.broadcast_file(file_path, stop_event)
                 elif self.client:

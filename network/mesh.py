@@ -40,6 +40,10 @@ class MeshManager(QObject):
     RECONNECT_BASE = 2.0        # 断线重连初始退避（秒）
     RECONNECT_MAX = 30.0        # 断线重连最大退避（秒）
     HEARTBEAT_INTERVAL = 2.0    # 网状连接心跳间隔（秒）
+    MAX_SILENT_SECONDS = 8.0    # 对端静默判死阈值（秒）：双方均每 2s 发心跳，
+                                # 连续超过该时长收不到对端任何字节（含心跳）即判半开/
+                                # 静默死亡，拆除连接并触发退避重连（防断电/拔线/WiFi
+                                # 断这类无 FIN/RST 的半开链路永久留在 conns 中）
 
     def __init__(self, name: str = '', end_id: str = '', parent=None):
         super().__init__(parent)
@@ -55,6 +59,7 @@ class MeshManager(QObject):
         self.peers: dict = {}        # end_id -> Endpoint（对端表）
         self.conns: dict = {}        # end_id -> {socket, receiver, send_guard, role, name, heartbeat_stop}
         self._reconnect_threads: dict = {}   # end_id -> Thread
+        self._removed_peers: set = set()     # 墓碑：被 remove_peer 显式移除的对端，防在途拨号复活
         self._reconnect_wait = threading.Event()  # 唤醒所有重连线程（stop 用）
         self._on_message = None      # 可选回调 on_message(end_id, message)
 
@@ -155,15 +160,21 @@ class MeshManager(QObject):
         if not ep or not ep.end_id or ep.end_id == self.end_id:
             return
         with self._lock:
+            self._removed_peers.discard(ep.end_id)  # 显式重新登记（JOIN）清除墓碑
             self.peers[ep.end_id] = ep
         self._ensure_reconnect(ep.end_id)
 
     def remove_peer(self, end_id: str):
-        """移除对端（LEAVE 通告入口）：拆除直连并停止重连。"""
+        """移除对端（LEAVE 通告入口）：拆除直连、停止重连并立墓碑。
+
+        墓碑在显式 add_peer（JOIN/引导清单重新登记）前一直生效，防止
+        「移除时已在途的拨号在握手完成后将已移除对端复活」的竞态。
+        """
         with self._lock:
             self.peers.pop(end_id, None)
             info = self.conns.pop(end_id, None)
             thread = self._reconnect_threads.pop(end_id, None)
+            self._removed_peers.add(end_id)
         if info:
             self._close_conn_info(info)
             self.peer_disconnected.emit(end_id)
@@ -265,15 +276,20 @@ class MeshManager(QObject):
         try:
             send_guard.send(conn_socket, Protocol.create_end_info(
                 self.end_id, self.name, self.mesh_port))
+            last_activity = time.time()
             while self.running:
                 try:
                     data = conn_socket.recv(65536)
                 except socket.timeout:
+                    # 静默超时：收不到对端任何字节（含心跳）→ 判半开/静默死亡
+                    if time.time() - last_activity > self.MAX_SILENT_SECONDS:
+                        break
                     continue
                 except OSError:
                     break
                 if not data:
                     break
+                last_activity = time.time()
                 receiver.feed(data)
                 while receiver.has_complete_message():
                     message = receiver.get_message()
@@ -308,16 +324,22 @@ class MeshManager(QObject):
         # ---- 主循环：分发握手期积压消息 + 后续消息 ----
         self._dispatch_pending(peer_ep.end_id, pending)
         heartbeat_stop = self._start_heartbeat(conn_socket, peer_ep.end_id)
+        last_activity = time.time()
         try:
             while self.running:
                 try:
                     data = conn_socket.recv(65536)
                 except socket.timeout:
+                    # 静默判死：半开/断电链路无 FIN/RST，只能以"多久没收到对端
+                    # 字节"判定。上限留足心跳间隔余量，正常相连每秒都能收到对端心跳。
+                    if time.time() - last_activity > self.MAX_SILENT_SECONDS:
+                        break
                     continue
                 except OSError:
                     break
                 if not data:
                     break
+                last_activity = time.time()
                 receiver.feed(data)
                 while receiver.has_complete_message():
                     message = receiver.get_message()
@@ -359,6 +381,12 @@ class MeshManager(QObject):
             False = 本连接是输家，已被关闭（调用方应结束处理）。
         """
         survivor_role = 'out' if self.end_id < ep.end_id else 'in'
+        with self._lock:
+            if ep.end_id in self._removed_peers:
+                # 墓碑生效：该对端已被显式移除，拒绝其建连（含移除前在途的拨号），
+                # 防止移除后被在途拨号握手完成复活；重新加入须经 add_peer 清墓碑。
+                self._close_socket(conn_socket)
+                return False
         new_info = {
             'socket': conn_socket,
             'receiver': MessageReceiver(),
@@ -399,6 +427,10 @@ class MeshManager(QObject):
             info = self.conns.get(end_id)
             if info and info.get('socket') is conn_socket:
                 guard = info['send_guard']
+                # 写入 conns，使 _close_conn_info 在单条连接拆除（remove_peer/换路）
+                # 时能立即停拍心跳线程，而非依赖下一次 guard.send 抛异常自愈（滞后
+                # 至多 HEARTBEAT_INTERVAL=2s）。
+                info['heartbeat_stop'] = stop
         if not guard:
             stop.set()
             return stop

@@ -53,6 +53,8 @@ class SyncServer(QObject):
     # 去中心化阶段 2：自同步链路信号
     state_sync_done = Signal(bool)     # 一轮端到端对比结束（True=有差异正在补齐，False=一致）
     file_state_added = Signal(str)     # 自同步拉取完成落盘（相对路径），UI 刷新文件列表
+    sync_pull_progress = Signal(str, 'qlonglong', 'qlonglong')  # 自同步拉取进度（相对路径, 已收字节, 总字节）
+    sync_pull_done = Signal(str, bool)  # 自同步拉取结束（相对路径, 成功?）
     
     # 数据块大小（64KB）
     CHUNK_SIZE = 64 * 1024
@@ -104,14 +106,22 @@ class SyncServer(QObject):
         # 自同步链路（去中心化阶段 2）：端到端文件状态对比与拉取
         self.file_state_store: Optional[FileStateStore] = None
         self._file_provider = None   # 本端 FileProvider（UI 注入；会话服务能力）
+        # reuse 模式（全网状管理平面）：连接端复用的管理监听服务，共享宿主
+        # mesh/distributor/store，不重建、不回收；start(reuse=True) 时置 True
+        self._reuse = False
     
-    def start(self, port: int = None, exclude_port: int = None) -> bool:
+    def start(self, port: int = None, exclude_port: int = None,
+              reuse: bool = False) -> bool:
         """启动服务器，尝试多个端口（9527-9536）
 
         Args:
             port: 指定端口（可选）
             exclude_port: 需要避开的端口（可选，如已占用的发现端口）
+            reuse: reuse 模式（全网状管理平面）——本服务仅作管理监听，共享
+                调用方注入的 mesh/distributor/file_state_store（不重建、不重连
+                信号，避免打断宿主数据平面）；stop() 也不回收共享对象。
         """
+        self._reuse = reuse
         start_port = port or Config.DEFAULT_PORT
         max_port = start_port + 10  # 尝试最多10个端口
 
@@ -139,33 +149,38 @@ class SyncServer(QObject):
                 self._ping_thread = threading.Thread(target=self._ping_loop, daemon=True)
                 self._ping_thread.start()
 
-                # 启动网状监听（去中心化数据平面，主机作为网状节点；失败不阻断主服务）
-                self.mesh = MeshManager(parent=self)
-                self.mesh.log_message.connect(self.log_message)
-                self.mesh.start()
+                # reuse 模式跳过数据平面初始化：mesh/distributor/store 由调用方
+                # （连接端宿主）注入，此处仅承担管理监听职责。
+                if not reuse:
+                    # 启动网状监听（去中心化数据平面，主机作为网状节点；失败不阻断主服务）
+                    self.mesh = MeshManager(parent=self)
+                    self.mesh.log_message.connect(self.log_message)
+                    self.mesh.start()
 
-                # 分发链路引擎：本地操作 → 网状直连传播；收到信号去重/应用/转发
-                self.distributor = Distributor(
-                    UserConfig.get_end_id(), self.sync_folder,
-                    mesh=self.mesh, parent=self)
-                self.distributor.log_message.connect(self.log_message)
-                self.distributor.signal_applied.connect(self._on_distributor_applied)
-                self.mesh.set_message_handler(self._on_mesh_message)
+                    # 分发链路引擎：本地操作 → 网状直连传播；收到信号去重/应用/转发
+                    self.distributor = Distributor(
+                        UserConfig.get_end_id(), self.sync_folder,
+                        mesh=self.mesh, parent=self)
+                    self.distributor.log_message.connect(self.log_message)
+                    self.distributor.signal_applied.connect(self._on_distributor_applied)
+                    self.mesh.set_message_handler(self._on_mesh_message)
 
-                # 自同步链路（阶段 2）：端到端状态对比与拉取；直连建立自动补齐
-                self.file_state_store = FileStateStore(
-                    UserConfig.get_end_id(), self.sync_folder,
-                    mesh=self.mesh, distributor=self.distributor,
-                    provider=self._file_provider, parent=self)
-                self.file_state_store.log_message.connect(self.log_message)
-                self.file_state_store.sync_done.connect(self.state_sync_done)
-                self.file_state_store.file_added.connect(self.file_state_added)
-                # 阶段 3：冲突覆盖（远端胜出）→ 自同步链路拉取胜方字节
-                self.distributor.set_conflict_pull_handler(
-                    self.file_state_store.request_conflict_pull)
-                # 阶段 5：网状投递通知 → 复用既有 files_notify_received 信号回投 UI
-                self.distributor.files_notify_received.connect(self.files_notify_received)
-                self.mesh.peer_connected.connect(self._on_mesh_peer_connected)
+                    # 自同步链路（阶段 2）：端到端状态对比与拉取；直连建立自动补齐
+                    self.file_state_store = FileStateStore(
+                        UserConfig.get_end_id(), self.sync_folder,
+                        mesh=self.mesh, distributor=self.distributor,
+                        provider=self._file_provider, parent=self)
+                    self.file_state_store.log_message.connect(self.log_message)
+                    self.file_state_store.sync_done.connect(self.state_sync_done)
+                    self.file_state_store.file_added.connect(self.file_state_added)
+                    self.file_state_store.pull_progress.connect(self.sync_pull_progress)
+                    self.file_state_store.pull_done.connect(self.sync_pull_done)
+                    # 阶段 3：冲突覆盖（远端胜出）→ 自同步链路拉取胜方字节
+                    self.distributor.set_conflict_pull_handler(
+                        self.file_state_store.request_conflict_pull)
+                    # 阶段 5：网状投递通知 → 复用既有 files_notify_received 信号回投 UI
+                    self.distributor.files_notify_received.connect(self.files_notify_received)
+                    self.mesh.peer_connected.connect(self._on_mesh_peer_connected)
 
                 return True
                 
@@ -210,17 +225,17 @@ class SyncServer(QObject):
                 pass
         self.server_socket = None
 
-        # 关闭网状连接
-        if self.mesh:
+        # 关闭网状连接（reuse 模式共享宿主数据平面，不回收）
+        if self.mesh and not self._reuse:
             self.mesh.stop()
 
-        # 停止分发链路引擎
-        if self.distributor:
+        # 停止分发链路引擎（reuse 模式共享宿主数据平面，不回收）
+        if self.distributor and not self._reuse:
             self.distributor.stop()
             self.distributor = None
 
-        # 停止自同步链路
-        if self.file_state_store:
+        # 停止自同步链路（reuse 模式共享宿主数据平面，不回收）
+        if self.file_state_store and not self._reuse:
             self.file_state_store.stop()
             self.file_state_store = None
     
@@ -670,16 +685,16 @@ class SyncServer(QObject):
         """处理验证请求"""
         try:
             data = content.decode('utf-8').split(':')
-            version = data[0] if len(data) > 0 else ''
+            sync_version = data[0] if len(data) > 0 else ''
             room_code = data[1] if len(data) > 1 else ''
             password_hash = data[2] if len(data) > 2 else ''
 
             import hashlib
             expected_hash = hashlib.sha256(self.password.encode()).hexdigest() if self.password else ''
 
-            # 版本比对（优先级最高）
-            if version != Config.APP_VERSION:
-                fail_msg = f"版本不匹配（客户端 {version}，主机 {Config.APP_VERSION}）"
+            # 同步逻辑版本比对（优先级最高；只比内部号，UI/展示变更不要求全员升级）
+            if sync_version != Config.SYNC_LOGIC_VERSION:
+                fail_msg = f"同步逻辑版本不匹配（客户端 {sync_version}，本机 {Config.SYNC_LOGIC_VERSION}）"
                 response = Protocol.create_auth_response(False, fail_msg)
                 self._socket_send(self.clients[client_id], response)
                 self.log_message.emit(f"客户端 {client_id} 验证失败: {fail_msg}")
@@ -710,15 +725,16 @@ class SyncServer(QObject):
             self.clients[client_id]['last_pong'] = time.time()  # 心跳计时起点（防认证后立即误判离线）
             response = Protocol.create_auth_response(True, "验证成功")
             self._socket_send(self.clients[client_id], response)
-            self.log_message.emit(f"客户端 {client_id} 验证成功（版本 {version}）")
+            self.log_message.emit(f"客户端 {client_id} 验证成功（同步逻辑版本 {sync_version}）")
             # 认证成功后通知 UI 更新连接数
             self.client_connected.emit(client_id)
 
-            # 去中心化：认证握手后立即交换 END_INFO（本端身份 + 网状监听端口）
+            # 去中心化：认证握手后立即交换 END_INFO（本端身份 + 网状监听端口 + 管理端口）
             if self.mesh and self.mesh.mesh_port:
                 try:
                     self._socket_send(self.clients[client_id], Protocol.create_end_info(
-                        UserConfig.get_end_id(), socket.gethostname(), self.mesh.mesh_port))
+                        UserConfig.get_end_id(), socket.gethostname(),
+                        self.mesh.mesh_port, mgmt_port=self.port))
                 except Exception:
                     pass
 
@@ -737,6 +753,7 @@ class SyncServer(QObject):
         end_id = content.get('end_id', '')
         name = content.get('name', '') or ''
         mesh_port = int(content.get('mesh_port', 0) or 0)
+        mgmt_port = int(content.get('mgmt_port', 0) or 0)
         if not end_id or end_id == UserConfig.get_end_id():
             return
         ip = self.clients.get(client_id, {}).get('ip', '')
@@ -747,6 +764,7 @@ class SyncServer(QObject):
             info['end_id'] = end_id
             info['name'] = name
             info['mesh_port'] = mesh_port
+            info['mgmt_port'] = mgmt_port  # 全网状管理平面：对端据此故障切换连接本端管理端口
             info['mesh_registered'] = True
         self.log_message.emit(f"端身份登记: {name}({end_id}) @ {ip}:{mesh_port}")
 
@@ -757,7 +775,9 @@ class SyncServer(QObject):
         # 该新端的引导清单：主机自身 + 其他已登记端（不含该端自己）
         peers = []
         if self.mesh and self.mesh.mesh_port:
-            peers.append(self.mesh.endpoint.to_dict())
+            host_ep = self.mesh.endpoint.to_dict()
+            host_ep['mgmt_port'] = self.port
+            peers.append(host_ep)
         with self._lock:
             for cid, cinfo in list(self.clients.items()):
                 if cid == client_id:
@@ -768,6 +788,7 @@ class SyncServer(QObject):
                         'name': cinfo.get('name', ''),
                         'ip': cinfo.get('ip', ''),
                         'mesh_port': cinfo['mesh_port'],
+                        'mgmt_port': cinfo.get('mgmt_port', 0),
                     })
         if not peers:
             return
@@ -781,6 +802,7 @@ class SyncServer(QObject):
             'name': name,
             'ip': ip,
             'mesh_port': mesh_port,
+            'mgmt_port': mgmt_port,
         }), except_end_id=end_id)
 
     def _broadcast_to_mesh_peers(self, data: bytes, except_end_id: str = ''):
@@ -831,6 +853,11 @@ class SyncServer(QObject):
     def _on_mesh_peer_connected(self, end_id: str, name: str):
         """网状直连建立：同步模式下自动发起一轮状态对比（断线重连自动补齐，阶段 2）。"""
         if self.mode == "sync" and self.file_state_store:
+            # 本地补扫兜底：mesh 未就绪窗口内添加/启动前已放置的文件入同步
+            try:
+                self.file_state_store.emit_local_missing()
+            except Exception:
+                pass
             self.file_state_store.request_all()
 
     def set_file_provider(self, provider):
@@ -1706,8 +1733,11 @@ class SyncServer(QObject):
         
         self.client_disconnected.emit(client_id)
 
-        # 去中心化：端离线 → 通告其余端拆除直连 + 主机侧拆除网状直连
-        if end_id:
+        # 去中心化：端离线 → 通告其余端拆除直连 + 主机侧拆除网状直连。
+        # reuse 模式（全网状管理平面）下本服务仅作管理监听：guest 直连断开
+        # 不代表该端离线（其 mesh 数据平面可能仍存活），不广播 LEAVE、
+        # 不 mesh.remove_peer（避免墓碑阻断其网状重连），由主机权威下发生命周期。
+        if end_id and not self._reuse:
             try:
                 self._broadcast_to_mesh_peers(Protocol.create_mesh_peer_leave(end_id))
             except Exception:

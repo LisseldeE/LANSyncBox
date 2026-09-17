@@ -736,7 +736,7 @@ class JoinRoomDialog(QDialog):
 
             # 创建房间发现服务，定向探测
             self.discovery = RoomDiscovery(self)
-            self.discovery.room_found.connect(lambda ip, code, port, ver="", seq=seq: self.on_room_found(ip, code, port, ver, seq))
+            self.discovery.room_found.connect(lambda ip, code, port, ver="", sv="", seq=seq: self.on_room_found(ip, code, port, ver, seq, sv))
             self.discovery.discovery_finished.connect(lambda rooms, seq=seq: self.on_discovery_finished(rooms, seq))
             self.discovery.error_occurred.connect(lambda err, seq=seq: self.on_discovery_error(err, seq))
 
@@ -754,7 +754,7 @@ class JoinRoomDialog(QDialog):
         
         # 创建房间发现服务
         self.discovery = RoomDiscovery(self)
-        self.discovery.room_found.connect(lambda ip, code, port, ver="", seq=seq: self.on_room_found(ip, code, port, ver, seq))
+        self.discovery.room_found.connect(lambda ip, code, port, ver="", sv="", seq=seq: self.on_room_found(ip, code, port, ver, seq, sv))
         self.discovery.discovery_finished.connect(lambda rooms, seq=seq: self.on_discovery_finished(rooms, seq))
         self.discovery.error_occurred.connect(lambda err, seq=seq: self.on_discovery_error(err, seq))
         
@@ -769,14 +769,15 @@ class JoinRoomDialog(QDialog):
         self.status_label.setText(text)
         self.status_label.setStyleSheet(f"color: {color}; font-size: 12px;")
     
-    def on_room_found(self, host_ip: str, room_code: str, port: int, version: str = "", seq: int = None):
+    def on_room_found(self, host_ip: str, room_code: str, port: int, version: str = "", seq: int = None, sync_version: str = ""):
         """发现房间
         Args:
             host_ip: 主机IP
             room_code: 房间号
             port: 端口
-            version: 主机版本号
+            version: 主机应用版本号（仅展示，不参与校验）
             seq: 触发本回调的探测代号（None 表示未代际校验的旧调用点，仍放行）
+            sync_version: 主机同步逻辑版本号（加入房间只校验此号一致）
         """
         # 代际守卫：回调来自已被取消/替换的旧探测时，直接丢弃
         if seq is not None and seq != self._check_seq:
@@ -792,12 +793,13 @@ class JoinRoomDialog(QDialog):
         self.host_port = port
         self.discovered_host = host_ip
         
-        # 版本号核对
-        local_version = Config.APP_VERSION
-        if version and version != local_version:
+        # 同步逻辑版本号核对（一致性校验只比此号；对端未上报 sync_version
+        # 视为不可验证——旧端同步逻辑未知，同样拒绝，避免混跑分叉）
+        local_sync = Config.SYNC_LOGIC_VERSION
+        if sync_version != local_sync:
             # 版本不一致：红字显示，禁用连接按钮
             self._show_status(
-                I18n.tr('version_mismatch', local=local_version, remote=version),
+                I18n.tr('version_mismatch', local=local_sync, remote=sync_version),
                 color='#ff6b6b'
             )
             self.connect_btn.setEnabled(False)
@@ -1068,7 +1070,7 @@ class JoinRoomDialog(QDialog):
         # 响应即点亮绿，超时无响应保持黄（黄=该 IP 定向探测未见响应，更准确）
         self._start_history_directed_probes(self._scan_timeout)
 
-    def _on_scan_room_found(self, host_ip: str, room_code: str, port: int, version: str = ""):
+    def _on_scan_room_found(self, host_ip: str, room_code: str, port: int, version: str = "", sync_version: str = ""):
         """扫描发现单个房间"""
         # 过滤 127.0.0.1 地址（只保留真实 IP）
         if host_ip == '127.0.0.1':
@@ -1092,7 +1094,8 @@ class JoinRoomDialog(QDialog):
             'ip': host_ip,
             'room_code': room_code,
             'port': port,
-            'version': version
+            'version': version,
+            'sync_version': sync_version
         }
         self._discovered_rooms_list.append(room_info)
 

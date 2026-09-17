@@ -45,6 +45,7 @@ class FileProvider(QObject):
 
     CHUNK_SIZE = 64 * 1024
     DEFAULT_START_PORT = 21300  # 独立于同步主端口的目录服务起始端口
+    MAX_SYNC_SESSIONS = 8       # 自同步会话链长度上限（防无限膨胀）
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -64,14 +65,25 @@ class FileProvider(QObject):
 
         replace_all=True（默认，剪贴板语义）：登记新会话时清空全部旧会话
         （"最新为主"，与 Windows 剪贴板一致——已进行中的传输不受影响，迟到的
-        旧会话拉取会被拒绝）；replace_all=False（自同步会话）：保留既有会话，
-        多个对端可同时向本端拉取（阶段 2 自同步链路按请求方隔离会话）。
+        旧会话拉取会被拒绝）；replace_all=False（自同步会话）：按 session_id
+        保留最近若干会话链——多轮对账 REQ 会以新 token 覆盖同 id，若旧 token
+        被直接清空则旧会话的在途拉取报「会话无效」→ 字节缺口永不收敛；保留
+        旧会话使在途拉取仍可命中，链长度上限防无限膨胀。
         """
         session = FileSession(session_id, token, files)
         with self._lock:
             if replace_all:
                 self.sessions.clear()
-            self.sessions[session_id] = session
+                self.sessions[session_id] = session
+            else:
+                chain = self.sessions.get(session_id)
+                if isinstance(chain, list):
+                    chain.append(session)
+                    if len(chain) > self.MAX_SYNC_SESSIONS:
+                        del chain[:len(chain) - self.MAX_SYNC_SESSIONS]
+                else:
+                    chain = [session]
+                self.sessions[session_id] = chain
         return session
 
     def remove_session(self, session_id: str):
@@ -79,12 +91,34 @@ class FileProvider(QObject):
             self.sessions.pop(session_id, None)
 
     def get_session(self, session_id: str):
+        """取最新登记的同 id 会话（剪贴板单会话/自同步链取链尾）。"""
         with self._lock:
-            return self.sessions.get(session_id)
+            entry = self.sessions.get(session_id)
+            if isinstance(entry, list):
+                return entry[-1] if entry else None
+            return entry
+
+    def _find_session(self, session_id: str, token: str):
+        """按 id+token 定位会话（兼容单会话与多会话链）。
+
+        链中会话按登记时间追加（尾部最新、文件快照最新）。同 token（每请求方
+        token 缓存固定）时取链尾最新会话：取链首会命中最早登记的快照，多轮对账
+        后新增文件不在旧快照内 → 拉取误判「文件不存在」→ 该轮拉取全失败。
+        旧会话（token 已更换的在途拉取）仍在链内按 token 逐项命中。
+        """
+        with self._lock:
+            entry = self.sessions.get(session_id)
+            if entry is None:
+                return None
+            if isinstance(entry, FileSession):
+                return entry if entry.token == token else None
+            for s in reversed(entry):
+                if s.token == token:
+                    return s
+            return None
 
     def _verify(self, session_id: str, token: str) -> bool:
-        session = self.get_session(session_id)
-        return session is not None and session.token == token
+        return self._find_session(session_id, token) is not None
 
     # ---- 服务生命周期 ----
 
@@ -246,7 +280,7 @@ class FileProvider(QObject):
                 info['pull_done'] = True
             return
 
-        session = self.get_session(session_id)
+        session = self._find_session(session_id, token)
         abs_path = session.resolve(name) if session else None
         if not abs_path or not os.path.isfile(abs_path):
             with self._lock:
@@ -334,7 +368,8 @@ class FileProvider(QObject):
 
 
 def pull_file(host: str, port: int, session_id: str, token: str, name: str, dest_path: str,
-              progress_cb=None, stop_event=None, msg_type: int = None):
+              progress_cb=None, stop_event=None, msg_type: int = None,
+              overall_timeout: float = None):
     """接收端单文件拉取：直连复制端目录端口，以 FILE_BEGIN/FILE_DATA/FILE_END 流式收文件。
 
     与同步接收同一套逻辑：FILE_BEGIN 携带真实大小作为进度分母（恒定），分块顺序写入，
@@ -349,6 +384,10 @@ def pull_file(host: str, port: int, session_id: str, token: str, name: str, dest
         stop_event: 可选，threading.Event。置位时中止拉取并清理临时文件（窗口关闭/传输取消）。
         msg_type: 拉取请求消息类型。None=剪贴板（0x18）；阶段 2 同步拉取传
             MessageType.SYNC_PULL_REQ（0x23，同构复用 FileProvider 会话校验）。
+        overall_timeout: 可选，数据阶段整体超时（秒）。对端半开（断电/拔线无
+            FIN/RST）时 recv 永不返回，调用方（如自同步单 worker）会无限阻塞；
+            传入则超时中止拉取并清理临时文件。None 保持"静默无限等待"语义
+            （投递路径沿用，发送端打开/读取慢时继续等待）。
 
     Returns:
         (成功?, 实际接收字节数, 错误消息)
@@ -358,6 +397,7 @@ def pull_file(host: str, port: int, session_id: str, token: str, name: str, dest
     expected_total = 0
     mtime = 0.0
     cancelled = False
+    timed_out = False
     conn = None
     # 建连阶段本地重试（数据阶段不重试，不违背"失败不重发"）：打掉弱网瞬时抖动
     # （SYN 丢失 / 拥塞 / backlog 满被拒）。广播刚发出时复制端必然在线，慢 SYN 少见，
@@ -390,8 +430,11 @@ def pull_file(host: str, port: int, session_id: str, token: str, name: str, dest
             time.sleep(0.5 if attempt == 0 else 1.0)
 
     # recv 超时 1s 供 stop_event 轮询（弱网语义不变：timeout 后 continue 静默等待，
-    # 发送端打开/读取慢时依然无限等待；仅新增取消响应能力）
+    # 发送端打开/读取慢时依然无限等待；仅新增取消响应能力与整体超时兜底）
     conn.settimeout(1.0)
+    deadline = None
+    if overall_timeout:
+        deadline = time.monotonic() + overall_timeout
     receiver = MessageReceiver()
 
     # 目标路径准备（写入临时文件，成功后再原子改名，避免失败留下半成品）
@@ -411,6 +454,10 @@ def pull_file(host: str, port: int, session_id: str, token: str, name: str, dest
                 try:
                     raw = conn.recv(65536)
                 except socket.timeout:
+                    # 整体超时兜底：对端半开（断电/拔线）时 recv 永不返回，超时中止
+                    if deadline is not None and time.monotonic() > deadline:
+                        timed_out = True
+                        break
                     continue  # 发送端打开/读取大文件时静默等待（与同步接收一致）
                 if not raw:
                     break  # 对端关闭：若已收完（got_end）才算成功，否则视为失败
@@ -450,6 +497,8 @@ def pull_file(host: str, port: int, session_id: str, token: str, name: str, dest
         _safe_remove(tmp_path)
         if cancelled:
             return False, total, "已取消"
+        if timed_out:
+            return False, total, "拉取超时"
         return False, total, "复制端未提供数据（会话无效或文件不存在）"
 
     # 完整度校验（与同步接收一致）：FILE_END 携带真实大小，实际接收字节数不符则丢弃
@@ -458,12 +507,26 @@ def pull_file(host: str, port: int, session_id: str, token: str, name: str, dest
         return False, total, f"文件不完整（实际 {total}/期望 {expected_total}）"
 
     # 完成：原子替换为目标文件，恢复源文件修改时间；
-    # 落盘改名失败时清理临时文件并报错，不留半成品与泄漏
-    try:
-        os.replace(tmp_path, dest_path)
-    except Exception as e:
+    # 落盘改名失败时清理临时文件并报错，不留半成品与泄漏。
+    # Windows 独占锁：本端 FileProvider 正对外服务同一文件（open 'rb' 共享读/写
+    # 但不共享删除）时，os.replace 需对目标取得删除权而撞 WinError 5（访问/共享
+    # 冲突）——短退避重试数轮等服务线程释放句柄后再改，避免拉取整轮失败、字节
+    # 缺口反复重入对账导致「来回拉取」。服务线程通常毫秒级完成，重试即收敛。
+    last_err = None
+    for _attempt in range(5):
+        try:
+            os.replace(tmp_path, dest_path)
+            last_err = None
+            break
+        except PermissionError as e:
+            last_err = e
+            time.sleep(0.05 * (_attempt + 1))
+        except OSError as e:
+            last_err = e
+            break
+    if last_err is not None:
         _safe_remove(tmp_path)
-        return False, total, f"写入目标文件失败: {e}"
+        return False, total, f"写入目标文件失败: {last_err}"
     if mtime:
         try:
             os.utime(dest_path, (mtime, mtime))

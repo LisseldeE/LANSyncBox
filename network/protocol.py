@@ -48,9 +48,9 @@ class MessageType:
     FILE_STATE_REQ = 0x21     # 文件状态请求（端→对端）：{src_id}
     FILE_STATE_RESP = 0x22    # 文件状态响应（对端→端）：{src_id, entries:[{name, op_no, state, exists, clock, ts}]}
     SYNC_PULL_REQ = 0x23      # 同步拉取请求（端→对端 FileProvider 会话）：{session_id, token, name}
-    END_INFO = 0x24           # 端身份信息（握手后交换）：{end_id, name, mesh_port}
-    MESH_PEER_LIST = 0x25     # 对端清单引导（主机→新加入端）：{peers:[{end_id, name, ip, mesh_port}]}
-    MESH_PEER_JOIN = 0x26     # 新端加入通告（主机→各端）：{peer:{end_id, name, ip, mesh_port}}
+    END_INFO = 0x24           # 端身份信息（握手后交换）：{end_id, name, mesh_port, mgmt_port}
+    MESH_PEER_LIST = 0x25     # 对端清单引导（主机→新加入端）：{peers:[{end_id, name, ip, mesh_port, mgmt_port}]}
+    MESH_PEER_JOIN = 0x26     # 新端加入通告（主机→各端）：{peer:{end_id, name, ip, mesh_port, mgmt_port}}
     MESH_PEER_LEAVE = 0x27    # 端离线通告（主机→各端）：{end_id}
     CLIPBOARD_NOTIFY_SIGNAL = 0x28  # 投递通知（端→网状各直连对端；阶段 5 替换主机转发）：content=JSON 会话元数据
 
@@ -141,11 +141,11 @@ class Protocol:
         return Protocol.pack_message(0x05, '', len(content), False, content)  # 0x05 = RENAME
     
     @staticmethod
-    def create_auth_request(version: str, room_code: str, password: str = '') -> bytes:
-        """创建验证请求（包含版本号）"""
+    def create_auth_request(sync_version: str, room_code: str, password: str = '') -> bytes:
+        """创建验证请求（携带同步逻辑版本号：加入房间一致性校验只比此号）"""
         import hashlib
         password_hash = hashlib.sha256(password.encode()).hexdigest() if password else ''
-        content = f"{version}:{room_code}:{password_hash}".encode('utf-8')
+        content = f"{sync_version}:{room_code}:{password_hash}".encode('utf-8')
         return Protocol.pack_message(MessageType.AUTH_REQ, '', len(content), False, content)
     
     @staticmethod
@@ -397,11 +397,17 @@ class Protocol:
         )
 
     @staticmethod
-    def create_end_info(end_id: str, name: str, mesh_port: int) -> bytes:
-        """创建端身份信息消息（0x24，握手后交换）"""
+    def create_end_info(end_id: str, name: str, mesh_port: int,
+                        mgmt_port: int = 0) -> bytes:
+        """创建端身份信息消息（0x24，握手后交换）
+
+        mgmt_port: 本端管理监听端口（全网状管理平面：各端均监听管理端口，
+        供管理连接故障时切换下一端点；旧版本缺省 0 = 不提供）
+        """
         return Protocol._pack_json(
             MessageType.END_INFO,
-            {'end_id': end_id, 'name': name, 'mesh_port': mesh_port},
+            {'end_id': end_id, 'name': name, 'mesh_port': mesh_port,
+             'mgmt_port': mgmt_port},
             filename=end_id,
         )
 
@@ -409,7 +415,7 @@ class Protocol:
     def create_mesh_peer_list(peers: list) -> bytes:
         """创建对端清单引导消息（0x25，主机→新加入端）
 
-        peers: [{end_id, name, ip, mesh_port}, ...]（不含接收端自身）
+        peers: [{end_id, name, ip, mesh_port, mgmt_port}, ...]（不含接收端自身）
         """
         return Protocol._pack_json(MessageType.MESH_PEER_LIST, {'peers': peers})
 
@@ -417,7 +423,7 @@ class Protocol:
     def create_mesh_peer_join(peer: dict) -> bytes:
         """创建新端加入通告消息（0x26，主机→各端）
 
-        peer: {end_id, name, ip, mesh_port}
+        peer: {end_id, name, ip, mesh_port, mgmt_port}
         """
         return Protocol._pack_json(MessageType.MESH_PEER_JOIN, {'peer': peer})
 

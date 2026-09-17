@@ -47,6 +47,7 @@ LANSyncBox Pro is the upgraded version of [LANSyncBox](https://github.com/Lissel
 | **Image / file peer-to-peer delivery** | — | ⭐ **New** |
 | **Top quick-add** | — | ⭐ **New** |
 | **Sync / Collect modes** | — | ⭐ **New** |
+| **Decentralized mesh sync** | — | ⭐ **New** |
 
 ## Screenshots
 
@@ -62,7 +63,10 @@ LANSyncBox Pro is the upgraded version of [LANSyncBox](https://github.com/Lissel
 | :--- | :--- |
 | **Delivery · Cross-device Copy & Paste** | Copy on device A, hit **Ctrl+V** on device B — done. **Text** is broadcast by the host into every client's system clipboard; **images/files** are **pulled peer-to-peer** from the copying device and delivered to your local folder |
 | **Top Quick-Add** | Drag files/folders onto the **top edge of the screen** to add them to the sync list instantly, without reaching into the window |
-| **Distributed File Transfer** | File metadata is distributed by the host, but the bytes flow **directly between the copying and receiving peers**, bypassing host forwarding |
+| **Distributed File Transfer** | File changes are dispatched over the mesh, and the bytes flow **directly between the source and receiving peers**, bypassing host forwarding |
+| **Decentralized Mesh Sync** | Synchronization no longer depends on host arbitration: if any device goes offline, the rest keep syncing and converging; joining a room does not require the host online — any online device can answer discovery and verification |
+| **Parallel Transfer** | Up to **5 files transfer in parallel**; concurrent in-flight pulls of the same file are auto-serialized, and a post-write staleness check guarantees byte-level convergence |
+| **Sync Logic Version** | Joining a room validates only the internal **sync logic version**; UI / display-only changes no longer force every device to upgrade |
 | **Sync / Collect Modes** | On top of real-time sync, a new **Collect mode**: clients submit files to the host only, without broadcasting to other clients |
 
 > The above are planned Beta changes; specifics and progress may shift during development. Refer to actual releases.
@@ -70,8 +74,8 @@ LANSyncBox Pro is the upgraded version of [LANSyncBox](https://github.com/Lissel
 ## Core Features (Existing)
 
 - **Real-time Sync**: additions, edits, deletions, and renames sync to all clients instantly; auto-aligns differences on first connect
-- **Room Sharing**: custom 6-digit room codes, optional password protection, version compatibility check when joining
-- **Large File Transfer**: streaming chunked transfer with resume support; transfers fail without corrupting files; up to 5 files at once, auto-cancels on change
+- **Room Sharing**: custom 6-digit room codes, optional password protection, sync-logic version compatibility check when joining
+- **Large File Transfer**: streaming chunked transfer with resume support; transfers fail without corrupting files; up to 5 files in parallel, same-name pulls serialized for byte consistency
 - **File Operations**: add, create, copy, cut, paste, delete, rename; double-click for read-only preview
 - **Interface**: smooth Qt6 UI, real-time Chinese/English switching, visible transfer progress
 
@@ -139,8 +143,9 @@ LANSyncBox Pro is the upgraded version of [LANSyncBox](https://github.com/Lissel
 
 | End | Role |
 | :--- | :--- |
-| **Host** | Maintains file list, syncs changes to all clients in real-time; manages read/write permissions of each client; receives client files and forwards to others |
-| **Client** | Uploads file changes to host (not directly to other clients); incremental sync after manual reconnect |
+| **Any end (peer node)** | Each end independently maintains its operation list and file state (vector clocks); changes are dispatched mesh-wide in real-time; if any end goes offline, the rest keep syncing and converging |
+| **Joining (decentralized)** | No host required online: any online end can answer discovery, verification, and guide new ends in; full alignment happens automatically after joining |
+| **Read/Write Permissions** | Managed by the room creator (host end) for each connected client |
 | **Conflict** | The version with the latest modification time wins |
 
 ### Sync Mechanisms
@@ -150,11 +155,12 @@ LANSyncBox Pro is the upgraded version of [LANSyncBox](https://github.com/Lissel
 | **Real-time Sync** | File changes recorded via operation list and dispatched in real-time |
 | **Transfer Protocol** | TCP + custom protocol |
 | **Streaming Transfer** | Chunked streaming to avoid loading entire files into memory |
-| **Concurrency Control** | Max 5 files transferred simultaneously to optimize resource usage |
+| **Concurrency Control** | Up to 5 files transfer in parallel; concurrent in-flight pulls of the same file are auto-serialized, with a post-write staleness check guaranteeing byte convergence |
 | **Resumable Sending** | Interrupted sends only resume the remaining bytes without resending what was already sent; brief back-off when the receiver is busy keeps latency realistic |
 | **Integrity Check** | Validates file size on completion, discards incomplete files |
-| **Transfer Cancellation** | Auto-cancels on file change and notifies receiver to clean up |
-| **Host Offline** | All clients notified "Connection disconnected" |
+| **Cancel & Cleanup** | Active cancellation supported (window close / user cancel); interrupted transfers immediately remove `.tcp_*.part` temp files, leaving no partial artifacts in sync |
+| **Version Gate** | Joining validates only the internal sync logic version (`SYNC_LOGIC_VERSION`); UI / display-only changes don't force everyone to upgrade |
+| **Node Offline** | Decentralized mesh: if any node disconnects, the rest keep syncing and converging; incremental sync resumes automatically on reconnect |
 
 ## Change Log
 

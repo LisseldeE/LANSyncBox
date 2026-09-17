@@ -73,27 +73,6 @@ _SVG_DELETE = (
 )
 
 
-class WarnSyncButton(QPushButton):
-    """手动同步按钮：可点击时鼠标悬浮，边框与文字变红（红色仅作人类警示，不拦截点击）。
-
-    - 常态不加任何 QSS，保持原生按钮外观。
-    - 仅"可点击（enabled）"且鼠标悬浮时才临时套红色警示样式，移开立即恢复原生。
-    - 禁用态（灰色）不派发鼠标悬浮事件，天然不触发红色，维持现状。
-    """
-    # 圆角与全应用按钮(6px)一致；不设背景色则 Qt 用调色板 Button 角色绘制并随主题自适应，
-    # 红色边框沿按钮自身圆角裁剪，避免丢失原生圆角变成方形外圈。
-    _HOVER_QSS = "QPushButton { border: 1px solid #d93025; border-radius: 6px; color: #d93025; }"
-
-    def enterEvent(self, event):
-        if self.isEnabled():
-            self.setStyleSheet(self._HOVER_QSS)
-        super().enterEvent(event)
-
-    def leaveEvent(self, event):
-        self.setStyleSheet("")
-        super().leaveEvent(event)
-
-
 class DragableTableWidget(QTableWidget):
     """支持拖拽和框选的表格控件"""
 
@@ -601,7 +580,6 @@ class FileListWidget(QWidget):
     file_deleted = Signal(str)  # 文件删除信号（本地操作触发）
     file_renamed = Signal(str, str)  # 文件重命名信号（旧名，新名）
     dir_created = Signal(str)  # 目录创建信号（本地操作触发）
-    manual_sync_requested = Signal()  # 手动同步按钮点击信号
 
     def __init__(self, folder_path: Path, parent=None):
         super().__init__(parent)
@@ -732,19 +710,11 @@ class FileListWidget(QWidget):
         self.path_edit.setReadOnly(True)
         toolbar_layout.addWidget(self.path_edit)
 
-        # 手动同步按钮（选中状态/禁用状态区分不同用途：连接端拉取、主机端通知所有连接端）
-        # WarnSyncButton：可点击时悬浮边框/文字变红警示（仅人类警示，不拦截点击）
-        self.sync_btn = WarnSyncButton(I18n.tr('manual_sync'))
-        self.sync_btn.setFixedWidth(80)
-        self.sync_btn.clicked.connect(self.manual_sync_requested.emit)
-        toolbar_layout.addWidget(self.sync_btn)
-
         # 统一"返回上级"按钮与路径框的垂直高度，保证两者一致。
         # 不使用 QSS 指定 margin（会启用基础样式、压低原生控件外观），以路径框高度为基准对齐
         _bar_h = self.path_edit.sizeHint().height()
         self.back_btn.setFixedHeight(_bar_h)
         self.path_edit.setFixedHeight(_bar_h)
-        self.sync_btn.setFixedHeight(_bar_h)
         
         # 刷新按钮（已注释：远程/本地变化均有自动刷新，此手动按钮冗余，暂不删除、保留逻辑）
         # refresh_btn = QPushButton(I18n.tr('refresh'))
@@ -1041,13 +1011,6 @@ class FileListWidget(QWidget):
     def show_global_notification(self, message: str):
         """显示顶部全局通知（复用现有玻璃态 toast 卡片样式）"""
         self._show_toast(message)
-
-    def set_sync_btn_enabled(self, enabled: bool):
-        """启停手动同步按钮"""
-        if not enabled:
-            # 禁用时清除可能残留的悬浮红色警示，避免灰色态误显红色
-            self.sync_btn.setStyleSheet("")
-        self.sync_btn.setEnabled(enabled)
 
     def set_readonly(self, ro: bool):
         """设置只读权限：禁用添加/修改同步列表的全部入口，并刷新操作栏状态。
