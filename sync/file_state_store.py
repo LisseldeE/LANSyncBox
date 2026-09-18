@@ -81,6 +81,12 @@ class FileStateStore(QObject):
         self._pulls = {}
         # 冲突覆盖拉取（阶段 3）：name -> src_id（等待该对端 RESP 会话后入队）
         self._pending_conflicts = {}
+        # 拉取冷却表（阶段 5，防反复回环）：name -> {src_id: {fails, cooldown_until,
+        # last_op_no}}。当源端明确「没有此文件」（pull_file 返回「复制端未提供数据」）
+        # 且对账轮反复重拉同一文件时，冷却后暂时停止对该 (name, src_id) 的重复拉取，
+        # 避免空转打日志/刷 UI「正在补齐」。冷却到期或对端出现更高版本时自动放行，
+        # 不永久丢弃真实文件。__lock__ 保护。
+        self._pull_cooldowns = {}
         # 同名拉取串行化锁（name -> Lock）：worker 池跨文件 5 并发，但同一文件的
         # 多份在途拉取（不同 RESP 槽先后弹出）必须串行——后者在前者完成后重新做
         # 新鲜度裁决，防止低版本槽迟到落盘覆盖胜者字节（并发池化引入的拉取交错）
@@ -346,6 +352,14 @@ class FileStateStore(QObject):
         Returns:
             True = 槽被新建或升级（调用方据此累计 has_diff）；False = 抛弃。
         """
+        # 阶段 5 冷却门：源端明确「没有此文件」且处于冷却中、候选版本未更新 →
+        # 拦截入队，打断对账轮反复重拉同一文件（防空转/刷 UI/刷日志）。冷却到期
+        # 或候选为更高版本（源端真的重新产出）则自动放行，不永久丢弃真实文件。
+        cooled, _left = self._pull_is_cooled(name, src_id, remote.op_no)
+        if cooled:
+            self.log_message.emit(
+                f"冷却抑制重复拉取 {name}（源端未提供该文件），暂停本轮重试")
+            return False
         with self._cond:
             prev = self._pulls.get(name)
             if prev is not None:
@@ -497,24 +511,36 @@ class FileStateStore(QObject):
             st_end = max(st.vv, key=lambda k: st.vv[k])
         return compare_states(st, cand, st_end, cand_end) == 1
 
-    def emit_local_missing(self) -> int:
-        """本地补扫（建连时兜底）：扫描同步文件夹，对磁盘存在但状态表缺失的
-        文件 emit add 信号，纳入同步体系。
+    def emit_local_missing(self, exclude_dirs: Optional[set] = None) -> int:
+        """本地补扫（建连时/切回同步时兜底）：扫描同步文件夹，对磁盘存在但
+        状态表缺失的文件 emit add 信号，纳入同步体系。
 
-        覆盖两类场景：① mesh 未就绪窗口内添加文件（信号未发出、状态未记录）
-        ——建连后补扫兜底；② 启动前已放置于文件夹的文件（状态表无条目）。
-        状态表已有条目（含已删除条目）跳过，不复活已删文件。只读端不发起
-        任何修改信号（返回 0，仅单向下拉）。
+        覆盖三类场景：① mesh 未就绪窗口内添加文件（信号未发出、状态未记录）
+        ——建连后补扫兜底；② 启动前已放置于文件夹的文件（状态表无条目）；
+        ③ 收集模式期间主机对根目录的本地增删被「收集不转发」跳过、切回同步
+        后由 _complete_mode_switch 调用本函数补扫广播（此时连接端已在线，
+        不会经过 _on_mesh_peer_connected）。状态表已有条目（含已删除条目）跳过，
+        不复活已删文件。只读端不发起任何修改信号（返回 0，仅单向下拉）。
+
+        Args:
+            exclude_dirs: 需从扫描中剪枝的顶层目录名集合（收集模式 IP 文件夹）。
+                切回同步时这些文件夹是已连接/历史连接端的私有目录，内部文件归
+                属对应连接端、不应作为共享文件被扫描广播；不剪枝会把其内存误
+                emit add 广播给所有对端。按目录名匹配（os.walk 的 `_dirs` 元素
+                即目录 basename），命中即整棵子树剪掉。
 
         Returns:
             新 emit 的文件数
         """
         if self.distributor is None or self._readonly:
             return 0
+        if exclude_dirs is None:
+            exclude_dirs = set()
         count = 0
         try:
             for root, _dirs, files in os.walk(self.sync_folder):
-                _dirs[:] = [d for d in _dirs if not d.startswith('.')]
+                _dirs[:] = [d for d in _dirs
+                            if not d.startswith('.') and d not in exclude_dirs]
                 for fn in files:
                     if self._is_transient_temp(fn):
                         continue  # 传输临时文件不入同步（见 _is_transient_temp）
@@ -724,7 +750,75 @@ class FileStateStore(QObject):
             self.log_message.emit(f"自同步拉取完成: {name}")
         else:
             self.pull_done.emit(name, False)
+            # 阶段 5：源端明确「没有此文件」→ 记录冷却（连续多次后对账轮暂停重复拉取）
+            if self._source_lacks_file(err):
+                self._record_pull_cooldown(name, item['end_id'], item['op_no'])
             self.log_message.emit(f"自同步拉取失败 {name}: {err}")
+
+    # ---- 拉取冷却（阶段 5：防「源端无此文件」反复回环） ----
+
+    # 源端明确「没有此文件」所需连续失败次数；达到后进入冷却
+    PULL_COOLDOWN_FAILS = 3
+    # 冷却时长（秒）：期间停止对该 (name, src_id) 的重复拉取，到期自动放行重试
+    PULL_COOLDOWN_SECONDS = 120.0
+
+    @staticmethod
+    def _source_lacks_file(err) -> bool:
+        """拉取失败原因是否表示「源端明确没有此文件」。
+
+        仅匹配 pull_file 返回的那条固定文案连线成「完整连接但源端从未发送文件
+        数据」——即源端状态表有该条目但磁盘/会话已无字节，永不自我恢复，
+        正是反复回环的元凶。其余错误（无法连接、拉取超时、拉取失败、文件不
+        完整、已取消）都是瞬时/可在源端侧恢复的故障，不应进入冷却。
+        """
+        return bool(err) and "复制端未提供数据" in str(err)
+
+    def _record_pull_cooldown(self, name: str, src_id: str, op_no):
+        """记录一次「源端无此文件」拉取失败；连续多次后进入冷却。
+
+        __lock__ 保护。冷却完成后（gate 侧触碰到期条目会移除）下次重试若仍失败
+        再累计，故内存仅保留「正在冷却」的条目，不会无限增长。
+        """
+        with self._lock:
+            recs = self._pull_cooldowns.setdefault(name, {})
+            rec = recs.setdefault(src_id, {
+                'fails': 0, 'cooldown_until': 0.0, 'last_op_no': 0})
+            rec['last_op_no'] = max(rec.get('last_op_no', 0), int(op_no or 0))
+            rec['fails'] = rec.get('fails', 0) + 1
+            if rec['fails'] >= self.PULL_COOLDOWN_FAILS:
+                rec['cooldown_until'] = time.time() + self.PULL_COOLDOWN_SECONDS
+                rec['fails'] = 0
+
+    def _pull_is_cooled(self, name: str, src_id: str, op_no) -> tuple:
+        """判定 (name, src_id) 当前是否处于冷却态并清理到期条目。
+
+        Returns:
+            (是否冷却中, 冷却剩余秒数)。冷却中则 _enqueue_pull 应拦截。
+
+        副作用：冷却已到期（0 < cooldown_until <= now）的条目在此移除，放行重试；
+        对端出现更高版本（op_no > last_op_no，源端真的重新产出了该文件）则
+        解除冷却并放行，避免误拦真实的新文件。仍在累计（cooldown_until == 0，
+        失败次数未达阈值）时保留计数、不拦截。
+        """
+        with self._lock:
+            recs = self._pull_cooldowns.get(name)
+            if not recs:
+                return False, 0.0
+            rec = recs.get(src_id)
+            if not rec:
+                return False, 0.0
+            now = time.time()
+            until = rec.get('cooldown_until', 0.0)
+            if until > now:
+                if int(op_no or 0) > rec.get('last_op_no', 0):
+                    del recs[src_id]  # 新版本 → 解除冷却
+                    return False, 0.0
+                return True, until - now
+            if until > 0.0:
+                # 冷却已到期：移除条目（含 last_op_no 记录），允许重试
+                del recs[src_id]
+            # until == 0：仍在累计（失败数未达阈值），保留计数，不拦截
+            return False, 0.0
 
     # ---- 触发一轮对比 ----
 

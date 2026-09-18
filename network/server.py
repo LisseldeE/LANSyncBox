@@ -163,6 +163,7 @@ class SyncServer(QObject):
                         mesh=self.mesh, parent=self)
                     self.distributor.log_message.connect(self.log_message)
                     self.distributor.signal_applied.connect(self._on_distributor_applied)
+                    self.distributor.set_protected_dirs(self._collect_ip_folders())
                     self.mesh.set_message_handler(self._on_mesh_message)
 
                     # 自同步链路（阶段 2）：端到端状态对比与拉取；直连建立自动补齐
@@ -853,9 +854,11 @@ class SyncServer(QObject):
     def _on_mesh_peer_connected(self, end_id: str, name: str):
         """网状直连建立：同步模式下自动发起一轮状态对比（断线重连自动补齐，阶段 2）。"""
         if self.mode == "sync" and self.file_state_store:
-            # 本地补扫兜底：mesh 未就绪窗口内添加/启动前已放置的文件入同步
+            # 本地补扫兜底：mesh 未就绪窗口内添加/启动前已放置的文件入同步。
+            # 排除各连接端 IP 私有文件夹，避免把收集区文件误作共享广播。
             try:
-                self.file_state_store.emit_local_missing()
+                self.file_state_store.emit_local_missing(
+                    exclude_dirs=self._collect_ip_folders())
             except Exception:
                 pass
             self.file_state_store.request_all()
@@ -914,7 +917,14 @@ class SyncServer(QObject):
         except ValueError as e:
             self.log_message.emit(f"拒绝非法路径: {e}")
             return
-        
+
+        # 受保护目录（连接端 IP 文件夹本体）不可删：判定「目标 == 某 IP 文件夹本身」
+        # （owner 命中且其后无剩余子路径）。文件夹内部文件/子目录照常可删。
+        owner = self._ip_folder_owner(target)
+        if owner and not target[len(owner):].lstrip('/').lstrip('\\'):
+            self.log_message.emit(f"拒绝删除受保护的连接端文件夹: {target}")
+            return
+
         try:
             if os.path.isfile(file_path):
                 os.remove(file_path)
@@ -1843,6 +1853,14 @@ class SyncServer(QObject):
         elif new_mode == "sync":
             # 取消同步中的文件并清空传输列表
             self.transfer_queue.cancel_all_tasks()
+            # 收集期主机对根目录的本地增删被「收集不转发」跳过，未进状态表；
+            # 切回同步补扫广播（排除各连接端 IP 私有文件夹），再触发全量差异补齐
+            if self.file_state_store:
+                try:
+                    self.file_state_store.emit_local_missing(
+                        exclude_dirs=self._collect_ip_folders())
+                except Exception:
+                    pass
             # 触发一次全量同步广播，各连接端上报列表后差异补齐
             self.request_sync_all()
 
@@ -2043,6 +2061,9 @@ class SyncServer(QObject):
             # 记录已创建过的 IP 文件夹：即使该连接端后续断开，遗留文件夹仍不参与同步
             self._ip_folders_created.add(ip)
             self.dir_created.emit(ip)
+            # 刷新受保护目录集：使新连接端 IP 文件夹立即受删除保护
+            if self.distributor:
+                self.distributor.set_protected_dirs(self._collect_ip_folders())
         except Exception as e:
             self.log_message.emit(f"创建IP文件夹失败: {e}")
 

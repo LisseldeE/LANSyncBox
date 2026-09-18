@@ -14,7 +14,7 @@ class Config:
 
     # 应用信息
     APP_NAME = "LANSyncBox Pro"
-    APP_VERSION = "R1.0.0.0"
+    APP_VERSION = "R1.1.0.0"
     # 同步逻辑版本号
     SYNC_LOGIC_VERSION = "26.9C1"
     APP_SERIAL = "P269.WH"

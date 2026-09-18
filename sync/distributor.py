@@ -76,6 +76,7 @@ class Distributor(QObject):
         self._cancel_handler = None   # 取消传输回调 cb(file)
         self._applied_handler = None  # 本地应用回调（无事件循环场景/单测）
         self._conflict_pull_handler = None  # 冲突覆盖回调 cb(file, src_id)
+        self._protected_dirs = set()  # 受保护目录(相对路径,如收集模式 IP 文件夹名):本体不可删,内部可删
         self._log_handler = None      # 日志回调（无事件循环场景/单测）
         self._files_notify_handler = None  # 投递通知回调 cb(content_bytes)（阶段 5，测试/无事件循环场景）
 
@@ -665,12 +666,25 @@ class Distributor(QObject):
         return path
 
     def _delete_local(self, file: str):
+        # 受保护目录（收集/同步模式下连接端 IP 文件夹本体）不可被删除；
+        # 其内部文件/子目录（rel 路径不等于保护名）照常可删。
+        if file in self._protected_dirs:
+            self.log_message.emit(f"拒绝删除受保护目录: {file}")
+            return
         path = self._safe_join(file)
         if os.path.isfile(path) or os.path.islink(path):
             os.remove(path)
         elif os.path.isdir(path):
             from sync.file_manager import safe_rmtree
             safe_rmtree(path)
+
+    def set_protected_dirs(self, dirs):
+        """设置不可被删除的目录集合（相对路径，如收集模式 IP 文件夹名）。
+
+        仅拦截「目标 == 某个保护目录本身」的删除；其内部文件/子目录不受限。
+        """
+        with self._lock:
+            self._protected_dirs = set(dirs)
 
     def _rename_local(self, old: str, new: str) -> bool:
         """重命名/移动：源不存在返回 False（跳过）；目标存在先删除。"""

@@ -46,6 +46,10 @@ class FileProvider(QObject):
     CHUNK_SIZE = 64 * 1024
     DEFAULT_START_PORT = 21300  # 独立于同步主端口的目录服务起始端口
     MAX_SYNC_SESSIONS = 8       # 自同步会话链长度上限（防无限膨胀）
+    MAX_CONCURRENT_STREAMS = 5  # 同一时刻最多并行服务的文件流出站上限（发送侧限制）：
+                                # 多端同时缺同一文件时防提供方一台被打爆；接收侧每端
+                                # 已有各自 5 并发池，本侧与之对称，单节点最大在途流数
+                                # ≈ 发送 5 + 自身接收 5 = 10，可解释且不失控。
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -56,6 +60,10 @@ class FileProvider(QObject):
         self.sessions = {}          # session_id -> FileSession
         self._lock = threading.Lock()
         self._conns = {}            # conn_id -> {socket, receiver, send_guard}
+        # 出站并发上限信号量：_stream_file 进入流式发送前获取、结束（含异常/提前返回）
+        # 后释放。同一时刻仅 MAX_CONCURRENT_STREAMS 条文件流在途，其余拉取连接在槽上
+        # 排队——提供方被多端同时拉取时其单点并发被钳住，接收侧另有各自 5 并发池兜底。
+        self._send_slots = threading.Semaphore(self.MAX_CONCURRENT_STREAMS)
 
     # ---- 会话登记 ----
 
@@ -307,40 +315,46 @@ class FileProvider(QObject):
         短暂退避后续发剩余部分，网络差/接收端处理慢时大文件传输不会因一次 sendall
         超时失败（与同步 _send_with_cancel 同一策略）。
         """
+        # 发送前先解析目标大小/时间（不占发送槽，瞬时操作）
         try:
             total_size = os.path.getsize(abs_path)
             mtime = os.path.getmtime(abs_path)
         except OSError:
             return False
-        ok = False
-        try:
-            if not self._send_retry(conn_socket, send_guard, Protocol.pack_message(
-                    MessageType.FILE_BEGIN, name, total_size, False, b'', mtime)):
-                return False
-            sent = 0
-            with open(abs_path, 'rb') as fh:
-                chunk_index = 0
-                while self.running:
-                    chunk = fh.read(self.CHUNK_SIZE)
-                    if not chunk:
-                        break
+        # 全局出站并发上限：进入流式发送前获取发送槽，结束后释放。用 with 保证
+        # 任何路径（发送失败/取消/异常/提前 return）都 release，不泄漏槽；等待的
+        # 拉取连接在槽上自然排队，钳住提供方单点被多端同时拉取的压力。接收侧每端
+        # 已有各自的 5 并发池，本侧与之对称构成双保险。
+        with self._send_slots:
+            ok = False
+            try:
+                if not self._send_retry(conn_socket, send_guard, Protocol.pack_message(
+                        MessageType.FILE_BEGIN, name, total_size, False, b'', mtime)):
+                    return False
+                sent = 0
+                with open(abs_path, 'rb') as fh:
+                    chunk_index = 0
+                    while self.running:
+                        chunk = fh.read(self.CHUNK_SIZE)
+                        if not chunk:
+                            break
+                        if not self._send_retry(
+                                conn_socket, send_guard,
+                                Protocol.create_file_data_message(name, chunk_index, chunk)):
+                            return False
+                        sent += len(chunk)
+                        chunk_index += 1
+                        self.send_progress.emit(conn_id, session_id, name, sent, total_size)
+                if self.running:
                     if not self._send_retry(
                             conn_socket, send_guard,
-                            Protocol.create_file_data_message(name, chunk_index, chunk)):
+                            Protocol.create_file_end_message(name, total_size, mtime)):
                         return False
-                    sent += len(chunk)
-                    chunk_index += 1
-                    self.send_progress.emit(conn_id, session_id, name, sent, total_size)
-            if self.running:
-                if not self._send_retry(
-                        conn_socket, send_guard,
-                        Protocol.create_file_end_message(name, total_size, mtime)):
-                    return False
-                ok = True
-                self.send_finished.emit(conn_id, session_id, name, True)
-        except Exception:
-            ok = False
-        return ok
+                    ok = True
+                    self.send_finished.emit(conn_id, session_id, name, True)
+            except Exception:
+                ok = False
+            return ok
 
     def _send_retry(self, conn_socket, send_guard: SendLock, data: bytes) -> bool:
         """发送一条消息：可恢复发送，连接错误返回 False。
