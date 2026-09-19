@@ -34,7 +34,7 @@ class _CategoryList(QWidget):
 
     picked = Signal(int)
 
-    ITEM_H, GAP, START = 38, 6, 4
+    ITEM_H, GAP, START = 34, 4, 4
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -43,7 +43,7 @@ class _CategoryList(QWidget):
         self._hover = -1
         self.setMouseTracking(True)
         self.setCursor(Qt.PointingHandCursor)
-        self.setFixedWidth(96)
+        self.setFixedWidth(72)
 
     def set_items(self, titles):
         self.items = list(titles)
@@ -76,26 +76,34 @@ class _CategoryList(QWidget):
         dark = _is_dark(self)
         p = QPainter(self)
         p.setRenderHint(QPainter.Antialiasing)
-        accent = QColor(51, 154, 240)
         f = QFont(self.font())
         f.setPointSize(10)
         f.setWeight(QFont.Weight.DemiBold)
+        f_accent = QFont(f)
+        f_accent.setWeight(QFont.Weight.Bold)
         p.setFont(f)
         for i, t in enumerate(self.items):
             r = self._item_rect(i)
+            # 悬停灰底：即便该项正处于选中态也保留（切换后鼠标未离开时不消失）
+            if i == self._hover:
+                p.setPen(Qt.NoPen)
+                p.setBrush(QColor("#eef0f3") if not dark else QColor("#2d3036"))
+                p.drawRoundedRect(r, 6, 6)
             if i == self._active:
-                sel = QColor(accent.red(), accent.green(), accent.blue(), 42)
+                # 选中：左缘一条纤细灰条（贴合边缘，不参与文字排版）+ 选中文字居中加粗变深
+                bar = QRectF(r.left(), r.top() + (r.height() - 16) / 2, 3, 16)
                 p.setPen(Qt.NoPen)
-                p.setBrush(sel)
-                p.drawRoundedRect(r, 8, 8)
-                p.setPen(accent)
+                p.setBrush(QColor("#5a626f") if not dark else QColor("#cdd3db"))
+                p.drawRoundedRect(bar, 1.5, 1.5)
+                p.setPen(QColor("#1a1d21") if not dark else QColor("#eef0f3"))
+                p.setFont(f_accent)
             elif i == self._hover:
-                p.setPen(Qt.NoPen)
-                p.setBrush(QColor("#f1f3f5") if not dark else QColor("#3a3a3d"))
-                p.drawRoundedRect(r, 8, 8)
                 p.setPen(QColor("#212529") if not dark else QColor("#ced4da"))
+                p.setFont(f)
             else:
-                p.setPen(QColor("#868e96") if not dark else QColor("#a0a0a0"))
+                p.setPen(QColor("#868e96") if not dark else QColor("#9aa0a8"))
+                p.setFont(f)
+            # 文字相对按钮居中，不因指示条偏移
             p.drawText(r, Qt.AlignCenter, t)
         p.end()
 
@@ -195,6 +203,9 @@ class SettingsDialog(QDialog):
         # 分组小标题（与创建/加入对话框的字段标签一致：灰色小字）
         lay.addWidget(self._make_section_label(I18n.tr('settings_section_general')))
 
+        # 细线紧贴子分类「通用」字样下方，再排选项
+        lay.addWidget(self._make_divider())
+
         # 退出房间询问（= confirm_leave_no_ask 取反）
         leave_row, leave_sw = self._make_switch_row(
             I18n.tr('settings_confirm_leave_ask'),
@@ -223,6 +234,9 @@ class SettingsDialog(QDialog):
         lay.setSpacing(12)
 
         lay.addWidget(self._make_section_label(I18n.tr('settings_section_notify')))
+
+        # 细线紧贴子分类「通知」字样下方，再排选项
+        lay.addWidget(self._make_divider())
 
         # 接收推送公告（关闭后主界面不显示公告入口；重新开启时恢复已接收公告）
         announce_row, announce_sw = self._make_switch_row(
@@ -280,9 +294,23 @@ class SettingsDialog(QDialog):
         )
         return lbl
 
+    def _make_divider(self) -> QFrame:
+        """子分类下方的细分割线（落到整个子分类之下，而非每个选项下方）"""
+        dark = _is_dark(self)
+        line = QFrame()
+        line.setFrameShape(QFrame.HLine)
+        line.setFrameShadow(QFrame.Plain)
+        line.setFixedHeight(1)
+        line.setStyleSheet(
+            f"QFrame {{ background: "
+            f"{'rgba(255,255,255,32)' if dark else 'rgba(0,0,20,44)'}; }}"
+        )
+        return line
+
     def _make_switch_row(self, label_text: str, checked: bool, on_changed):
         """构建「标签 + stretch + ToggleSwitch」单行，返回 (行widget, 开关)
         标签使用默认调色板文字色，与创建/加入对话框的字段标签一致。
+        行本身不再画分割线——分隔线统一落在子分类下方（见 _make_divider）。
         """
         row = QWidget()
         lay = QHBoxLayout(row)

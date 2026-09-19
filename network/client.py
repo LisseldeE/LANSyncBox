@@ -114,6 +114,7 @@ class SyncClient(QObject):
         self._reconnect_active = False     # 自动重连是否接管管理连接（试连被拒不弹窗、
                                            # 断连不直接发 disconnected，交由循环收敛）
         self._backoff = 1.0                # 重连退避（整轮失败递增，1s→30s）
+        self._perm_auth_denied = False     # 是否已就"永久拒绝"弹过一次 auth_failed（去重）
         # 失败日志节流：同端点（ip:port）在窗口内去重，防断连风暴刷屏日志
         self._last_fail_key = None
         self._last_fail_time = 0.0
@@ -166,6 +167,18 @@ class SyncClient(QObject):
             self.socket.connect((host, port))
             self.socket.settimeout(1.0)
             self.host_ip = host
+
+            # 竞态防护：自动重连过程中发生了手动断开（disconnect 已置 _reconnect_stop）。
+            # 不在此时复活 running 状态、也不启动接收线程，回收半开 socket 交重连循环退出，
+            # 避免"已断开却复活"成幽灵连接（旧连接资源泄漏 + 重连被重新武装）。
+            # 手动加入路径 _reconnect_active=False，不受此闸门影响。
+            if self._reconnect_active and self._reconnect_stop.is_set():
+                try:
+                    self.socket.close()
+                except Exception:
+                    pass
+                self.socket = None
+                return False
 
             self.running = True
             self._reported_offline = False
@@ -947,6 +960,10 @@ class SyncClient(QObject):
                 UserConfig.get_end_id(), self.sync_folder,
                 mesh=self.mesh, distributor=self.distributor,
                 provider=self._file_provider, parent=self)
+            # 跨通道互斥（阶段 6）：同一文件被主机直推通道(A)经 FILE_BEGIN..FILE_END
+            # 正在接收时，自同步拉取(B)应让位，避免同文件两通道重复投递/字节翻倍。
+            self.file_state_store.set_host_push_guard(
+                lambda name: self._is_host_pushing_file(name))
             self.file_state_store.log_message.connect(self.log_message)
             self.file_state_store.sync_done.connect(self.state_sync_done)
             self.file_state_store.file_added.connect(self.file_state_added)
@@ -960,6 +977,21 @@ class SyncClient(QObject):
             self.mesh.peer_connected.connect(self._on_mesh_peer_connected)
         elif not self.mesh.running:
             self.mesh.start()
+
+    def _is_host_pushing_file(self, name: str) -> bool:
+        """探测某文件是否正被主机直推通道(A)接收（FILE_BEGIN 已到、FILE_END/CANCEL 未到）。
+
+        供自同步拉取(B)跨通道让位判定：A 在途窗口内 B 不重复拉取同一文件。receiving_files
+        仅在 _receive_loop 线程内被读写，经 _receiving_lock 同步，避免与 B 的 worker 线程
+        并发访问错位；条目名即相对路径（与自同步 name 口径一致，直接匹配）。
+        """
+        if not name:
+            return False
+        try:
+            with self._receiving_lock:
+                return name in self.receiving_files
+        except Exception:
+            return False
 
     def _ensure_mgmt_server(self):
         """确保本端管理监听就绪（reuse 模式 SyncServer：共享本端 mesh/distributor/
@@ -984,6 +1016,21 @@ class SyncClient(QObject):
             self.log_message.emit(f"本端管理监听端口: {server.port}（全网状管理平面）")
         except Exception as e:
             self.log_message.emit(f"本端管理监听启动失败: {e}")
+
+    def mgmt_port(self) -> int:
+        """返回本端实际监听的管理端口（用于向他人广播自己的可接入端点）。
+
+        reuse 模式下若 DEFAULT_PORT 被占，服务器会顺延绑定到后续端口。去中心化房间
+        发现要求广播真实端口，否则其它新端按 9527 拨不到本端 → 本端虽存活却无法被
+        作为房间入口发现（又成了单点盲区）。未启动时回落默认端口。
+        """
+        server = getattr(self, '_mgmt_server', None)
+        if server is not None:
+            try:
+                return int(server.port)
+            except (TypeError, ValueError):
+                pass
+        return Config.DEFAULT_PORT
 
     # ---- 分发链路（去中心化阶段 1）：本地操作沿网状直连传播 ----
 
@@ -1175,6 +1222,7 @@ class SyncClient(QObject):
             
             if success:
                 self.authenticated = True
+                self._perm_auth_denied = False  # 重新认证成功，重置"永久拒绝"提示标记
                 # 通知试连方（_try_attach）认证结果
                 with self._auth_wait:
                     self._auth_result = True
@@ -1182,6 +1230,11 @@ class SyncClient(QObject):
                 # 首次认证成功后自动重连接管管理连接（此后断连不直接弹窗/发离线，
                 # 交由重连循环收敛：先试可用端点，整轮失败才发一次离线）
                 self._reconnect_active = True
+                # 去中心化：先启动网状监听并交换 END_INFO（本端身份 + 网状/管理端口），
+                # 确保 mgmt 监听就绪、_mgmt_server 已赋值，再接 connected（UI on_connected
+                # 里会读 mgmt_port() 广播自己的可接入端点）。在 connected.emit() 之后再
+                # 启动会因跨线程 queued 信号产生竞态，UI 可能读到未就绪的端口而回落默认值。
+                self._start_mesh_and_send_end_info()
                 self.connected.emit()
                 self.log_message.emit("验证成功")
                 # 认证成功：心跳计时起点（此后周期 PING 主机并核对 PONG 判定在线/离线）
@@ -1190,15 +1243,20 @@ class SyncClient(QObject):
                 self._start_ping_thread()
                 # 认证成功后请求当前模式，由主机端决定本端模式
                 self._send_mode_request()
-                # 去中心化：启动网状监听并交换 END_INFO（本端身份 + 网状/管理端口）
-                self._start_mesh_and_send_end_info()
             else:
                 self.log_message.emit(f"验证失败: {message}")
                 with self._auth_wait:
                     self._auth_result = False
                     self._auth_wait.notify_all()
                 if self._reconnect_active:
-                    # 自动重连试连被拒：不弹窗、不拆数据平面，交重连循环关闭并试下一端点
+                    # 自动重连中被明确拒绝（密码/房间号/逻辑版本不匹配）属永久性错误：
+                    # 弹一次 auth_failed 并退出静默自动重试，避免对不可变配置错误无限退避。
+                    # 不拆数据平面（mesh/distributor 保留），交由用户重新手动加入。
+                    if not self._perm_auth_denied:
+                        self._perm_auth_denied = True
+                        self._reconnect_stop.set()
+                        self._reconnect_active = False
+                        self.auth_failed.emit(message)
                     return
                 # 发射验证失败信号
                 self.auth_failed.emit(message)

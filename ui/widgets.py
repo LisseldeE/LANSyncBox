@@ -221,6 +221,12 @@ class ClickableLabel(QLabel):
         self._underline_on_hover = underline_on_hover
         self._is_hovering = False
         
+        # normal_color 为 None 时使用控件的默认文字色（随主题自动，深色主题即白色），
+        # 悬浮才变 hover_color —— 避免离开后回落到固定色
+        if normal_color is None:
+            normal_color = self.palette().windowText().color().name()
+        self._normal_color = normal_color
+        
         # 设置默认样式
         self.setStyleSheet(f"QLabel {{ font-size: 11px; color: {self._normal_color}; }}")
         self.setAlignment(Qt.AlignCenter)

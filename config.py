@@ -269,7 +269,8 @@ class UserConfig:
             "last_announcement": "",
             "last_announcement_text": "",
             "end_id": "",
-            "room_history": []
+            "room_history": [],
+            "default_perm": "rw"
         }
 
         # 首次加载时尝试从旧路径迁移配置
@@ -298,13 +299,23 @@ class UserConfig:
         if cls._config_data is None:
             return
         config_path = cls._get_config_path()
+        tmp_path = None
         try:
             # 确保配置文件所在目录存在（只在首次保存时创建）
             config_path.parent.mkdir(parents=True, exist_ok=True)
-            with open(config_path, 'w', encoding='utf-8') as f:
+            # 原子写：先写临时文件再 os.replace，进程被杀/断电也不会写坏 config.json
+            tmp_path = config_path.with_suffix('.tmp')
+            with open(tmp_path, 'w', encoding='utf-8') as f:
                 json.dump(cls._config_data, f, ensure_ascii=False, indent=2)
+            os.replace(tmp_path, config_path)
         except (IOError, OSError):
-            pass
+            # 失败时清理残留临时文件，避免下次覆盖到前次半成品
+            if tmp_path is not None:
+                try:
+                    if os.path.exists(tmp_path):
+                        os.remove(tmp_path)
+                except OSError:
+                    pass
 
     @classmethod
     def get(cls, key: str, default=None):
@@ -318,6 +329,18 @@ class UserConfig:
         data = cls.load()
         data[key] = value
         cls.save()
+
+    @classmethod
+    def get_default_perm(cls) -> str:
+        """获取【新加入连接端】的默认权限（"rw" 读写 / "ro" 只读）"""
+        perm = cls.get("default_perm", "rw")
+        return perm if perm in ("rw", "ro") else "rw"
+
+    @classmethod
+    def set_default_perm(cls, perm: str):
+        """设置【新加入连接端】的默认权限并持久化"""
+        if perm in ("rw", "ro"):
+            cls.set("default_perm", perm)
 
     @classmethod
     def get_end_id(cls) -> str:
@@ -446,48 +469,88 @@ class UserConfig:
 
         cls.save()
 
-    @classmethod
-    def get_room_history(cls) -> list:
-        """获取历史房间记录列表（最新在前）
-        Returns:
-            每条为 {"room_code": str, "ip": str}，容量上限 3 条。
-        """
-        data = cls.load()
-        history = data.get("room_history", [])
-        # 兼容脏数据：过滤非法条目
-        return [h for h in history if isinstance(h, dict) and h.get("room_code") and h.get("ip")][:3]
+    # Pro 版专属历史房间号键。与标准版共用同一 config.json 文件，但历史用独立命名空间：
+    # 标准版只解析它认识的 "room_history"(room_code+ip)，天然忽略本键 → 互不污染、不读崩。
+    # Pro 的历史只记房间号（去中心化加入不依赖 IP），故与标准版的 history 无法语义互用，
+    # 分键隔离是最干净的方案。
+    PRO_ROOM_HISTORY_KEY = "pro_room_history"
 
     @classmethod
-    def add_room_history(cls, room_code: str, ip: str):
-        """记录一条成功连接过的房间历史（上限 3 条，超出丢弃最旧）
+    def _ensure_pro_history(cls, data: dict) -> list:
+        """确保 Pro 历史命名空间存在并做一次性迁移。
+
+        - 首次（新键缺失）时，从旧版 "room_history" 播种：取其中所有房间号并入 Pro 历史；
+        - 顺带清理旧版里 Pro 此前写入的『无 IP』条目（其 IP 字段为空/缺失，已是 Pro 专属，
+          标准版无法识别，留着会污染标准版列表）。
+
+        Args:
+            data: 已 load 的配置字典
+        Returns:
+            新键下的 Pro 历史条目列表 [{"room_code": str}, ...]
+        """
+        if cls.PRO_ROOM_HISTORY_KEY not in data:
+            codes = []
+            legacy = data.get("room_history", [])
+            for h in legacy:
+                c = h.get("room_code") if isinstance(h, dict) else None
+                if c and c not in codes:
+                    codes.append(c)
+            data[cls.PRO_ROOM_HISTORY_KEY] = [{"room_code": c} for c in codes[:3]]
+            # 清理旧版里无 IP 的 Pro 专属条目（保留带 IP 的，那仍属标准版可用数据）
+            cleaned = [
+                h for h in legacy
+                if not (isinstance(h, dict) and h.get("room_code") and not h.get("ip"))
+            ]
+            data["room_history"] = cleaned
+            # 是否实际改动了数据（新键播种或清掉了无 IP 条目）——供调用方决定是否落盘
+            changed = bool(codes) or len(cleaned) != len(legacy)
+            return data.get(cls.PRO_ROOM_HISTORY_KEY, []), changed
+        return data.get(cls.PRO_ROOM_HISTORY_KEY, []), False
+
+    @classmethod
+    def get_room_history(cls) -> list:
+        """获取 Pro 版历史房间号列表（最新在前，去重，容量 3）
+
+        去中心化改版后不再记忆 IP，历史只保留房间号，便于新端凭编号即可入房。
+        Returns:
+            [room_code, ...]（最新在前）
+        """
+        data = cls.load()
+        history, changed = cls._ensure_pro_history(data)
+        if changed:
+            cls.save()  # 首次迁移实际改了数据（清无 IP 条目/播种新键）时落盘，避免延迟
+        codes = []
+        for h in data.get(cls.PRO_ROOM_HISTORY_KEY, []):
+            code = h.get("room_code") if isinstance(h, dict) else None
+            if code and code not in codes:
+                codes.append(code)
+        return codes[:3]
+
+    @classmethod
+    def add_room_history(cls, room_code: str):
+        """记录一条成功加入过/匹配过的 Pro 房间历史（上限 3 条，超出丢弃最旧）
+        只记房间号，不再记 IP；写入 Pro 专属命名空间，不影响标准版 history。
         Args:
             room_code: 房间号
-            ip: 主机地址
         """
-        if not room_code or not ip:
+        if not room_code:
             return
         data = cls.load()
-        history = data.get("room_history", [])
+        history, _ = cls._ensure_pro_history(data)
         # 兼容脏数据：仅保留 dict 条目，避免残留的畸形数据导致崩溃
         history = [h for h in history if isinstance(h, dict)]
-        # 去重：若同房间号+IP 已存在，先移除，再作为最新插入
-        filtered = [h for h in history if not (h.get("room_code") == room_code and h.get("ip") == ip)]
-        filtered.insert(0, {"room_code": room_code, "ip": ip})
-        data["room_history"] = filtered[:3]  # 只保留最新 3 条
+        # 去重：该房间号已存在则先移除，再作为最新插入
+        filtered = [h for h in history if h.get("room_code") != room_code]
+        filtered.insert(0, {"room_code": room_code})
+        data[cls.PRO_ROOM_HISTORY_KEY] = filtered[:3]  # 只保留最新 3 条
         cls.save()
 
     @classmethod
-    def remove_room_history(cls, room_code: str, ip: str):
-        """从历史记录中移除指定条目
-        Args:
-            room_code: 房间号
-            ip: 主机地址
-        """
+    def remove_room_history(cls, room_code: str):
+        """从 Pro 版历史记录中移除指定房间号"""
         data = cls.load()
-        history = data.get("room_history", [])
-        # 兼容脏数据：仅保留 dict 条目，避免残留的畸形数据导致崩溃
+        history, _ = cls._ensure_pro_history(data)
+        # 兼容脏数据：仅保留 dict 条目
         history = [h for h in history if isinstance(h, dict)]
-        data["room_history"] = [
-            h for h in history if not (h.get("room_code") == room_code and h.get("ip") == ip)
-        ]
+        data[cls.PRO_ROOM_HISTORY_KEY] = [h for h in history if h.get("room_code") != room_code]
         cls.save()

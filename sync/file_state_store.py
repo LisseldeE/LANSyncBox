@@ -79,6 +79,13 @@ class FileStateStore(QObject):
         # 待拉取队列：name -> {name, end_id, op_no, clock, ts, session}
         # 每文件仅保留一个槽，槽内存当前仲裁胜者版本（版本化去重）
         self._pulls = {}
+        # 在途拉取集合（name）：worker 已把槽弹出正在拉取中的文件。对账轮在文件
+        # 大、拉取未结束期间，目标文件盘上只有 .part 临时文件、最终文件还不存在，
+        # 现有「not local_exists」判定会把它当缺失每轮重复入队 → 同文件并发开两条
+        # pull_file、两份临时文件同时写盘、字节翻倍（大文件重复接收撑爆磁盘的根因）。
+        # 置入在途集合后对账轮 `_enqueue_pull` 命中即跳过，根除重复接收；拉取结束
+        # （成败皆然）即移除，后续轮次可再按需补拉。__cond__ 保护。
+        self._in_flight = set()
         # 冲突覆盖拉取（阶段 3）：name -> src_id（等待该对端 RESP 会话后入队）
         self._pending_conflicts = {}
         # 拉取冷却表（阶段 5，防反复回环）：name -> {src_id: {fails, cooldown_until,
@@ -101,6 +108,14 @@ class FileStateStore(QObject):
         # 循环时会排队丢失，回调通道保证可靠投递。
         self._sync_done_handler = None
         self._file_added_handler = None
+        # 跨通道互斥护栏（阶段 6）：同一文件通常可经「主机直推(A)」与「自同步拉取(B)」
+        # 两条通道同时投递给同一接收端——重连后主机差异补发会 A 直推缺失文件，自同步
+        # 对账又会 B 拉取同一文件，造成同文件两份接收、字节翻倍。本端（接收端）作为
+        # 两条通道的共同汇聚点，通过 host_push_guard 探测「该文件是否正被主机直推通道
+        # 接收」：为真则 B 不再自同步拉取、让 A 单一投递（跨通道互斥，防第二个传输）。
+        # 由宿主（client.py）在 FILE_BEGIN..FILE_END 窗口内置真；抑制只发生在窗口内，
+        # 结束后对账轮可照常补拉，不永久丢弃真实文件。
+        self._host_push_guard = None  # callable(relpath)->bool；True=主机直推正在投递
 
         # 拉取 worker 池（PULL_CONCURRENCY 个）：每轮入队的多个差异文件并发拉取，
         # _pulls 槽在 _cond 锁内弹出，多 worker 并发取件/拉取互不干扰
@@ -132,6 +147,14 @@ class FileStateStore(QObject):
     def set_file_added_handler(self, cb):
         """设置拉取完成回调 cb(rel_path)（在拉取工作线程调用）。"""
         self._file_added_handler = cb
+
+    def set_host_push_guard(self, cb):
+        """注入「主机直推已在投递该文件」探测回调（由宿主 client.py 注入）。
+
+        cb(relpath)->bool：True=该文件正经主机直推通道(A)被本端接收，自同步拉取(B)
+        应让位，避免同文件两条通道重复投递（跨通道互斥）。
+        """
+        self._host_push_guard = cb
 
     def _notify_sync_done(self, has_diff: bool):
         try:
@@ -352,6 +375,18 @@ class FileStateStore(QObject):
         Returns:
             True = 槽被新建或升级（调用方据此累计 has_diff）；False = 抛弃。
         """
+        # 跨通道互斥（阶段 6）：该文件正被主机直推通道(A)接收时，本端不应同时自同步
+        # 拉取(B)——否则同文件两条通道同时投递、两份字节写盘（大文件重复接收/磁盘膨胀
+        # 的复现路径之一）。若宿主判定 A 在途，本轮直接放弃 B 拉取、把投递交给 A 单一
+        # 完成；A 的 FILE_BEGIN..FILE_END 窗口结束后守卫放开，后续对账轮可照常补拉。
+        if self._host_push_guard is not None:
+            try:
+                if self._host_push_guard(name):
+                    self.log_message.emit(
+                        f"跳过自同步拉取 {name}: 主机直推通道正在投递该文件")
+                    return False
+            except Exception:
+                pass
         # 阶段 5 冷却门：源端明确「没有此文件」且处于冷却中、候选版本未更新 →
         # 拦截入队，打断对账轮反复重拉同一文件（防空转/刷 UI/刷日志）。冷却到期
         # 或候选为更高版本（源端真的重新产出）则自动放行，不永久丢弃真实文件。
@@ -361,6 +396,12 @@ class FileStateStore(QObject):
                 f"冷却抑制重复拉取 {name}（源端未提供该文件），暂停本轮重试")
             return False
         with self._cond:
+            if name in self._in_flight:
+                # 该文件正被某 worker 拉取中（槽已弹出但在在途集合）：不再建第二个槽、
+                # 不再开第二条并发接收（避免同一文件两份临时文件同时写盘、字节翻倍
+                # 撑爆磁盘）。在途拉取落盘前自带新鲜度裁决，若期间出现更高版本，
+                # 其落盘后 _pull_stale_by_state / backfill 仍会触发补拉收敛。
+                return False
             prev = self._pulls.get(name)
             if prev is not None:
                 prev_st = FileState(
@@ -571,22 +612,35 @@ class FileStateStore(QObject):
                     break
                 item = next(iter(self._pulls.values()))
                 self._pulls.pop(item['name'], None)
-            # 同名拉取串行化：同文件多份在途槽按序执行（跨文件仍 5 并发）。
-            # 等待期间 _stop 置位则放弃该槽（退出中）
-            lk = self._get_file_lock(item['name'])
-            acquired = False
-            while not self._stop.is_set():
-                acquired = lk.acquire(timeout=0.5)
-                if acquired:
-                    break
-            if not acquired:
-                continue
+                # 标记在途：对账轮 `_enqueue_pull` 据此跳过该文件的重复入队（根除
+                # 大文件拉取期间重复开第二条并发接收）。拉取结束（成败/未获锁放弃
+                # 槽）在 finally 移除。
+                self._in_flight.add(item['name'])
             try:
-                self._do_pull(item)
-            except Exception as e:
-                self.log_message.emit(f"拉取任务失败: {e}")
+                # 同名拉取串行化：同文件多份在途槽按序执行（跨文件仍 5 并发）。
+                # 等待期间 _stop 置位则放弃该槽（退出中）
+                lk = self._get_file_lock(item['name'])
+                acquired = False
+                while not self._stop.is_set():
+                    acquired = lk.acquire(timeout=0.5)
+                    if acquired:
+                        break
+                if acquired:
+                    try:
+                        self._do_pull(item)
+                    except Exception as e:
+                        self.log_message.emit(f"拉取任务失败: {e}")
             finally:
-                lk.release()
+                # 拉取结束（成功/失败/未获锁放弃）：解除在途标记，后续轮次可再补拉。
+                # 用 _cond 与 _enqueue_pull 的读侧同步；acquired 在 try 内初始化，
+                # 未进入循环（_stop 置位）时保持 False，finally 不重复释放锁。
+                with self._cond:
+                    self._in_flight.discard(item['name'])
+                if acquired:
+                    try:
+                        lk.release()
+                    except Exception:
+                        pass
 
     def _get_file_lock(self, name: str) -> threading.Lock:
         """获取同名拉取串行化锁（按需创建；会话内常驻，数量 = 被拉取的不同文件数）。"""

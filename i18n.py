@@ -105,6 +105,8 @@ class I18n:
             "no_rooms_found": "未发现房间",
             "rooms_found_count": "发现 {count} 个房间",
             "refresh_scan": "刷新",
+            "online_label": "在线{count}",
+            "manual_ip_ready": "指定 IP，可手动尝试连接",
 
             # 最近连接历史
             "recent_rooms_title": "最近连接",
@@ -136,6 +138,8 @@ class I18n:
             "perm_to_readonly": "已切换为只读",
             "perm_to_readwrite": "已切换为读写",
             "perm_switch_failed": "切换失败（对端无响应）",
+            "perm_default_label": "新加入端的默认权限",
+            "perm_default_saved": "已设为新加入端的默认权限",
             "toast_readonly": "当前为只读权限，无法修改同步列表",
             "collapse_panel": "收起",
             "expand_panel": "展开",
@@ -410,6 +414,8 @@ class I18n:
             "no_rooms_found": "No rooms found",
             "rooms_found_count": "Found {count} rooms",
             "refresh_scan": "Refresh",
+            "online_label": "{count} online",
+            "manual_ip_ready": "Host IP set, ready to connect",
 
             # Recent rooms history
             "recent_rooms_title": "Recent Connections",
@@ -441,6 +447,8 @@ class I18n:
             "perm_to_readonly": "Switched to Read-only",
             "perm_to_readwrite": "Switched to Read-write",
             "perm_switch_failed": "Switch failed (no response)",
+            "perm_default_label": "Default permission for new devices",
+            "perm_default_saved": "Set as default for new devices",
             "toast_readonly": "Read-only mode: cannot modify the sync list",
             "collapse_panel": "Collapse",
             "expand_panel": "Expand",

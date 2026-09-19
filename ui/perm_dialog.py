@@ -65,6 +65,32 @@ class PermManageDialog(QDialog):
         """)
         layout.addWidget(title_label)
 
+        # 新加入连接端的默认权限设置（免去逐个手动修改）
+        default_row = QHBoxLayout()
+        default_row.setSpacing(8)
+        default_label = QLabel(I18n.tr('perm_default_label'))
+        dark = self._is_dark()
+        default_label.setStyleSheet(
+            f"font-size: 12px; color: {'#a0a0a0' if dark else '#495057'};"
+        )
+        default_row.addWidget(default_label)
+        default_row.addStretch()
+        self._default_seg = PermSegmentedControl()
+        self._default_seg.setFixedWidth(100)
+        self._default_seg.set_perm(self.server.default_perm, animate=False)
+        self._default_seg.perm_switch_requested.connect(self._on_default_perm_requested)
+        default_row.addWidget(self._default_seg)
+        layout.addLayout(default_row)
+
+        # 默认权限设置与下方房间号列表之间用一条细线分隔
+        separator = QFrame()
+        separator.setFixedHeight(1)
+        separator.setStyleSheet(
+            "QFrame { background: %s; border: none; }"
+            % ('rgba(255,255,255,40)' if dark else 'rgba(0,0,0,25)')
+        )
+        layout.addWidget(separator)
+
         # 连接端列表滚动区
         scroll = QScrollArea()
         scroll.setWidgetResizable(True)
@@ -183,6 +209,16 @@ class PermManageDialog(QDialog):
 
     # ---------- 切换交互 ----------
 
+    def _on_default_perm_requested(self, target_perm: str):
+        """顶部默认权限胶囊点击：设置【新加入连接端】的默认权限（即时生效，无需 ACK）"""
+        if self.server.set_default_perm(target_perm):
+            # 即时生效，无需等 ACK：直接落定档位（带滑动动画，与行内切换视觉一致）
+            self._default_seg.set_perm(target_perm, animate=True)
+            self._show_state(I18n.tr('perm_default_saved'))
+        else:
+            # 服务端拒绝：恢复当前档位
+            self._default_seg.set_perm(self.server.default_perm, animate=False)
+
     def _on_perm_requested(self, client_id: str, target_perm: str):
         """行内胶囊点击：向服务端发起权限切换"""
         row = self._rows.get(client_id)
@@ -193,6 +229,9 @@ class PermManageDialog(QDialog):
             with self.server._lock:
                 info = self.server.clients.get(client_id)
             row['seg'].set_perm((info or {}).get('perm', "rw"), animate=False)
+        else:
+            # 乐观更新（与模式切换一致）：气泡立即滑向目标侧，切换中置灰等待对端 ACK
+            row['seg'].set_perm(target_perm, animate=True)
 
     def _on_perm_switching(self, client_id: str, new_perm: str):
         """权限切换发起：该行胶囊置灰，等待对端 ACK"""

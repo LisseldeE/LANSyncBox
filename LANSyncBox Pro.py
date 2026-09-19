@@ -6,6 +6,8 @@ Licensed under the GNU General Public License v3.0.
 import sys
 import os
 import ctypes
+import threading
+import traceback
 
 from PySide6.QtWidgets import QApplication
 from PySide6.QtCore import Qt
@@ -18,6 +20,18 @@ from config import Config, UserConfig
 
 # 单实例命名（Windows 命名管道 / Linux、macOS 域套接字，按登录会话隔离）
 SINGLE_INSTANCE_NAME = Config.APP_NAME
+
+
+def _install_exception_hooks():
+    """未捕获异常兜底：把 traceback 打印到 stderr，避免生产环境中工作线程 / Qt slot
+    内的异常被静默吞掉而难以定位。仅记录，不阻止异常传播，也不弹窗阻塞。"""
+    def _print_traceback(exc_type, exc, tb):
+        traceback.print_exception(exc_type, exc, tb)
+    sys.excepthook = _print_traceback
+    if hasattr(threading, 'excepthook'):
+        def _thread_hook(args):
+            _print_traceback(args.exc_type, args.exc_value, args.exc_traceback)
+        threading.excepthook = _thread_hook
 
 
 def get_resource_path(relative_path):
@@ -71,6 +85,9 @@ def _setup_single_instance(window):
 
 def main():
     """主函数"""
+    # 未捕获异常兜底（须在创建线程之前安装，才能覆盖工作线程）
+    _install_exception_hooks()
+
     # 写入版本信息到配置文件（仅在 ENABLE_CHECK_UPDATE=True 时）
     if Config.ENABLE_CHECK_UPDATE:
         try:

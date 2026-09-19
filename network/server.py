@@ -73,6 +73,15 @@ class SyncServer(QObject):
         # 创建传输队列，控制并发传输数量
         self.transfer_queue = TransferQueue(max_concurrent=5)
         
+        # 跨通道互斥（阶段 6）：同文件同端可能被「主机直推(A)」与「自同步拉取(B)」
+        # 两条通道同时、错开触发投递（重连换 IP 后 A 的 client_id:filename 键失效，
+        # 无法拦截 B 的新拉取）。本端（发送端）作为两通道字节流的共同起点，用
+        # (end_id, relpath)->channel 登记在途投递者：A 发送前若发现 B 正在服务该
+        # 文件则让位，B 每次服务前登记、结束即注销。键用稳定端身份 end_id 而非 IP
+        # ——VM 重连换地址后 A 仍能命中同一端，正确识别「已有另一通道在投递」。
+        self._deliver_lock = threading.Lock()
+        self._deliver = {}  # (end_id, relpath) -> 'A'|'B'（谁正在投递该文件）
+        
         # 记录正在请求的文件（文件名 -> 客户端ID）
         self.requesting_files: Dict[str, str] = {}
 
@@ -96,6 +105,9 @@ class SyncServer(QObject):
         self._perm_ack_stop = threading.Event()
         self._perm_ack_thread = None
         self.PERM_ACK_MAX_TRIES = 3     # 权限 ACK 补发上限，超过后回滚旧档位并通知 UI
+        # 新加入连接端的默认权限（持久化于 config.json）：新端认证成功时自动按此应用，
+        # 免去逐个手动修改
+        self.default_perm = UserConfig.get_default_perm()
 
         # 网状连接管理器（去中心化数据平面）：主机也是网状小节点，仅做引导 + 管理平面
         self.mesh: Optional[MeshManager] = None
@@ -722,11 +734,15 @@ class SyncServer(QObject):
 
             # 验证成功
             self.clients[client_id]['authenticated'] = True
-            self.clients[client_id]['perm'] = "rw"  # 新连接端默认读写（向后兼容，老用户无感）
+            self.clients[client_id]['perm'] = "rw"  # 先按读写初始化；默认只读时随后经 set_perm 下发并应用
             self.clients[client_id]['last_pong'] = time.time()  # 心跳计时起点（防认证后立即误判离线）
             response = Protocol.create_auth_response(True, "验证成功")
             self._socket_send(self.clients[client_id], response)
             self.log_message.emit(f"客户端 {client_id} 验证成功（同步逻辑版本 {sync_version}）")
+            # 新加入连接端默认权限：若配置为只读，自动下发 PERM_UPDATE（set_perm 篇幅复用
+            # ACK 通道，客户端据此置只读并回执；服务端兜底侧同步即刻按 ro 生效）
+            if self.default_perm == "ro":
+                self.set_perm(client_id, "ro")
             # 认证成功后通知 UI 更新连接数
             self.client_connected.emit(client_id)
 
@@ -868,6 +884,45 @@ class SyncServer(QObject):
         self._file_provider = provider
         if self.file_state_store:
             self.file_state_store.set_file_provider(provider)
+        # 跨通道互斥：把本端在途投递登记表交给 FileProvider，供其服务自同步拉取(B)
+        # 时同步登记/注销，主机直推(A)据此判断是否让位。
+        try:
+            provider.set_deliver_controller(self)
+        except Exception:
+            pass
+
+    # ---- 跨通道互斥登记（阶段 6）：A/B 两通道共享的在途投递表 ----
+
+    def _mark_delivering(self, end_id: str, relpath: str, channel: str):
+        """登记某文件正由 channel('A'|'B') 投递给 end_id。B 服务开始前调用。"""
+        if not end_id:
+            return
+        try:
+            with self._deliver_lock:
+                self._deliver[(end_id, relpath)] = channel
+        except Exception:
+            pass
+
+    def _unmark_delivering(self, end_id: str, relpath: str, channel: str):
+        """注销投递登记（仅当当前登记确为本 channel 时移除，防误删后到者的登记）。"""
+        if not end_id:
+            return
+        try:
+            with self._deliver_lock:
+                if self._deliver.get((end_id, relpath)) == channel:
+                    self._deliver.pop((end_id, relpath), None)
+        except Exception:
+            pass
+
+    def _is_delivering_by(self, end_id: str, relpath: str, channel: str) -> bool:
+        """该文件当前是否正由 channel 投递给该端。"""
+        if not end_id:
+            return False
+        try:
+            with self._deliver_lock:
+                return self._deliver.get((end_id, relpath)) == channel
+        except Exception:
+            return False
 
     def request_state_sync(self) -> int:
         """端到端手动同步：向各网状对端请求 FILE_STATE_REQ 并对比补齐（阶段 2）。
@@ -1716,6 +1771,21 @@ class SyncServer(QObject):
             file_path: 文件绝对路径
             stop_event: 停止标志（可选）
         """
+        # 跨通道互斥（阶段 6）：该端(end_id)该文件若正被自同步拉取(B)通道服务中，
+        # 主机直推(A)让位——避免同一文件被 A、B 两通道同时投递造成重复接收/字节翻倍。
+        # 键用稳定端身份 end_id 而非 IP：VM 重连换 IP 后仍能命中同一端；B 支持断点
+        # 续传，让位给 B 的大文件重连不会从头重发。无条件走 B（无 end_id，如剪贴板
+        # 广播）时不做互斥，保持原行为。
+        try:
+            with self._lock:
+                cinfo = self.clients.get(client_id)
+            end_id = (cinfo or {}).get('end_id') or None
+            if end_id and self._is_delivering_by(end_id, filename, 'B'):
+                self.log_message.emit(
+                    f"跳过重复直推 {filename} → {end_id}: 自同步拉取通道正在投递该文件")
+                return
+        except Exception:
+            pass
         # 调用 _send_file_to_client，传递 is_forward=True
         self._send_file_to_client(client_id, filename, file_path, stop_event, is_forward=True)
 
@@ -1919,6 +1989,18 @@ class SyncServer(QObject):
     def _perm_cn(perm: str) -> str:
         """权限中文名（日志显示用，避免残留英文）"""
         return "只读" if perm == "ro" else "读写"
+
+    def set_default_perm(self, perm: str) -> bool:
+        """设置【新加入连接端】的默认权限（读写/只读），并持久化到 config.json。
+
+        仅对之后新接入的连接端生效，已连接端权限不受影响（由各自 set_perm 管理）。
+        """
+        if perm not in ("rw", "ro"):
+            return False
+        self.default_perm = perm
+        UserConfig.set_default_perm(perm)
+        self.log_message.emit(f"设置新加入端默认权限: {self._perm_cn(perm)}")
+        return True
 
     def set_perm(self, client_id: str, new_perm: str) -> bool:
         """主机端发起对某连接端的权限切换（读写 <-> 只读）

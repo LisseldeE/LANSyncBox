@@ -359,7 +359,21 @@ class MainWindow(QMainWindow):
         
         # 弹性空间 - 尾部
         bottom_layout.addStretch()
-        
+
+        # 发现新版本小字提醒（默认隐藏，发现新版本后显示，可点击打开下载页）。
+        # 置于三个按钮上方，显示时不挤压下方内容布局
+        self._update_label = ClickableLabel(
+            "",
+            normal_color=None,
+            hover_color="#228be6",
+            underline_on_hover=True,
+        )
+        self._update_label.setAlignment(Qt.AlignCenter)
+        self._update_label.setStyleSheet("font-size: 11px;")
+        self._update_label.setVisible(False)
+        self._update_label.set_click_callback(self._on_update_clicked)
+        main_layout.addWidget(self._update_label)
+
         main_layout.addLayout(bottom_layout)
 
         # 版本和缓存信息
@@ -372,19 +386,6 @@ class MainWindow(QMainWindow):
         self._version_label.setStyleSheet("color: #999; font-size: 11px;")
         self._version_label.setTextFormat(Qt.RichText)  # 支持HTML格式
         main_layout.addWidget(self._version_label)
-
-        # 发现新版本小字提醒（默认隐藏，自动检查发现新版本后显示，可点击打开下载页）
-        self._update_label = ClickableLabel(
-            "",
-            normal_color="#339af0",
-            hover_color="#228be6",
-            underline_on_hover=True,
-        )
-        self._update_label.setAlignment(Qt.AlignCenter)
-        self._update_label.setStyleSheet("font-size: 11px;")
-        self._update_label.setVisible(False)
-        self._update_label.set_click_callback(self._on_update_clicked)
-        main_layout.addWidget(self._update_label)
     
     def on_create_room(self):
         """创建房间"""

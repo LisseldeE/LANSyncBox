@@ -323,13 +323,14 @@ class Protocol:
         )
 
     @staticmethod
-    def create_pull_request(session_id: str, token: str, name: str) -> bytes:
+    def create_pull_request(session_id: str, token: str, name: str, offset: int = 0) -> bytes:
         """创建文件拉取请求消息（接收端→复制端）
 
         Args:
             session_id: 会话标识
             token: 会话校验令牌
             name: 会话内的文件条目名
+            offset: 断点续传起始字节（接收端已有部分字节，据此从该处续传；0=从头）
 
         Returns:
             消息字节
@@ -339,6 +340,7 @@ class Protocol:
             'session_id': session_id,
             'token': token,
             'name': name,
+            'offset': int(offset or 0),
         }, ensure_ascii=False).encode('utf-8')
         return Protocol.pack_message(
             MessageType.CLIPBOARD_FILE_PULL_REQ,
@@ -385,14 +387,16 @@ class Protocol:
         return Protocol._pack_json(MessageType.FILE_STATE_RESP, data)
 
     @staticmethod
-    def create_sync_pull_req(session_id: str, token: str, name: str) -> bytes:
+    def create_sync_pull_req(session_id: str, token: str, name: str, offset: int = 0) -> bytes:
         """创建同步拉取请求消息（0x23，端→对端 FileProvider 会话服务）
 
         与 CLIPBOARD_FILE_PULL_REQ 同构，复用 FileProvider 会话校验与流式传输通道。
+        offset: 断点续传起始字节（0=从头）。
         """
         return Protocol._pack_json(
             MessageType.SYNC_PULL_REQ,
-            {'session_id': session_id, 'token': token, 'name': name},
+            {'session_id': session_id, 'token': token, 'name': name,
+             'offset': int(offset or 0)},
             filename=name,
         )
 

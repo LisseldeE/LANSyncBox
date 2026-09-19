@@ -16,7 +16,6 @@
 </p>
 
 <p align="center">
-  <a href="#screenshots">Screenshots</a> |
   <a href="#project-information">Project Info</a> |
   <a href="#system-support">Download</a> |
   <a href="#usage">Usage</a> |

@@ -259,7 +259,7 @@ class RoomDiscovery(QObject):
             pass
     
     def get_discovered_rooms(self) -> List[dict]:
-        """获取已发现的房间列表"""
+        """获取已发现的房间列表（按应答 IP 逐条）"""
         with self._lock:
             return [
                 {
@@ -271,6 +271,53 @@ class RoomDiscovery(QObject):
                 }
                 for ip, info in self.discovered_rooms.items()
             ]
+
+    def get_room_aggregates(self) -> List[dict]:
+        """获取按房间号聚合的房间列表（改版后的记录方式）
+
+        以 room_code 为键聚合：每个响应的存活端只携带自身端点信息，作为该房间的一名成员。
+        仅统计 sync_version 与 Config.SYNC_LOGIC_VERSION 一致的兼容成员；整房无兼容成员
+        则视为不可加入（joinable=False）。没有『第一个响应端』的特殊角色——所有应答者对称。
+
+        Returns:
+            [
+                {
+                    'room_code': str,
+                    'members': [{'ip': str, 'port': int, 'sync_version': str}, ...],  # 兼容成员，按首答序去重
+                    'count': int,       # 兼容成员去重数（在线 N）
+                    'joinable': bool,   # count > 0
+                },
+                ...
+            ]
+            按 count 降序（房间在线端越多越靠前），同数按 room_code 升序。
+        """
+        compatible = Config.SYNC_LOGIC_VERSION
+        groups: Dict[str, dict] = {}
+        with self._lock:
+            for ip, info in self.discovered_rooms.items():
+                # 兼容性过滤：同步逻辑版本不一致的成员不计入 N 且不可作为加入目标
+                if info.get('sync_version') != compatible:
+                    continue
+                code = info.get('room_code')
+                if not code:
+                    continue
+                group = groups.setdefault(code, {'room_code': code, 'members': []})
+                group['members'].append({
+                    'ip': ip,
+                    'port': info.get('port', Config.DEFAULT_PORT),
+                    'sync_version': info.get('sync_version', ''),
+                })
+        result = []
+        for code, group in groups.items():
+            members = group['members']
+            result.append({
+                'room_code': code,
+                'members': members,
+                'count': len(members),
+                'joinable': len(members) > 0,
+            })
+        result.sort(key=lambda r: (-r['count'], r['room_code']))
+        return result
 
 
 class RoomResponder(QObject):

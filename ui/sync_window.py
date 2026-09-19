@@ -2105,6 +2105,16 @@ class SyncWindow(QMainWindow):
             # 连接就绪：开启局域网剪切板分发 + 启动本端目录服务（复制端 serve 用）
             self._start_provider()
             self._monitor.set_enabled(True)
+            # 去中心化房间发现：本连接端也是房间存活成员，认证后就绪即启动 UDP
+            # 应答服务。只上报自身端点（自身 mgmt 端口 = 共享管理监听端口），绝不上报
+            # 主机在线状态/地址；host 亲和由 mesh 既有回探机制负责。只要房间里任意
+            # 一端存活应答，新端即可据此加入，消除"仅主机应答"的单点依赖。
+            if self.responder is None:
+                self.responder = RoomResponder(self)
+                # 广播本端真实管理监听端口：reuse 下 9527 被占会顺延，写死 9527
+                # 会让本端虽存活却无法被新端发现（单点盲区）。mgmt_port() 取实际绑定值。
+                if self.responder.start(self.room_code, self.client.mgmt_port()):
+                    self._add_record(f"发现服务 端口: {self.responder.discovery_port}", "启动", "")
         
         # 房间就绪：启用顶部拖拽放置区（快捷添加文件到当前同步列表/根目录）
         self._init_drop_zone()
