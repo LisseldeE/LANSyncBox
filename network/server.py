@@ -743,7 +743,12 @@ class SyncServer(QObject):
             #   主机未知（离线/待机）→ 拒绝承担管理宿主并断开（接入端回退重试）。
             if self._reuse:
                 host = self._host_provider() if self._host_provider else None
-                if host and host.get('ip') and int(host.get('mgmt_port', 0) or 0) > 0:
+                # 仅当已知真主机身份(end_id 非空)才转发 HOST_INFO：主机 id 未知时
+                # 不得把空 id 传下去，否则接入端会被引导到一个"只知地址、不知房主 id"
+                # 的主机，其自身上报空 id，持续污染"回归为主机"的判定。
+                if (host and host.get('ip')
+                        and int(host.get('mgmt_port', 0) or 0) > 0
+                        and (host.get('end_id') or '')):
                     self.clients[client_id]['last_pong'] = time.time()
                     self._socket_send(self.clients[client_id],
                                       Protocol.create_auth_response(True, "验证成功"))

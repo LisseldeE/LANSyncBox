@@ -9,7 +9,7 @@
 </div>
 
 <p align="center">
-  <a href="https://github.com/LisseldeE/LANSyncBox/releases/tag/pro-R1.0.0.0"><img src="https://img.shields.io/badge/releases-R1.0.0.0-3b82f6" alt="releases R1.0.0.0"></a>
+  <a href="https://github.com/LisseldeE/LANSyncBox/releases/tag/pro-R1.1.0.0"><img src="https://img.shields.io/badge/releases-R1.1.0.0-3b82f6" alt="releases R1.1.0.0"></a>
   <a href="LICENSE"><img src="https://img.shields.io/github/license/LisseldeE/LANSyncBox" alt="License"></a>
   <img src="https://img.shields.io/badge/platform-Windows-blue?logo=windows" alt="Platform">
   <img src="https://img.shields.io/badge/platform-Linux-orange?logo=linux" alt="Platform">
@@ -24,15 +24,13 @@
   <a href="#open-source-license">License</a>
 </p>
 
-> ⚠️ **Beta Notice**: This branch (`pro`) is the **Pro** edition of [**LANSyncBox**](https://github.com/LisseldeE/LANSyncBox/tree/main), under active development. Features are not yet fully stable and may change significantly. It is currently in the Beta testing stage — do not use it in production.
+> **Version Note**: This branch is the **Pro** edition of [**LANSyncBox**](https://github.com/LisseldeE/LANSyncBox/tree/main). The decentralized refactor has been completed and, after multiple rounds of internal testing, the features are largely complete. If you encounter any issues while using it, please report them in a timely manner.
 
 ## Project Introduction
 
-LANSyncBox Pro is the upgraded version of [LANSyncBox](https://github.com/LisseldeE/LANSyncBox/tree/main). It focuses on LAN multi-user collaboration. Compared to the standard edition, Pro is introducing several new capabilities — **Delivery** for cross-device copy & paste, top-edge **quick-add** by drag-and-drop, Collect mode, and more — under continuous development.
+LANSyncBox Pro is a cross-platform, LAN-focused real-time file synchronization tool for multiplayer collaboration. It requires no public network: it supports large-file streaming transfer, serialized sending, and broken-transfer resumption, ensuring reliable data and stable transfer under multi-connection, high-concurrency scenarios. Compared to the legacy version, Pro adopts a new decentralized distributed architecture, eliminating the single-point-of-failure that affects the entire link. It also introduces several new capabilities: **Delivery** (cross-device copy & paste), top-edge drag-and-drop **quick-add**, Collect mode, permission management, and more.
 
 ## Version Comparison
-
-> The standard edition keeps all of its existing features; the Pro edition layers new LAN collaboration capabilities on top (Beta roadmap, partially listed, details may shift).
 
 | Feature | Standard | Pro |
 | :--- | :---: | :---: |
@@ -54,21 +52,13 @@ LANSyncBox Pro is the upgraded version of [LANSyncBox](https://github.com/Lissel
 | :---: | :---: |
 | ![Main Interface](https://lisseldee.github.io/assets/images/webp/1p-3.webp) | ![Sync Interface](https://lisseldee.github.io/assets/images/webp/1p-4.webp) |
 
-## New Highlights (In Progress)
+## Project Information
 
-> Beyond file sync, the Pro edition is adding the following capabilities (in development, listed only partially).
-
-| Feature | Description |
-| :--- | :--- |
-| **Delivery · Cross-device Copy & Paste** | Copy on device A, hit **Ctrl+V** on device B — done. **Text** is broadcast by the host into every client's system clipboard; **images/files** are **pulled peer-to-peer** from the copying device and delivered to your local folder |
-| **Top Quick-Add** | Drag files/folders onto the **top edge of the screen** to add them to the sync list instantly, without reaching into the window |
-| **Distributed File Transfer** | File changes are dispatched over the mesh, and the bytes flow **directly between the source and receiving peers**, bypassing host forwarding |
-| **Decentralized Mesh Sync** | Synchronization no longer depends on host arbitration: if any device goes offline, the rest keep syncing and converging; joining a room does not require the host online — any online device can answer discovery and verification |
-| **Parallel Transfer** | Up to **5 files transfer in parallel**; concurrent in-flight pulls of the same file are auto-serialized, and a post-write staleness check guarantees byte-level convergence |
-| **Sync Logic Version** | Joining a room validates only the internal **sync logic version**; UI / display-only changes no longer force every device to upgrade |
-| **Sync / Collect Modes** | On top of real-time sync, a new **Collect mode**: clients submit files to the host only, without broadcasting to other clients |
-
-> The above are planned Beta changes; specifics and progress may shift during development. Refer to actual releases.
+- **Project Name**: LANSyncBox Pro
+- **Project Author**: Lisselde_E
+- **License**: GNU General Public License v3.0
+- **Project Homepage**: https://lisseldee.github.io/#1
+- **Project Repository**: https://github.com/LisseldeE/LANSyncBox/tree/pro
 
 ## Core Features (Existing)
 
@@ -77,14 +67,6 @@ LANSyncBox Pro is the upgraded version of [LANSyncBox](https://github.com/Lissel
 - **Large File Transfer**: streaming chunked transfer with resume support; transfers fail without corrupting files; up to 5 files in parallel, same-name pulls serialized for byte consistency
 - **File Operations**: add, create, copy, cut, paste, delete, rename; double-click for read-only preview
 - **Interface**: smooth Qt6 UI, real-time Chinese/English switching, visible transfer progress
-
-## Project Information
-
-- **Project Name**: LANSyncBox Pro
-- **Project Author**: Lisselde_E
-- **License**: GNU General Public License v3.0
-- **Project Homepage**: https://lisseldee.github.io/#1
-- **Project Repository**: https://github.com/LisseldeE/LANSyncBox/tree/pro
 
 ## System Support
 
@@ -110,15 +92,11 @@ LANSyncBox Pro is the upgraded version of [LANSyncBox](https://github.com/Lissel
 
 <p align="center">
   <a href="https://github.com/LisseldeE/LANSyncBox/releases">
-    <img src="https://img.shields.io/badge/GitHub-Releases-181717?style=flat-square&logo=github&logoColor=white" alt="GitHub Releases">
-  </a>
-  &nbsp;&nbsp;
-  <a href="https://gitee.com/Lisselde_E/LANSyncBox/releases">
-    <img src="https://img.shields.io/badge/Gitee-Mirror-C71D23?style=flat-square&logo=gitee&logoColor=white" alt="Gitee Mirror">
+    <img src="https://img.shields.io/badge/GitHub%20Releases-Download-181717?style=for-the-badge&logo=github&logoColor=white" alt="GitHub Releases"/>
   </a>
 </p>
 
-> 💡 Recommended for users in China: Gitee Mirror
+> The Gitee mirror download is currently removed; if you'd like it back, please leave your feedback on social platforms.
 
 ## Usage
 
@@ -132,9 +110,8 @@ LANSyncBox Pro is the upgraded version of [LANSyncBox](https://github.com/Lissel
 
 1. Click "Join Connection" button
 2. Enter or select room code
-3. If password required, enter directly in join dialog for pre-verification
-4. Verification failures are displayed directly in the join dialog, allowing immediate retry with corrected info
-5. Click connect - automatic full sync from host
+3. If password is required, you will be guided to the password input screen
+4. Join the room to start syncing
 
 ## Sync Logic
 
@@ -145,7 +122,7 @@ LANSyncBox Pro is the upgraded version of [LANSyncBox](https://github.com/Lissel
 | **Any end (peer node)** | Each end independently maintains its operation list and file state (vector clocks); changes are dispatched mesh-wide in real-time; if any end goes offline, the rest keep syncing and converging |
 | **Joining (decentralized)** | No host required online: any online end can answer discovery, verification, and guide new ends in; full alignment happens automatically after joining |
 | **Read/Write Permissions** | Managed by the room creator (host end) for each connected client |
-| **Conflict** | The version with the latest modification time wins |
+| **Conflict** | A three-layer safeguard — version vector, logical clock, and timestamp — ensures correctness of conflict resolution |
 
 ### Sync Mechanisms
 
@@ -178,7 +155,7 @@ See [Changelog](https://github.com/LisseldeE/LANSyncBox/blob/pro/CHANGELOG.md)
 - Linux x64 (amd64) distributions
 
 ### Installation Methods
-- **Windows**: Download the installer from [GitHub Releases](https://github.com/LisseldeE/LANSyncBox/releases) or [Gitee Mirror](https://gitee.com/Lisselde_E/LANSyncBox/releases), then run it
+- **Windows**: Download the installer from [GitHub Releases](https://github.com/LisseldeE/LANSyncBox/releases), then run it
 - **Linux (deb package)**: Download the architecture-appropriate `.deb` package from [GitHub Releases](https://github.com/LisseldeE/LANSyncBox/releases), then install it from the terminal:
   ```bash
   sudo apt install -y ./lansyncbox_*.deb
@@ -199,11 +176,29 @@ This project uses the GNU General Public License v3.0, see [LICENSE](https://git
 
 This project does not collect any user data, see [Privacy Policy](https://github.com/LisseldeE/LANSyncBox/blob/pro/privacy_policy.md) file for details.
 
+## Commercial Cooperation
+
+This project is open-sourced under the GPL-3.0 license. If you wish to use it in a closed-source commercial scenario, or require custom development and technical support, feel free to contact us through the following methods:
+
+**Contact**: Lisselde.E@outlook.com
+
+**Cooperation Process**:
+1. Describe your usage scenario and requirements
+2. Confirm the scope of authorization and fees
+3. Sign an authorization agreement
+4. Obtain commercial authorization and technical support
+
+**Authorization Scope**:
+- Closed-source commercial license
+- Enterprise deployment license
+- Custom development and technical support
+
 ## Feedback
 
 **In Beta testing — if you have any questions or new ideas, feel free to contact me!**
 
 Issues and Pull Requests are welcome!
+Email: Lisselde.E@outlook.com
 
 ## Support Me
 

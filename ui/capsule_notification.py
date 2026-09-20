@@ -13,6 +13,7 @@ from PySide6.QtWidgets import (
     QApplication, QWidget, QFrame, QVBoxLayout, QHBoxLayout, QLabel,
     QProgressBar, QPushButton, QSizePolicy, QGraphicsOpacityEffect,
 )
+from config import Config
 
 
 def format_bytes(num: int) -> str:
@@ -185,6 +186,9 @@ class _CapsuleItem(QFrame):
 
     # 点击胶囊请求粘贴远程文件（收到通知状态下点击触发热点）
     paste_requested = Signal()
+    # Linux（IS_LINUX）：可用态胶囊上的"接收"按钮被点击 → 请求选择保存位置后接收。
+    # 仅 IS_LINUX 创建该按钮，Windows 无此按钮也不会发射该信号。
+    receive_requested = Signal()
     # 冲突询问（目标已有同名文件）用户决策：True=替换(覆盖)，False=取消(跳过)
     confirm_chosen = Signal(bool)
     # 几何变化（展开帧/宽度动画/隐藏）→ 协调者重排整组
@@ -307,6 +311,20 @@ class _CapsuleItem(QFrame):
 
         inner.addWidget(self._text_box, 0, Qt.AlignVCenter)
 
+        # Linux 专用"接收"按钮：仅 IS_LINUX 创建（Windows 无此按钮，布局零改动）。
+        # 全局 Ctrl+V 热键为 Windows 专用、Wayland 禁止全局抓键，投递改由可用态
+        # 胶囊上的"接收"按钮 + 保存位置选择完成。与询问按钮同款布局（同槽位），
+        # 默认隐藏，仅可用态展示，点击发射 receive_requested。
+        self._receive_btn = None
+        if Config.IS_LINUX:
+            self._receive_btn = QPushButton("接收", self._content)
+            self._receive_btn.setFixedHeight(22)
+            self._receive_btn.setCursor(Qt.PointingHandCursor)
+            self._receive_btn.setFocusPolicy(Qt.NoFocus)
+            self._receive_btn.clicked.connect(self.receive_requested.emit)
+            self._receive_btn.setVisible(False)
+            inner.addWidget(self._receive_btn, 0, Qt.AlignVCenter)
+
         # 完成态对钩：与进度条同一槽位（进度条隐藏后原地淡入，文字位置不变）
         inner.addWidget(self._icon, 0, Qt.AlignVCenter)
 
@@ -352,7 +370,15 @@ class _CapsuleItem(QFrame):
         self._refresh_theme()
         self._hint_mode = False
         self._title.setText(f"有可用的远程文件  {file_name}  {format_bytes(total_bytes)}")
-        self._hint.setText("按 Ctrl+V 粘贴到此设备")
+        # Windows/macOS：提示按 Ctrl+V 粘贴；Linux：无全局热键（Wayland 禁抓键），
+        # 展示"接收"按钮引导选择保存位置，胶囊外观其余部分保持不变。
+        if Config.IS_LINUX and self._receive_btn is not None:
+            self._hint.setText("点击 接收 选择保存位置")
+            self._receive_btn.setVisible(True)
+        else:
+            self._hint.setText("按 Ctrl+V 粘贴到此设备")
+            if self._receive_btn is not None:
+                self._receive_btn.setVisible(False)
         self._hint.setVisible(True)
         self._bar.setVisible(False)
         self._bar.setValue(0)
@@ -615,8 +641,28 @@ class _CapsuleItem(QFrame):
     def _screen_max_w(self) -> int:
         """胶囊最大宽度：屏幕可用宽度左右各留 24px 边距（超长文件名省略显示，
         进度条不被挤出屏幕右缘）。"""
-        S = QApplication.primaryScreen().availableGeometry()
+        S = self._screen_geo()
         return max(self._min_w, S.width() - 48)
+
+    def _screen_geo(self):
+        """胶囊当前屏幕的可用几何区（居中定位/宽度上限用）。
+
+        Linux 下部分合成器按“顶层窗口实际所处屏幕”而非 primaryScreen 放置，
+        用 primaryScreen 会算错中心导致胶囊落在左上角；改用窗口自身所在屏幕
+        计算。Windows/macOS 固守 primaryScreen（与旧行为一致）。
+        """
+        if Config.IS_LINUX:
+            scr = self.screen()
+            if scr is not None:
+                return scr.availableGeometry()
+        return QApplication.primaryScreen().availableGeometry()
+
+    def showEvent(self, event):
+        super().showEvent(event)
+        if Config.IS_LINUX:
+            # 部分 Linux 合成器忽略窗口首次显示前发出的 move()，首帧落在左上角
+            # （比预想偏移更多）；可见后按自身实际屏幕重新居中一次。
+            self._apply_slot()
 
     def _sync_bar_visibility(self):
         """按当前胶囊宽度决定进度条显隐：宽度不足以完整容纳进度条时隐藏，
@@ -756,6 +802,8 @@ class _CapsuleItem(QFrame):
         self._icon.setVisible(False)
         self._confirm_btn.setVisible(False)
         self._cancel_btn.setVisible(False)
+        if self._receive_btn is not None:
+            self._receive_btn.setVisible(False)
         self._queue_waiting = 0
         self._transferring = False
 
@@ -768,6 +816,9 @@ class _CapsuleItem(QFrame):
         self._tag.setText("投递")
         self._tag.setVisible(True)
         self._title.set_max_width(320)
+        # Linux"接收"按钮仅在可用态展示：进入提示/错误/公告/询问/传输态前隐藏
+        if self._receive_btn is not None:
+            self._receive_btn.setVisible(False)
 
     def _on_check_done(self):
         # 对钩停留片刻后淡出
@@ -811,6 +862,9 @@ class _CapsuleItem(QFrame):
                 f"QPushButton:hover {{ background-color: {hover}; }}")
         self._confirm_btn.setStyleSheet(_btn_css("#74c0fc", "#5fb3e8"))
         self._cancel_btn.setStyleSheet(_btn_css("#f03e3e", "#e03131"))
+        # Linux"接收"按钮：与"替换"同款主题蓝，深浅模式白字对比恒成立
+        if self._receive_btn is not None:
+            self._receive_btn.setStyleSheet(_btn_css("#74c0fc", "#5fb3e8"))
 
     def paintEvent(self, event):
         # CapRise 主胶囊栏默认样式：系统背景派生的纵向渐变 + 深色下发丝描边，
@@ -870,7 +924,7 @@ class _CapsuleItem(QFrame):
 
     def _apply_slot(self):
         """按当前 expand 摆放：水平用 _slot_x，纵向由展开度滑入/滑出。"""
-        S = QApplication.primaryScreen().availableGeometry()
+        S = self._screen_geo()
         y_full = S.y() + self._TOP_GAP                     # 完全展开静止位置
         hidden = S.y() - self.height() - self._TOP_GAP     # 收起位：整条滑出屏幕上方
         y = int(round(hidden + (y_full - hidden) * self._expand))
@@ -878,7 +932,7 @@ class _CapsuleItem(QFrame):
 
     def _park_above(self):
         """显示前先停在屏幕上方之外（收起位），避免首帧闪现。"""
-        S = QApplication.primaryScreen().availableGeometry()
+        S = self._screen_geo()
         self.move(self._slot_x, S.y() - self.height() - self._TOP_GAP)
 
     expand = Property(float, get_expand, set_expand)
@@ -906,7 +960,7 @@ class _CapsuleItem(QFrame):
         # 仅完全展开时保持顶部锚定静止位；展开动画进行中（expand<1）不干预，
         # 垂直滑入由 _apply_slot 按 expand 驱动，避免两处 move 互相覆盖造成抖动
         if self._expand >= 0.99:
-            S = QApplication.primaryScreen().availableGeometry()
+            S = self._screen_geo()
             self.move(self.x(), S.y() + self._TOP_GAP)
 
     contentWidth = Property(float, _get_content_width, _set_content_width)
@@ -930,6 +984,9 @@ class CapsuleNotification(QObject):
     """
 
     paste_requested = Signal()
+    # Linux：可用态胶囊"接收"按钮被点击（聚合自 _available，sender 守卫）。
+    # Windows 无此按钮，信号永不发射。
+    receive_requested = Signal()
     # 冲突询问（目标已有同名文件）用户决策：True=替换(覆盖)，False=取消(跳过)
     replace_confirmed = Signal(bool)
     # 瞬态"可用远程文件"胶囊已收起/隐藏（超时、点击或被动 dismiss 均触发）：
@@ -950,6 +1007,7 @@ class CapsuleNotification(QObject):
         for cap in (self._available, self._transfer):
             cap.paste_requested.connect(self._on_available_clicked)
             cap.confirm_chosen.connect(self._on_confirm_chosen)
+            cap.receive_requested.connect(self._on_receive_requested)
             cap.layout_dirty.connect(self._relayout)
             cap.layout_dirty.connect(self._on_available_layout_dirty)
         self._avail_timer = QTimer(self)
@@ -1145,6 +1203,18 @@ class CapsuleNotification(QObject):
         self._available.dismiss()
         self.paste_requested.emit()
 
+    def _on_receive_requested(self):
+        """Linux：点击可用态胶囊"接收"按钮 → 通知调用方选择保存位置后接收。
+
+        sender 守卫只响应可用槽位（同胶囊过渡换位后触发者不再是"可用"角色）。
+        停止超时计时保持胶囊悬浮（保存位置选择是模态框，胶囊不应在此期间消失）；
+        调用方用户取消时会重新 show_available 恢复计时，选中后进入接收流程。
+        """
+        if self.sender() is not self._available:
+            return
+        self._avail_timer.stop()
+        self.receive_requested.emit()
+
     def _on_avail_timeout(self):
         self._hint_active = False
         self._available_session = None
@@ -1174,7 +1244,14 @@ class CapsuleNotification(QObject):
                 if c.isVisible() and c._expand > 0.001]
         if not caps:
             return
-        S = QApplication.primaryScreen().availableGeometry()
+        # Linux：以可用胶囊自身实际屏幕的几何为中心（避免 primaryScreen 与实际
+        # 所在屏幕不一致导致整组偏到左上角）；Windows/macOS 沿用 primaryScreen。
+        if Config.IS_LINUX:
+            scr = caps[0].screen()
+            S = scr.availableGeometry() if scr is not None \
+                else QApplication.primaryScreen().availableGeometry()
+        else:
+            S = QApplication.primaryScreen().availableGeometry()
         total_w = sum(c.width() for c in caps) + self._GAP * (len(caps) - 1)
         x = S.center().x() - total_w // 2
         for cap in caps:

@@ -296,13 +296,23 @@ class RoomDiscovery(QObject):
     def get_host_id(self, room_code: str) -> str:
         """返回最近一次发现中指定房间所在主机的持久 end_id（用于"创建被占且宿主即本机"判断）
 
-        同一房间可能有多个应答端点，取首个携带该端点自身 end_id 的应答。
+        同一房间会有多个应答端点（主机 mgmt + 各已连接成员）。真宿主 end_id 由宿主
+        连同所有已连接成员一致上报（连接端经 host_id_provider 注入 client._host_id）；
+        个别成员自报自身 id / 空值只是离群单条。故取「出现频率最高的非空 host_id」，
+        避免第一个应答来自离群成员时误判宿主非本机（多方连带导致"回归"按钮置灰）。
         """
+        counts: dict = {}
         with self._lock:
             for info in self.discovered_rooms.values():
-                if info.get('room_code') == room_code:
-                    return info.get('host_id', '')
-        return ""
+                if info.get('room_code') != room_code:
+                    continue
+                hid = (info.get('host_id') or '').strip()
+                if not hid:
+                    continue
+                counts[hid] = counts.get(hid, 0) + 1
+        if not counts:
+            return ""
+        return max(counts, key=counts.get)
 
     def get_discovered_rooms(self) -> List[dict]:
         """获取已发现的房间列表（按应答 IP 逐条）"""

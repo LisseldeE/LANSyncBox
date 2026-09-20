@@ -2,16 +2,6 @@
 去中心化同步：网状直连连接管理
 Copyright (c) 2026 Lisselde_E <Lisselde.E@outlook.com>.
 Licensed under the GNU General Public License v3.0.
-
-职责（对应实施计划阶段 0）：
-- 对端发现引导：主机下发 MESH_PEER_LIST，各端据此建直连
-- 双向直连建连（防半开）：每端同时监听 + 主动拨号，双方都拨号时按
-  「end_id 字典序小者作为连接发起方」的确定性规则保留唯一连接
-- 断线退避重连：直连断开自动重连（退避递增，成功后重置）
-- MESH_PEER_JOIN / MESH_PEER_LEAVE 生命周期：新端加入建连、端离线拆除
-- 端身份：每条网状连接建立后立即交换 END_INFO（含 mesh_port）
-
-传输约定与全库一致：线程 + socket 1s 超时 + SendLock.send_resumable 背压退避。
 """
 import socket
 import threading

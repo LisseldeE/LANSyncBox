@@ -2,23 +2,6 @@
 去中心化同步：分发链路引擎（阶段 1）
 Copyright (c) 2026 Lisselde_E <Lisselde.E@outlook.com>.
 Licensed under the GNU General Public License v3.0.
-
-职责（对应实施计划阶段 1）：
-- 本地操作 → DISTRIBUTE_SIGNAL 沿网状直连传播（不再依赖主机转发）
-- 收到信号 → 去重（同文件同 src_id 同 op_no 已应用则丢弃）→ 本地应用 →
-  向除 src_id 外所有直连对端转发（防回声）
-- 排队队列：信号串行处理，同 (src_id, file, op_no) 排队去重（冗余设计，防积压）
-- 传输互操作：传输中收到 delete → 取消传输 + 状态置 CHANGE；
-  传输中收到 rename/move → 进旁队列等传输完成再执行，执行时文件不存在则跳过
-  （防止排在 delete 后）
-- 端内文件状态表（内存，FileState）：记录每个文件最新 op_no/state/clock/ts/vv，
-  供阶段 2 自同步链路复用
-- 三层冲突解决（阶段 3）：信号携带 vv；收到远端信号按三层规则（版本向量 →
-  逻辑钟 → 时间戳 → end_id 兜底）决定应用/忽略/覆盖；被覆盖端日志提示
-  「本地修改被远端覆盖」并请求自同步链路拉取胜方内容；拉取回执（pulled）
-  仅记知识防回声风暴
-
-传输约定与全库一致：线程 + socket 1s 超时 + SendLock.send_resumable 背压退避。
 """
 import os
 import threading

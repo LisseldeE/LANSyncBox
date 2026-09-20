@@ -507,6 +507,8 @@ class SyncWindow(QMainWindow):
         from ui.capsule_notification import CapsuleNotification
         self._capsule = CapsuleNotification()
         self._capsule.paste_requested.connect(self._paste_remote_files)
+        # Linux"接收"按钮（仅 IS_LINUX 存在，Windows 信号不发）：选择保存位置后接收
+        self._capsule.receive_requested.connect(self._on_linux_receive)
         # 可用胶囊收起/超时 → 释放系统级 Ctrl+V 劫持
         self._capsule.available_hidden.connect(self._update_global_hotkey)
         self.tcp_file_done.connect(self._on_tcp_file_done)
@@ -1363,8 +1365,13 @@ class SyncWindow(QMainWindow):
             pass
         return None
 
-    def _paste_remote_files(self):
-        """Ctrl+V：把"可用远程文件"下载到目标目录。
+    def _paste_remote_files(self, target_dir=None):
+        """Ctrl+V / 点胶囊：把"可用远程文件"下载到目标目录。
+
+        target_dir: 传入时表示显式指定保存目录（Linux"接收"按钮弹选择框后传入），
+        此时跳过焦点劫持判断（按钮点击即明确接收意图，不受输入框焦点影响），
+        也跳过系统级粘贴目录探测；为 None 时（Windows 热键 / 点胶囊 / 窗口内
+        Ctrl+V）按系统级粘贴逻辑定位目标目录。Windows/macOS 路径保持不变。
 
         目标目录统一按系统级粘贴逻辑定位（_get_system_paste_dir）：当前焦点
         文件管理器所在文件夹（Windows 前台资源管理器 / macOS Finder）。
@@ -1384,10 +1391,11 @@ class SyncWindow(QMainWindow):
             return
         # 本次粘贴已消费可用会话：释放系统级劫持，后续 Ctrl+V 留给前台应用
         self._release_global_hotkey()
-        focus = QApplication.focusWidget()
-        from PySide6.QtWidgets import QLineEdit, QTextEdit
-        if isinstance(focus, (QLineEdit, QTextEdit)) and not focus.isReadOnly():
-            return  # 输入框中正常粘贴文本，不劫持
+        if target_dir is None:
+            focus = QApplication.focusWidget()
+            from PySide6.QtWidgets import QLineEdit, QTextEdit
+            if isinstance(focus, (QLineEdit, QTextEdit)) and not focus.isReadOnly():
+                return  # 输入框中正常粘贴文本，不劫持
         notify = self._remote_files
         if not notify or not notify.get('files'):
             return
@@ -1400,13 +1408,14 @@ class SyncWindow(QMainWindow):
                 self._capsule.dismiss()
             return
 
-        target_dir = self._get_system_paste_dir()
-        if not target_dir:
-            # 无效的粘贴位置：不静默回退，明确提示（胶囊轻提示 + 日志）
-            self.add_log("投递", I18n.tr('clipboard_invalid_paste_dir'))
-            if self._capsule is not None:
-                self._capsule.show_hint(I18n.tr('clipboard_invalid_paste_dir'))
-            return
+        if target_dir is None:
+            target_dir = self._get_system_paste_dir()
+            if not target_dir:
+                # 无效的粘贴位置：不静默回退，明确提示（胶囊轻提示 + 日志）
+                self.add_log("投递", I18n.tr('clipboard_invalid_paste_dir'))
+                if self._capsule is not None:
+                    self._capsule.show_hint(I18n.tr('clipboard_invalid_paste_dir'))
+                return
 
         files = notify['files']
         # 分类：目标目录已有同名文件 → 需用户确认是否覆盖（避免静默覆盖本地文件）
@@ -1452,6 +1461,41 @@ class SyncWindow(QMainWindow):
                 return
 
         self._start_paste(notify, target_dir, session_id, files)
+
+    def _on_linux_receive(self):
+        """Ubuntu：点击"可用远程文件"胶囊的"接收"按钮 → 选择保存位置 → 接收。
+
+        仅当 Config.IS_LINUX 时该按钮存在并触发（全局 Ctrl+V 热键为 Windows
+        专用、Wayland 禁止全局抓键，投递改由应用内按钮 + 保存位置选择完成）；
+        Windows 该信号永不发射，不受影响。复用 _paste_remote_files 的冲突判断
+        与入队内核，仅传入用户所选显式目录（并因此跳过系统级目录探测）。
+        用户取消选择时恢复可用胶囊（重启超时计时），保持可再次点击。
+        """
+        notify = self._remote_files
+        if not notify or not notify.get('files'):
+            return
+        source_port = int(notify.get('source_port', 0) or 0)
+        if source_port <= 0:
+            if self._capsule is not None:
+                self._capsule.dismiss()
+            return
+        from PySide6.QtWidgets import QFileDialog
+        # Linux：不绑定同步主窗口为父（同步界面收起/最小化时模态框仍可见可操作）。
+        # 无父窗口的静态 QFileDialog 默认应用模态，由窗口管理器居中显示。
+        parent = None if Config.IS_LINUX else self
+        target_dir = QFileDialog.getExistingDirectory(
+            parent, I18n.tr('choose_save_dir'))
+        if not target_dir:
+            # 用户取消：恢复可用胶囊的展示与超时计时，可再次点击"接收"
+            total = sum(int(f.get('size', 0) or 0) for f in notify['files'])
+            count = len(notify['files'])
+            name = (I18n.tr('clipboard_files_multi', count=count) if count > 1
+                    else str(notify['files'][0].get('name', '')))
+            if self._capsule is not None:
+                self._capsule.show_available(name, total, notify.get('session_id'))
+            return
+        # 传入显式目录：_paste_remote_files 据此跳过焦点劫持判断与系统级目录探测
+        self._paste_remote_files(target_dir)
 
     def _on_paste_confirm(self, replace: bool):
         """用户对"目标已有同名文件"询问的决策：替换（全部覆盖）或取消（跳过冲突）。"""

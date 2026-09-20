@@ -8,9 +8,13 @@ from PySide6.QtGui import QPainter, QColor, QPen, QPainterPath, QFontMetrics, QL
 from PySide6.QtWidgets import QApplication, QWidget
 
 from i18n import I18n
+from config import Config
 
 _STRIP_H = 56        # 激活状态下的全高；包含胶囊垂直空间
-_THIN_H = 6          # 闲置状态下的顶条高度（极薄，减少点击遮挡）
+# 闲置状态下的顶条高度（极薄，减少点击遮挡）。
+# Linux/Wayland 会把无边框窗再往下一个偏移量放置，真正顶部几像素够不到、呼不出；
+# 加厚闲置判断线使其向上延展覆盖到屏幕有效顶部（Windows/macOS 保持极薄 6px）。
+_THIN_H = 16 if Config.IS_LINUX else 6
 _IDLE_W = 480        # 闲置时的中心段宽度（左右留白，不遮挡全屏软件边角快捷区）
 _ANIM_MS = 260       # 展开/收起时长（OutCubic），匹配项目偏好
 _WIDTH_MS = 110      # 内容切换时胶囊宽度伸缩时长（内容即时呈现，宽度平滑到位）
@@ -573,6 +577,12 @@ class DropZone(QWidget):
 
     # ------------------------------------------------------------- 定位
     def _screen(self):
+        # Linux 下部分合成器按“顶层窗口实际所处屏幕”而非 primaryScreen 放置，
+        # 用 primaryScreen 会算错中心使顶条落在左上角；Windows/macOS 沿用旧行为。
+        if Config.IS_LINUX:
+            scr = self.screen()
+            if scr is not None:
+                return scr.availableGeometry()
         return QApplication.primaryScreen().availableGeometry()
 
     def _obstacle_y(self) -> int:
@@ -582,13 +592,30 @@ class DropZone(QWidget):
             return cap.frameGeometry().bottom() + 14
         return S.y() + _TOP_GAP
 
+    def _anchor_linux(self):
+        """Linux：把顶条贴死屏幕左上角 (0,0)，移除“停在左上却被推向右下”的偏移。
+
+        Wayland 对无边框顶层窗不保证绝对定位，顶条最终落在屏幕左上角附近；
+        这里显式取窗口自身屏幕完整几何的左上角作为落点，不再做水平居中。
+        """
+        scr = self.screen()
+        if scr is not None:
+            g = scr.geometry()
+            return g.x(), g.y()
+        S = QApplication.primaryScreen().availableGeometry()
+        return S.x(), S.y()
+
     def _set_geometry_fullwidth(self):
         """闲置态：顶条收回屏幕中心的一段(_IDLE_W 宽、_THIN_H 高)，左右留白，
         不遮挡全屏软件边角快捷区；激活时向左右延伸亦以中心为锚。"""
         S = self._screen()
         w = min(_IDLE_W, S.width())
         self.setFixedSize(w, _THIN_H)
-        self.move(S.x() + (S.width() - w) // 2, S.y())
+        if Config.IS_LINUX:
+            ax, ay = self._anchor_linux()
+            self.move(ax, ay)   # Linux：贴死左上角（去掉中心偏移与右下推挤）
+        else:
+            self.move(S.x() + (S.width() - w) // 2, S.y())
 
     def _pill_bottom(self) -> int:
         """胶囊静止时底缘的屏幕 y（本地 y + 顶边带 y）。"""
@@ -604,7 +631,11 @@ class DropZone(QWidget):
         h_win = int(_THIN_H + (_STRIP_H - _THIN_H) * cn)
         win_x = S.x() + (S.width() - w_win) // 2
         self.setFixedSize(w_win, h_win)
-        self.move(win_x, S.y())
+        if Config.IS_LINUX:
+            ax, ay = self._anchor_linux()
+            self.move(ax, ay)   # Linux：贴死左上角
+        else:
+            self.move(win_x, S.y())
 
         h = _STRIP_H
         w = int(h + (self._full_w - h) * cn)
@@ -706,3 +737,9 @@ class DropZone(QWidget):
     def showEvent(self, event):
         super().showEvent(event)
         self._set_geometry_fullwidth()
+        if Config.IS_LINUX:
+            # 与投递胶囊同款“显示落定后再重申坐标”：无边框窗首次映射时合成器常
+            # 忽略那一次 move()，导致顶条整体下移一截、顶部呼不出。等窗口真正映射
+            # 完成后延迟重贴一次左上角，让 WM 采纳该位置（best-effort，幂等）。
+            QTimer.singleShot(0, self._set_geometry_fullwidth)
+            QTimer.singleShot(60, self._set_geometry_fullwidth)

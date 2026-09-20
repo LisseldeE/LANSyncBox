@@ -9,7 +9,7 @@
 </div>
 
 <p align="center">
-  <a href="https://github.com/LisseldeE/LANSyncBox/releases/tag/pro-R1.0.0.0"><img src="https://img.shields.io/badge/releases-R1.0.0.0-3b82f6" alt="releases R1.0.0.0"></a>
+  <a href="https://github.com/LisseldeE/LANSyncBox/releases/tag/pro-R1.1.0.0"><img src="https://img.shields.io/badge/releases-R1.1.0.0-3b82f6" alt="releases R1.1.0.0"></a>
   <a href="LICENSE"><img src="https://img.shields.io/github/license/LisseldeE/LANSyncBox" alt="开源协议"></a>
   <img src="https://img.shields.io/badge/platform-Windows-blue?logo=windows" alt="支持平台">
   <img src="https://img.shields.io/badge/platform-Linux-orange?logo=linux" alt="支持平台">
@@ -21,18 +21,16 @@
   <a href="#使用方法">使用方法</a> |
   <a href="#同步逻辑">同步逻辑</a> |
   <a href="#安装与运行">安装与运行</a> |
-  <a href="#开源声明">开源声明</a>
+  <a href="#开源声明">其他声明</a>
 </p>
 
-> ⚠️ **Beta 版本声明**：本分支（`pro`）为 [**LANSyncBox**](https://github.com/LisseldeE/LANSyncBox/tree/main) 的 **Pro** 版本，正在跟随新特性持续迭代。功能尚未完全稳定，可能会有较大改动。当前处于 Beta 测试开发阶段，请勿用于正式环境。
+> **版本声明**：本分支为 [**LANSyncBox**](https://github.com/LisseldeE/LANSyncBox/tree/main) 的 **Pro** 版本，当前已经完成了去中心化重构，经过多轮内测，功能基本完善。若您在使用过程中遇到问题，请及时反馈。
 
 ## 项目简介
 
-LANSyncBox Pro 是 [LANSyncBox](https://github.com/LisseldeE/LANSyncBox/tree/main) 的升级版本，专注局域网多人协作。相比旧版，Pro 正在引入多项新能力——跨设备复制粘贴的**投递**、顶部拖拽**快捷添加**、收集模式等，持续迭代中。
+LANSyncBox Pro 是一款跨平台、专注局域网多人协作的文件实时同步工具。无需公网，支持大文件流式传输、串行化发送与断点续传，保证多连接高并发场景下的数据可靠与传输稳定。相比旧版，Pro 采用了全新的去中心化分布式架构，解决了单点故障影响整条链路的问题。此外还引入了多项新能力：跨设备复制粘贴的**投递**、顶部拖拽**快捷添加**、收集模式、权限管理等。
 
 ## 版本对比
-
-> 标准版的既有功能，Pro 全部保留；Pro 在其上叠加局域网协作新能力（Beta 规划中，仅列部分，细节可能随开发调整）。
 
 | 功能 | 标准版 | Pro 版 |
 | :--- | :---: | :---: |
@@ -40,43 +38,19 @@ LANSyncBox Pro 是 [LANSyncBox](https://github.com/LisseldeE/LANSyncBox/tree/mai
 | 房间分享（6 位数字 + 密码校验） | ✔ | ✔ |
 | 大文件传输（流式分块 · 断点续传） | ✔ | ✔ |
 | 文件操作（增删改 · 只读预览） | ✔ | ✔ |
-| 中英文界面实时切换 | ✔ | ✔ |
+| 中英文界面快捷切换 | ✔ | ✔ |
 | **投递 · 跨设备复制粘贴** | — | ⭐ **新增** |
 | **文本剪贴板广播** | — | ⭐ **新增** |
 | **图片 / 文件端到端直投** | — | ⭐ **新增** |
 | **顶部快捷添加** | — | ⭐ **新增** |
 | **同步 / 收集双模式** | — | ⭐ **新增** |
-| **去中心化网状同步** | — | ⭐ **新增** |
+| **去中心化分布式架构** | — | ⭐ **新增** |
 
 ## 项目截图
 
 | 主界面 | 同步界面 |
 | :---: | :---: |
 | ![主界面](https://lisseldee.github.io/assets/images/webp/1p-1.webp) | ![同步界面](https://lisseldee.github.io/assets/images/webp/1p-2.webp) |
-
-## 新版本亮点（进行中）
-
-> Pro 在文件同步之外，正在加入以下新能力（开发中，仅列部分）。
-
-| 特性 | 说明 |
-| :--- | :--- |
-| **投递 · 跨设备复制粘贴** | 在 A 设备复制，到 B 设备 **Ctrl+V** 即达：**文本**经主机广播写入所有连接端系统剪贴板；**图片/文件**从复制端**端到端直连**拉取，一键投递到本地 |
-| **顶部快捷添加** | 把文件/文件夹直接**拖到屏幕顶部**的放置条即可加入同步列表，无需在窗口中逐项操作 |
-| **文件分布式直传** | 文件变更经网状广播派发，字节流在源端与接收端之间**点对点直连**传输，不经过主机转发 |
-| **去中心化网状同步** | 同步不再依赖主机仲裁：任意设备离线，其余设备仍可互相同步收敛；加入房间无需主机在线，任意在线设备即可应答发现与验证 |
-| **多文件并行传输** | 最多同时 **5 个文件并行传输**；同名文件的多份在途拉取自动串行，配合落盘后过时裁决，保证字节最终一致 |
-| **同步逻辑版本号** | 加入房间只校验内部**同步逻辑版本号**，UI / 展示等非同步改动不再要求全部设备同步升级 |
-| **同步 / 收集双模式** | 在实时同步之外新增**收集模式**：连接端文件单向提交主机，不广播到其余端 |
-
-> 以上为规划中的 Beta 改动，具体细节与进度可能随开发调整，以实际版本为准。
-
-## 核心特性（既有）
-
-- **实时同步**：新增、修改、删除、重命名实时同步至所有连接端；初次连接自动全量对齐
-- **房间分享**：自定义 6 位数字房间号，可选密码验证，加入时自动校验同步逻辑版本兼容
-- **大文件传输**：流式分块、断点续传，失败重发不损坏文件；最多同时 5 个并行传输，同名拉取自动串行保证字节一致
-- **文件操作**：添加、新建、复制、剪切、粘贴、删除、重命名；双击只读预览
-- **界面体验**：Qt6 流畅界面，中英文实时切换，传输进度可视化
 
 ## 项目信息
 
@@ -85,6 +59,14 @@ LANSyncBox Pro 是 [LANSyncBox](https://github.com/LisseldeE/LANSyncBox/tree/mai
 - **开源协议**: GNU General Public License v3.0
 - **项目主页**: https://lisseldee.github.io/#1
 - **项目仓库**: https://github.com/LisseldeE/LANSyncBox/tree/pro
+
+## 核心特性（既有）
+
+- **实时同步**：新增、修改、删除、重命名实时同步至所有连接端；初次连接自动全量对齐
+- **房间分享**：自定义 6 位数字房间号，可选密码验证，加入时自动校验同步逻辑版本兼容
+- **大文件传输**：流式分块、断点续传，失败重发不损坏文件；最多同时 5 个并行传输，同名拉取自动串行保证字节一致
+- **文件操作**：添加、新建、复制、剪切、粘贴、删除、重命名；双击只读预览
+- **界面体验**：Qt6 流畅界面，中英文实时切换，传输进度可视化
 
 ## 系统支持
 
@@ -110,15 +92,11 @@ LANSyncBox Pro 是 [LANSyncBox](https://github.com/LisseldeE/LANSyncBox/tree/mai
 
 <p align="center">
   <a href="https://github.com/LisseldeE/LANSyncBox/releases">
-    <img src="https://img.shields.io/badge/GitHub-Releases-181717?style=flat-square&logo=github&logoColor=white" alt="GitHub Releases">
-  </a>
-  &nbsp;&nbsp;
-  <a href="https://gitee.com/Lisselde_E/LANSyncBox/releases">
-    <img src="https://img.shields.io/badge/Gitee-镜像下载-C71D23?style=flat-square&logo=gitee&logoColor=white" alt="Gitee 镜像下载">
+    <img src="https://img.shields.io/badge/GitHub%20Releases-Download-181717?style=for-the-badge&logo=github&logoColor=white" alt="GitHub Releases"/>
   </a>
 </p>
 
-> 💡 国内用户推荐使用 Gitee 镜像下载
+> 当前暂时移除 Gitee 镜像下载，如需重新加入可在社交平台反馈。
 
 ## 使用方法
 
@@ -132,9 +110,8 @@ LANSyncBox Pro 是 [LANSyncBox](https://github.com/LisseldeE/LANSyncBox/tree/mai
 
 1. 点击"加入连接"按钮
 2. 输入或选择房间号
-3. 如需密码，在加入界面直接输入并预验证
-4. 验证失败时直接在加入界面提示，可即时修改信息重试
-5. 点击连接，自动从主机全量同步一次
+3. 如需密码，会引导进入密码输入界面
+4. 加入房间开始同步
 
 ## 同步逻辑
 
@@ -145,7 +122,7 @@ LANSyncBox Pro 是 [LANSyncBox](https://github.com/LisseldeE/LANSyncBox/tree/mai
 | **任意端（对等节点）** | 每端独立维护操作列表与文件状态（向量时钟），变更沿网状实时派发；任意端离线，其余端仍互相同步收敛 |
 | **加入房间（去中心化）** | 无需主机在线：任意在线端都能应答发现、验证与引导新端加入，加入后自动全量对齐 |
 | **读写权限** | 由房间创建端（主机端）管理各连接端的只读 / 读写权限 |
-| **冲突处理** | 以最后修改时间较新的版本为准 |
+| **冲突处理** | 版本向量、逻辑钟、时间戳三层保险，确保冲突解决的正确性 |
 
 ### 同步机制
 
@@ -178,7 +155,7 @@ LANSyncBox Pro 是 [LANSyncBox](https://github.com/LisseldeE/LANSyncBox/tree/mai
 - Linux x64（amd64）发行版
 
 ### 安装方式
-- **Windows**：从 [GitHub Releases](https://github.com/LisseldeE/LANSyncBox/releases) 或 [Gitee 镜像](https://gitee.com/Lisselde_E/LANSyncBox/releases) 下载安装包，双击运行即可
+- **Windows**：从 [GitHub Releases](https://github.com/LisseldeE/LANSyncBox/releases) 下载安装包，双击运行即可
 - **Linux（deb 包）**：从 [GitHub Releases](https://github.com/LisseldeE/LANSyncBox/releases) 下载对应架构的 `.deb` 安装包，在终端中执行以下命令安装：
   ```bash
   sudo apt install -y ./lansyncbox_*.deb
@@ -199,15 +176,32 @@ LANSyncBox Pro 是 [LANSyncBox](https://github.com/LisseldeE/LANSyncBox/tree/mai
 
 本项目不收集任何用户数据，详见 [隐私政策](https://github.com/LisseldeE/LANSyncBox/blob/pro/privacy_policy.md) 文件。
 
+## 商业合作
+本项目采用 GPL-3.0 协议开源。如果你希望在闭源商业场景中使用，或需要定制开发与技术支持，欢迎通过以下方式联系：
+
+**联系方式**：Lisselde.E@outlook.com
+
+**合作流程**：
+1. 说明你的使用场景与需求
+2. 确认授权范围与费用
+3. 签署授权协议
+4. 获取商业授权与技术支持
+
+**授权范围**：
+- 闭源商用授权
+- 企业部署授权
+- 定制开发与技术支持
+
 ## 反馈
 
-**Beta 测试中，如有问题或新的创意欢迎和我联系！**
+**公开测试中，如有问题或新的创意欢迎和我联系！**
 
 欢迎提交 Issue 和 Pull Request！
+邮箱：Lisselde.E@outlook.com
 
 ## 支持我
 
-如果你觉得这个工具还不错，欢迎在爱发电上打赏支持我继续开发，非常感谢你的心意！
+如果你觉得这个工具还不错，欢迎在爱发电上赞助项目支持我继续开发，非常感谢你的心意！
 
 <a href="https://ifdian.net/a/lisseldee">
   <img src="https://img.shields.io/badge/爱发电-支持作者-018E96?style=for-the-badge" alt="支持作者">

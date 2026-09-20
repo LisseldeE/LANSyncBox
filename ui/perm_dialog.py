@@ -244,7 +244,11 @@ class PermManageDialog(QDialog):
         row = self._rows.get(client_id)
         if row:
             row['seg'].set_switching(False)
-            row['seg'].set_perm(perm, animate=False)
+            # 乐观更新早已把气泡滑向目标并设好当前档位；只有 ACK 权限与当前档位
+            # 不一致时才需重新落定，否则会 _stop_anim() 掐断正在进行的滑动动画，
+            # 造成“行内胶囊没动画、顶部默认胶囊有动画”的观感差异。
+            if row['seg'].perm() != perm:
+                row['seg'].set_perm(perm, animate=False)
             if perm == "ro":
                 self._show_state(I18n.tr('perm_to_readonly'))
             else:

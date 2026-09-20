@@ -2,25 +2,6 @@
 去中心化同步：自同步链路（端到端对比拉取，阶段 2）
 Copyright (c) 2026 Lisselde_E <Lisselde.E@outlook.com>.
 Licensed under the GNU General Public License v3.0.
-
-职责（对应实施计划阶段 2）：
-- 端内文件状态列表维护（名称/op_no/state/exists）——单一数据源为
-  Distributor 的状态表（阶段 1 交付），本模块在其上做对比与收敛
-- 收到 FILE_STATE_REQ → 回 FILE_STATE_RESP（entries + 自同步会话 session，
-  拉取方据此直连本端 FileProvider 端到端拉取）
-- 收到 FILE_STATE_RESP → 对比差异：
-  - 本端缺失对端有的文件 → 加入拉取队列（state=ADD），版本感知槽复用
-    （每文件只保留当前仲裁胜者版本，新版本就地覆盖旧槽），
-    复用 FileProvider 会话 + pull_file 端到端拉取
-  - 对端条目 exists=False 而本端存在 → 补收删除（走分发链路删除应用，
-    信号排除上游向下传递）
-  - 本地与对端均为 CHANGE 且 exists=False（已删）→ 删除条目，防列表无限变长
-- 冲突收敛（阶段 3）：RESP 对比本端已有但三层裁决远端胜出 → 入拉取队列覆盖；
-  分发链路冲突覆盖回调 request_conflict_pull → 向胜方请求状态取会话 → 拉取胜方字节
-- 手动同步 / 断线重连自动补齐：向各对端请求 FILE_STATE_REQ 并对比补齐
-  （替代 SYNC_REQUEST/SYNC_RESULT 主机差异同步）
-
-传输约定与全库一致：线程 + socket 1s 超时 + SendLock.send_resumable 背压退避。
 """
 import os
 import threading

@@ -2,12 +2,6 @@
 去中心化同步：文件状态向量与三层冲突解决
 Copyright (c) 2026 Lisselde_E <Lisselde.E@outlook.com>.
 Licensed under the GNU General Public License v3.0.
-
-冲突口径（四层固化，对应实施计划第 4 节）：
-1. 版本向量：一方 vv 完全覆盖另一方 → 被覆盖方落后，应用较新者
-2. 逻辑钟：并发时 clock 大者胜（本端修改次数多者优先）
-3. 时间戳：ts（mtime）晚者胜
-4. end_id 字典序兜底（保证确定性收敛，防死循环）
 """
 import json
 from dataclasses import dataclass, field, asdict

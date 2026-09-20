@@ -377,40 +377,42 @@ class CreateRoomDialog(QDialog):
 
     def _on_room_found_check(self, host_ip: str, room_code: str, port: int, version: str = ""):
         """发现房间（说明房间号已被占用）"""
-        self._is_checking = False
+        if not self._is_checking:
+            return
 
-        # 隐藏加载动画
-        if self._loader:
-            self._loader.hide()
-
-        # 在销毁发现服务前先取回占用者标识，供下述"宿主即本机"判断
+        # 取当前已聚合应答中的"宿主 id"（跳过空值取频率最高者），仅用于正向确认：
+        # 若宿主即本机，可立即定案"回归"并提前收尾本次探测，避免用户久等。
         host_id = ""
         if self._discovery:
             try:
                 host_id = self._discovery.get_host_id(room_code)
             except Exception:
                 host_id = ""
-            self._discovery.stop_discovery()
-            self._discovery = None
 
-        # 占用者即本机（如主机崩溃重启后房间仍存活，宿主 end_id == 本机持久 end_id）：
-        # 允许"回归为主机"——创建按钮切换为"回归"，点击以主机身份重新入房恢复主机管理权，
-        # 而非被当作陌生连接端。宿主非本机则仍视为被占，禁用创建。
+        # 占用者即本机：允许"回归为主机"——创建按钮切换为"回归"，点击以主机身份
+        # 重新入房恢复主机管理权，而非被当作陌生连接端。
         my_id = UserConfig.get_end_id()
         if host_id and host_id == my_id:
             self._regress_as_host = True
+            # 正向结论可定案：停止探测（同时取消超时定时器，防止 finish 重复处理）
+            if self._discovery:
+                try:
+                    self._discovery.stop_discovery()
+                except Exception:
+                    pass
+                self._discovery = None
+            self._is_checking = False
+            if self._loader:
+                self._loader.hide()
             self.create_btn.setText(I18n.tr('return_as_host'))
             self.create_btn.setEnabled(True)
             self.status_label.setText(I18n.tr('room_own_regress'))
             self.status_label.setStyleSheet("color: #51cf66; font-size: 12px;")
             return
 
-        # 非本机房间：被占不可创建，禁用按钮
-        self._regress_as_host = False
-        self.create_btn.setText(I18n.tr('create'))
-        self.create_btn.setEnabled(False)  # 房间号不可用，禁用创建按钮
-        self.status_label.setText(I18n.tr('room_code_exists'))
-        self.status_label.setStyleSheet("color: #ff6b6b; font-size: 12px;")
+        # 首个应答尚不足以下"被占"结论：可能第一个应答恰好来自某个尚未同步主机 id
+        # 的成员（其 host_id 暂时为空）。这里不再提前停发现、不判灰，留到
+        # discovery_finished 对完整应答面聚合后再裁决，避免 2+ 节点时误判宿主非本机。
 
     def _on_check_finished(self, rooms: list):
         """检测完成"""
