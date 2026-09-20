@@ -103,6 +103,7 @@ class FileStateStore(QObject):
         # 轮次统计（request_all → 各 RESP 聚合 → sync_done）
         self._round_targets = None
         self._round_has_diff = False
+        self._round_gen = 0  # 轮次代数：新 request_all 递增；旧轮超时据此自证过期，不误杀新轮
         # 普通回调通道（与 Distributor 同款）：GUI 用 Qt 信号；无事件循环场景
         # （后台/单测）经此同步回调——Qt 信号跨线程 emit 到 Python 槽在无事件
         # 循环时会排队丢失，回调通道保证可靠投递。
@@ -947,6 +948,8 @@ class FileStateStore(QObject):
         if not targets:
             return 0
         with self._lock:
+            self._round_gen += 1
+            gen = self._round_gen
             self._round_targets = set(targets)
             self._round_has_diff = False
         for eid in targets:
@@ -955,19 +958,20 @@ class FileStateStore(QObject):
             except Exception:
                 with self._lock:
                     self._round_targets.discard(eid)
-        # 超时兜底：对端不应答（离线/未连）时也结束本轮，避免通知悬挂
-        threading.Thread(target=self._round_timeout, args=(set(targets),), daemon=True).start()
+        # 超时兜底：对端不应答（离线/未连）时也结束本轮，避免通知悬挂。
+        # 携带本轮代数 gen：新轮已开启（_round_gen != gen）则旧轮让位，不误杀新轮
+        threading.Thread(target=self._round_timeout, args=(gen,), daemon=True).start()
         return len(targets)
 
-    def _round_timeout(self, targets: set):
+    def _round_timeout(self, gen: int):
         time.sleep(self.ROUND_TIMEOUT)
         with self._lock:
-            if self._round_targets is not None:
-                had = self._round_has_diff
-                self._round_targets = None
-                self._round_has_diff = False
-            else:
-                had = False
+            # 已开启新轮（_round_gen != gen）：旧轮让位，不碰新轮聚合，避免误杀
+            if self._round_gen != gen or self._round_targets is None:
+                return
+            had = self._round_has_diff
+            self._round_targets = None
+            self._round_has_diff = False
         self._notify_sync_done(had)
 
     def _finish_round(self, end_id: str, has_diff: bool):

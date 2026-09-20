@@ -53,6 +53,8 @@ class MessageType:
     MESH_PEER_JOIN = 0x26     # 新端加入通告（主机→各端）：{peer:{end_id, name, ip, mesh_port, mgmt_port}}
     MESH_PEER_LEAVE = 0x27    # 端离线通告（主机→各端）：{end_id}
     CLIPBOARD_NOTIFY_SIGNAL = 0x28  # 投递通知（端→网状各直连对端；阶段 5 替换主机转发）：content=JSON 会话元数据
+    HOST_INFO = 0x29          # 主机信息指示（连接端"复用管理监听"→接入的新端）：{host_id, ip, port}，
+                              # 告知真主机地址，令接入端把管理连接换接到真主机（H1：控制面只连主机）
 
 
 class Protocol:
@@ -416,6 +418,19 @@ class Protocol:
         )
 
     @staticmethod
+    def create_host_info(host_id: str, host_ip: str, host_port: int) -> bytes:
+        """创建主机信息指示消息（0x29，连接端复用管理监听 → 接入的新端）
+
+        用于 H1"控制面只连主机"：接入端触达的是连接端的复用管理监听，而非真主机；
+        已端据此告知真主机地址，令接入端把管理连接换接到真主机。host_id 可能为空
+        （身份未识别），ip/port 必填。
+        """
+        return Protocol._pack_json(
+            MessageType.HOST_INFO,
+            {'host_id': host_id or '', 'ip': host_ip or '', 'port': int(host_port or 0)},
+        )
+
+    @staticmethod
     def create_mesh_peer_list(peers: list) -> bytes:
         """创建对端清单引导消息（0x25，主机→新加入端）
 
@@ -448,8 +463,18 @@ class Protocol:
     # 注：P2P_FILE_DATA(0x19) 为预留类型，投递已改走 FILE_BEGIN/FILE_DATA/FILE_END 端到端 TCP 流式传输，不再使用。
 
 
+class ProtocolError(Exception):
+    """协议解析错误：头长度非法 / 缓冲超限 / FILE_DATA 内容不足块索引。
+    由接收循环抛出（fail-closed），对端发送垃圾时断连并复位，防止缓冲无界增长。"""
+
+
 class MessageReceiver:
     """消息接收器 - 处理TCP流式数据的分包"""
+
+    # 缓冲/头长度上限：对端发送无法组成合法头的字节流时，防止 buffer 无界增长（内存泄漏）。
+    MAX_BUFFER_SIZE = 8 * 1024 * 1024            # 缓冲总上限（8MB）
+    MAX_NAME_LEN = 64 * 1024                     # 文件名/路径长度上限（64KB）
+    MAX_CONTENT_SIZE = 8 * 1024 * 1024           # 单条 content 长度上限（8MB，需能装进缓冲）
 
     # content 为 JSON 字典的消息类型（get_message 时自动 json.loads 为 dict）
     # 仅限去中心化新类型（0x20-0x28）；0x17/0x18 剪贴板会话类保持原始 bytes，
@@ -465,37 +490,58 @@ class MessageReceiver:
         MessageType.MESH_PEER_JOIN,
         MessageType.MESH_PEER_LEAVE,
         MessageType.CLIPBOARD_NOTIFY_SIGNAL,
+        MessageType.HOST_INFO,
     }
 
     def __init__(self):
         self.buffer = b''
     
     def feed(self, data: bytes):
-        """添加接收到的数据"""
+        """添加接收到的数据。缓冲超限（对端灌入无法成帧的垃圾）时抛 ProtocolError，
+        由接收循环断连并复位——防止 buffer 无界增长（内存泄漏）。"""
         self.buffer += data
-    
+        if len(self.buffer) > MessageReceiver.MAX_BUFFER_SIZE:
+            raise ProtocolError(
+                f"接收缓冲超过上限 {MessageReceiver.MAX_BUFFER_SIZE}，疑似协议垃圾")
+
+    @staticmethod
+    def _no_content_types() -> list:
+        """无 content（即使 file_size 参数不为 0）的消息类型集合。"""
+        return [MessageType.FILE_BEGIN, MessageType.FILE_END,
+                MessageType.FILE_LIST_REQ, MessageType.FILE_REQUEST,
+                MessageType.FILE_CANCEL, MessageType.FILE_NOTIFY,
+                MessageType.FILE_REQUEST_FORWARD, MessageType.SYNC_REQUEST]
+
     def has_complete_message(self) -> bool:
-        """检查是否有完整的消息"""
+        """检查是否有完整的消息。头长度非法（无法组成合法消息）抛 ProtocolError，
+        交接收循环 fail-closed 断连，避免无谓地无限等待垃圾字节填满缓冲。"""
         if len(self.buffer) < Protocol.HEADER_SIZE:
             return False
 
         try:
             msg_type, filename_len, file_size, _, _ = Protocol.unpack_header(self.buffer)
 
-            # 这些消息类型没有 content（即使 file_size 参数不为 0）
-            if msg_type in [MessageType.FILE_BEGIN, MessageType.FILE_END,
-                           MessageType.FILE_LIST_REQ, MessageType.FILE_REQUEST,
-                           MessageType.FILE_CANCEL, MessageType.FILE_NOTIFY,
-                           MessageType.FILE_REQUEST_FORWARD, MessageType.SYNC_REQUEST]:
+            if msg_type in MessageReceiver._no_content_types():
                 content_size = 0
             else:
                 content_size = file_size
 
+            # 头长度护防：非法文件名长 / 内容长 / FILE_DATA 块不足，判定为垃圾流。
+            # 合法消息受 MAX_CONTENT_SIZE 约束（内容需能装入缓冲），不会误伤。
+            if filename_len > MessageReceiver.MAX_NAME_LEN \
+                    or content_size > MessageReceiver.MAX_CONTENT_SIZE \
+                    or (msg_type == MessageType.FILE_DATA and content_size < 4):
+                raise ProtocolError(
+                    f"非法消息头: type={msg_type} name_len={filename_len} "
+                    f"content_size={content_size}")
+
             required_size = Protocol.HEADER_SIZE + filename_len + content_size
             return len(self.buffer) >= required_size
+        except ProtocolError:
+            raise
         except Exception:
             return False
-    
+
     def get_message(self) -> Optional[Tuple]:
         """获取一条完整消息"""
         if not self.has_complete_message():
@@ -504,11 +550,7 @@ class MessageReceiver:
         # 解析头部
         msg_type, filename_len, file_size, mtime, hide_flag = Protocol.unpack_header(self.buffer)
 
-        # 根据消息类型判断 content 大小
-        if msg_type in [MessageType.FILE_BEGIN, MessageType.FILE_END,
-                       MessageType.FILE_LIST_REQ, MessageType.FILE_REQUEST,
-                       MessageType.FILE_CANCEL, MessageType.FILE_NOTIFY,
-                       MessageType.FILE_REQUEST_FORWARD, MessageType.SYNC_REQUEST]:
+        if msg_type in MessageReceiver._no_content_types():
             content_size = 0
         else:
             content_size = file_size

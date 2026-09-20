@@ -428,6 +428,35 @@ class SyncClient(QObject):
         self._reconnect_wake.wait(self.PREFERRED_REPROBE_INTERVAL)
         self._reconnect_wake.clear()
 
+    def _handle_host_info_redirect(self, info: dict):
+        """H1：接入点命中的是"连接端复用管理监听"，它告知真主机地址。
+
+        把真主机钉为"只连主机"的唯一候选（host_id/ip/mgmt_port 落位），关闭当前
+        中间端管理连接，进入重连——由 _reconnect_loop 的 _host_candidate 重新只够
+        真主机，完成从中间端到真主机的管理连接换接。
+        """
+        host_ip = info.get('ip', '') or ''
+        host_port = int(info.get('port', 0) or 0)
+        host_id = info.get('host_id', '') or ''
+        if not host_ip or host_port <= 0:
+            return
+        with self._ep_lock:
+            self._endpoint_list = [{
+                'end_id': host_id,
+                'name': '主机',
+                'ip': host_ip,
+                'mesh_port': 0,
+                'mgmt_port': host_port,
+            }]
+            self._host_id = host_id
+            self._attached_ep = None
+        self.host_ip = host_ip
+        self._reported_offline = False
+        self._host_offline_logged = False
+        # 换接真主机：丢开当前中间端管理连接，交给"只连主机"重连收敛
+        self._close_mgmt_socket()
+        self._start_reconnect()
+
     def _try_attach(self, ep: dict) -> bool:
         """试连单个端点（管理连接）：TCP 建连 + 等待认证结果。
         失败返回 False 并累计失败计数（达阈值降级移除）；成功记录挂接端点并重置退避。"""
@@ -972,6 +1001,11 @@ class SyncClient(QObject):
             if self.mesh and isinstance(content, dict):
                 self.mesh.remove_peer(content.get('end_id', ''))
                 self._drop_endpoint(content.get('end_id', ''))
+
+        elif msg_type == MessageType.HOST_INFO:
+            # H1：接入点命中"连接端复用管理监听"，它告知真主机地址 → 换接真主机
+            if isinstance(content, dict):
+                self._handle_host_info_redirect(content)
     
     def _send_mode_request(self):
         """认证成功后向主机端请求当前模式"""
@@ -1073,6 +1107,8 @@ class SyncClient(QObject):
             server.file_state_store = self.file_state_store
             server._file_provider = self._file_provider
             server.mode = self.mode
+            # H1：向接入本端复用管理监听的"新端"提供真主机信息，令其换接真主机
+            server._host_provider = self._host_candidate
             if not server.start(port=Config.DEFAULT_PORT, reuse=True):
                 self.log_message.emit("本端管理监听启动失败")
                 return

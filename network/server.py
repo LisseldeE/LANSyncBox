@@ -121,6 +121,10 @@ class SyncServer(QObject):
         # reuse 模式（全网状管理平面）：连接端复用的管理监听服务，共享宿主
         # mesh/distributor/store，不重建、不回收；start(reuse=True) 时置 True
         self._reuse = False
+        # reuse 模式下供重定向真主机的信息提供者（返回 host 端点 dict：end_id/ip/mgmt_port）。
+        # 真主机服务（_reuse=False）不使用。用于 H1"控制面只连主机"：接入新端时令其
+        # 换接真主机，而非把本连接端误当管理宿主。
+        self._host_provider = None
     
     def start(self, port: int = None, exclude_port: int = None,
               reuse: bool = False) -> bool:
@@ -732,7 +736,33 @@ class SyncServer(QObject):
                 self._remove_client(client_id)
                 return
 
-            # 验证成功
+            # ---- 连接端"复用管理监听"（_reuse=True，非真主机）——H1：控制面只连主机 ----
+            # 接入端拨到的是本连接端的管理监听，并非真主机。不能让接入端把本端误当
+            # 管理宿主（互相取暖）。故：
+            #   主机已知 → 下发真主机信息（HOST_INFO）并断开，令接入端换接真主机；
+            #   主机未知（离线/待机）→ 拒绝承担管理宿主并断开（接入端回退重试）。
+            if self._reuse:
+                host = self._host_provider() if self._host_provider else None
+                if host and host.get('ip') and int(host.get('mgmt_port', 0) or 0) > 0:
+                    self.clients[client_id]['last_pong'] = time.time()
+                    self._socket_send(self.clients[client_id],
+                                      Protocol.create_auth_response(True, "验证成功"))
+                    try:
+                        self._socket_send(self.clients[client_id], Protocol.create_host_info(
+                            host.get('end_id', ''), host.get('ip'), int(host['mgmt_port'])))
+                    except Exception:
+                        pass
+                    self.log_message.emit(
+                        f"客户端 {client_id} 接入，转发至真主机 {host.get('ip')}:{host.get('mgmt_port')}")
+                    self._remove_client(client_id)
+                else:
+                    self._socket_send(self.clients[client_id],
+                                      Protocol.create_auth_response(False, "主机暂不可用，请稍后加入"))
+                    self.log_message.emit(f"客户端 {client_id} 接入但主机不可用，拒绝承担管理宿主")
+                    self._remove_client(client_id)
+                return
+
+            # 验证成功（真主机服务）
             self.clients[client_id]['authenticated'] = True
             self.clients[client_id]['perm'] = "rw"  # 先按读写初始化；默认只读时随后经 set_perm 下发并应用
             self.clients[client_id]['last_pong'] = time.time()  # 心跳计时起点（防认证后立即误判离线）
@@ -2279,12 +2309,31 @@ class SyncServer(QObject):
         
         # 维护失败客户端集合，一旦某客户端某次发送失败，后续不再发给它
         failed_clients = set()
+
+        # 跨通道互斥(A 让位)：本轮整份文件在 BEGIN 阶段一次性判定哪些端正被自同步
+        # 拉取(B)通道投递同一文件——命中者整体跳过（不记 failed，避免触发下方补发）。
+        # 于 BEGIN 前冻结一次而非逐 chunk 重判：确保同一端在 BEGIN/DATA/END 三段的
+        # 跳过与否一致，不会出现"只发 DATA 不收 BEGIN"的畸形流。
+        # 让位键用端身份 end_id 而非 IP：VM 重连换 IP 仍命中；未交换 END_INFO 的端
+        # end_id 为空无法关联 B（同源限制，|历史| 最坏是双通道并存，字节各自临时文件、
+        # 落盘 replace 幂等覆盖，不损坏）。
+        yield_skip = set()
+        with self._lock:
+            for client_id, cinfo in list(self.clients.items()):
+                if not cinfo.get('authenticated'):
+                    continue
+                end_id = cinfo.get('end_id') or ''
+                if end_id and self._is_delivering_by(end_id, filename, 'B'):
+                    yield_skip.add(client_id)
+        if yield_skip:
+            self.log_message.emit(
+                f"A 通道让位 {len(yield_skip)} 端: {filename} 正被自同步拉取通道投递")
         
         # 发送文件开始消息
         begin_msg = Protocol.pack_message(
             MessageType.FILE_BEGIN, filename, file_size, False, b'', mtime
         )
-        if not self._broadcast_data(begin_msg, stop_event=stop_event, failed_clients=failed_clients, cancel_filename=filename):
+        if not self._broadcast_data(begin_msg, stop_event=stop_event, failed_clients=failed_clients, cancel_filename=filename, skip_clients=yield_skip):
             # 被 stop_event 取消，通知接收端清理
             self._broadcast_data(Protocol.create_file_cancel(filename), failed_clients=failed_clients)
             self.log_message.emit(f"取消广播大文件: {filename}")
@@ -2298,7 +2347,7 @@ class SyncServer(QObject):
                 # 检查是否需要停止
                 if stop_event and stop_event.is_set():
                     # 发送取消消息给所有接收端
-                    self._broadcast_data(Protocol.create_file_cancel(filename), failed_clients=failed_clients)
+                    self._broadcast_data(Protocol.create_file_cancel(filename), failed_clients=failed_clients, skip_clients=yield_skip)
                     self.log_message.emit(f"取消广播大文件: {filename}")
                     return
                 
@@ -2307,9 +2356,9 @@ class SyncServer(QObject):
                     break
                 
                 chunk_msg = Protocol.create_file_data_message(filename, chunk_index, chunk)
-                if not self._broadcast_data(chunk_msg, stop_event=stop_event, failed_clients=failed_clients, cancel_filename=filename):
+                if not self._broadcast_data(chunk_msg, stop_event=stop_event, failed_clients=failed_clients, cancel_filename=filename, skip_clients=yield_skip):
                     # 被 stop_event 取消，通知接收端清理
-                    self._broadcast_data(Protocol.create_file_cancel(filename), failed_clients=failed_clients)
+                    self._broadcast_data(Protocol.create_file_cancel(filename), failed_clients=failed_clients, skip_clients=yield_skip)
                     self.log_message.emit(f"取消广播大文件: {filename}")
                     return
                 chunk_index += 1
@@ -2322,9 +2371,9 @@ class SyncServer(QObject):
         
         # 发送文件结束消息
         end_msg = Protocol.create_file_end_message(filename, file_size, mtime)
-        if not self._broadcast_data(end_msg, stop_event=stop_event, failed_clients=failed_clients, cancel_filename=filename):
+        if not self._broadcast_data(end_msg, stop_event=stop_event, failed_clients=failed_clients, cancel_filename=filename, skip_clients=yield_skip):
             # 被 stop_event 取消，通知接收端清理
-            self._broadcast_data(Protocol.create_file_cancel(filename), failed_clients=failed_clients)
+            self._broadcast_data(Protocol.create_file_cancel(filename), failed_clients=failed_clients, skip_clients=yield_skip)
             self.log_message.emit(f"取消广播大文件: {filename}")
             return
         
@@ -2333,7 +2382,9 @@ class SyncServer(QObject):
         pass  # UI层通过进度条显示完成状态，无需额外日志
         
         # 对失败客户端重新发送整个文件，确保最终同步完成
-        # 失败客户端之前已收到 FILE_CANCEL 清理了接收状态，重新发送从 FILE_BEGIN 开始是安全的
+        # 失败客户端之前已收到 FILE_CANCEL 清理了接收状态，重新发送从 FILE_BEGIN 开始是安全的。
+        # 经 _send_file_to_client_with_target 补发：其内置 A 让位（该端若仍被自同步拉取通道
+        # 投递则让位跳过，避免补发与 B 双通道并存）。
         for failed_client_id in list(failed_clients):
             if stop_event and stop_event.is_set():
                 break
@@ -2342,10 +2393,8 @@ class SyncServer(QObject):
                 if failed_client_id not in self.clients or not self.clients[failed_client_id].get('authenticated'):
                     continue
             self.log_message.emit(f"重新发送文件给失败客户端: {failed_client_id}")
-            # 补发语义与转发完全等价：必须传 is_forward=True。
-            # 否则走非转发路径重建"发送"进度条，而其失败时 _notify_forward_cancelled 不发布取消信号，
-            # 会导致重发的进度条永久残留（与历史 0-FIN 进度条问题同源）。
-            self._send_file_to_client(failed_client_id, filename, filepath, stop_event, is_forward=True)
+            self._send_file_to_client_with_target(
+                failed_client_id, filename, filepath, stop_event)
 
     def _format_size(self, size: int) -> str:
         """格式化文件大小"""
@@ -2473,7 +2522,7 @@ class SyncServer(QObject):
         )
         self._broadcast_data(message, exclude_client)
     
-    def _broadcast_data(self, data: bytes, exclude_client: str = None, stop_event: threading.Event = None, failed_clients: set = None, cancel_filename: str = None) -> bool:
+    def _broadcast_data(self, data: bytes, exclude_client: str = None, stop_event: threading.Event = None, failed_clients: set = None, cancel_filename: str = None, skip_clients: set = None) -> bool:
         """广播数据给所有客户端
 
         单个客户端发送失败时跳过该客户端继续发送给其他客户端，避免协议错乱。
@@ -2487,6 +2536,8 @@ class SyncServer(QObject):
             stop_event: 停止标志（可选，用于取消传输）
             failed_clients: 已失败客户端集合（可选，会被原地修改）
             cancel_filename: 如果提供，发送失败的客户端会收到 FILE_CANCEL
+            skip_clients: 本轮整体丢弃的客户端ID集合（祖先事先按 (end_id, 文件) 判定
+                某端正被自同步拉取(B)通道投递，主机直推(A)让位——整体跳过且不记失败）
 
         Returns:
             True 表示发送完成（或无目标），False 表示被 stop_event 取消
@@ -2499,6 +2550,7 @@ class SyncServer(QObject):
                 if client_id != exclude_client
                 and client_info['authenticated']
                 and (failed_clients is None or client_id not in failed_clients)
+                and (skip_clients is None or client_id not in skip_clients)
             ]
 
         if not targets:

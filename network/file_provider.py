@@ -53,6 +53,9 @@ class FileProvider(QObject):
     MAX_RESUME_ATTEMPTS = 3     # 断点续传重连上限（接收端）：连接中断且有真实向前进度
                                 # 时，保留临时文件、带 offset 重连续传；无进度/会话失效
                                 # 等不可续传故障不重试，避免对已死的提供方反复连接。
+    PULL_IDLE_TIMEOUT = 30.0    # 拉取连接空闲回收阈值（秒）：对端连上但一直不发送任何
+                                # 请求数据（或有半条后静默）超过此时长即断开，防止恶意/
+                                # 损坏对端让服务线程与 socket 永久驻留累积泄漏。
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -246,6 +249,7 @@ class FileProvider(QObject):
         conn_socket = info['socket']
         receiver = info['receiver']
         conn_socket.settimeout(1.0)
+        idle_since = time.time()  # 最后一次活动（收到数据）时刻，用于空闲回收
 
         try:
             while self.running:
@@ -253,10 +257,15 @@ class FileProvider(QObject):
                     data = conn_socket.recv(65536)
                 except socket.timeout:
                     # 网络慢/请求未达：静默等待（与同步 server._handle_client 一致），
-                    # 避免网络差时把拉取连接误判为断开而提前关闭
+                    # 避免网络差时把拉取连接误判为断开而提前关闭。但连接长时间无任何
+                    # 数据（对端连上不发请求/发半条）超过 PULL_IDLE_TIMEOUT 即回收，
+                    # 防线程与 socket 永久驻留（恶意/损坏对端累积泄漏）。
+                    if time.time() - idle_since > self.PULL_IDLE_TIMEOUT:
+                        break
                     continue
                 if not data:
                     break
+                idle_since = time.time()
                 receiver.feed(data)
                 while receiver.has_complete_message():
                     message = receiver.get_message()

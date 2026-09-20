@@ -28,7 +28,8 @@ class SendLock:
             sock.sendall(data)
 
     def send_resumable(self, sock: socket.socket, data: bytes, timeout: float = 1.0,
-                       backoff: float = 0.05, stop_event: threading.Event = None) -> bool:
+                       backoff: float = 0.05, stop_event: threading.Event = None,
+                       total_timeout: float = None) -> bool:
         """将 data 作为一条完整消息可恢复地写入 sock（持锁串行化，避免并发交错）。
 
         与 send（sendall）的区别：socket.timeout（背压，接收端处理慢导致发送缓冲区满）
@@ -43,16 +44,24 @@ class SendLock:
             timeout: 单次 send 超时秒数
             backoff: 背压超时后的退避秒数
             stop_event: 可选，置位时立即中止并返回 False
+            total_timeout: 可选，整条消息写出的总时限（秒）。超过即放弃返回 False，
+                防止半开对端（心跳超时判定前的窗口期）单端长时间占住发送锁/拖垮
+                send_to_all 广播循环。
 
         Returns:
-            True 表示整条消息已完整写出；False 表示被中止或连接异常
+            True 表示整条消息已完整写出；False 表示被中止、超总时限或连接异常
             （BrokenPipe/ConnectionReset/ConnectionAborted/OSError 等）
         """
         total_sent = 0
         sock.settimeout(timeout)
+        deadline = None
+        if total_timeout is not None:
+            deadline = time.time() + total_timeout
         with self._lock:
             while total_sent < len(data):
                 if stop_event is not None and stop_event.is_set():
+                    return False
+                if deadline is not None and time.time() > deadline:
                     return False
                 try:
                     sent = sock.send(data[total_sent:])

@@ -40,6 +40,7 @@ class MeshManager(QObject):
     RECONNECT_BASE = 2.0        # 断线重连初始退避（秒）
     RECONNECT_MAX = 30.0        # 断线重连最大退避（秒）
     HEARTBEAT_INTERVAL = 2.0    # 网状连接心跳间隔（秒）
+    MESH_BROADCAST_TOTAL_TIMEOUT = 2.0  # 单端广播发送总时限（秒）：半开对端不拖慢整个 send_to_all
     MAX_SILENT_SECONDS = 8.0    # 对端静默判死阈值（秒）：双方均每 2s 发心跳，
                                 # 连续超过该时长收不到对端任何字节（含心跳）即判半开/
                                 # 静默死亡，拆除连接并触发退避重连（防断电/拔线/WiFi
@@ -462,13 +463,21 @@ class MeshManager(QObject):
             return False
 
     def send_to_all(self, data: bytes, except_end_id: Optional[str] = None) -> int:
-        """向全部已直连对端广播一条消息，返回发送成功的端数。"""
+        """向全部已直连对端广播一条消息，返回发送成功的端数。
+
+        每端施加独立总时限（MESH_BROADCAST_TOTAL_TIMEOUT）：半开对端（心跳 8s
+        判定前的窗口期内发送缓冲写不进）不会把整个广播循环拖住秒级，逐端各让出
+        有限预算后继续下一端。
+        """
         with self._lock:
             targets = [(eid, info) for eid, info in self.conns.items() if eid != except_end_id]
         ok = 0
         for eid, info in targets:
             try:
-                if info['send_guard'].send_resumable(info['socket'], data):
+                guard = info['send_guard']
+                if guard.send_resumable(
+                        info['socket'], data,
+                        total_timeout=MeshManager.MESH_BROADCAST_TOTAL_TIMEOUT):
                     ok += 1
             except Exception:
                 pass

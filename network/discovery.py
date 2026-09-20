@@ -33,7 +33,7 @@ class RoomDiscovery(QObject):
         super().__init__(parent)
         self.socket: Optional[socket.socket] = None
         self.running = False
-        self.discovered_rooms: Dict[str, dict] = {}  # {ip: {room_code, port, version, timestamp}}
+        self.discovered_rooms: Dict[tuple, dict] = {}  # {(ip, port): {ip, room_code, port, version, sync_version, host_id, timestamp}}
         self._lock = threading.Lock()
         self._timer = None  # 超时定时器（stop_discovery 时需 cancel，避免取消探测后仍触发 _finish_discovery）
         self._receive_thread = None  # 接收线程（stop_discovery 时须回收，避免线程堆积）
@@ -243,8 +243,12 @@ class RoomDiscovery(QObject):
                     version = response.get('version', '')
                     sync_version = response.get('sync_version', '')
                     
+                    # 以 (ip, port) 为键：同一台机可能有多个存活应答（主机 mgmt + 本机
+                    # 连接端 reuse 管理监听等），单以 host_ip 为键会导致尾答覆盖前答，
+                    # 使聚合少算成员、host_id 取错。每个应答端点都保留一条。
                     with self._lock:
-                        self.discovered_rooms[host_ip] = {
+                        self.discovered_rooms[(host_ip, port)] = {
+                            'ip': host_ip,
                             'room_code': room_code,
                             'port': port,
                             'version': version,
@@ -272,14 +276,14 @@ class RoomDiscovery(QObject):
         with self._lock:
             rooms = [
                 {
-                    'ip': ip,
+                    'ip': info['ip'],
                     'room_code': info['room_code'],
                     'port': info['port'],
                     'version': info.get('version', ''),
                     'sync_version': info.get('sync_version', ''),
                     'host_id': info.get('host_id', '')
                 }
-                for ip, info in self.discovered_rooms.items()
+                for info in self.discovered_rooms.values()
             ]
         
         # 安全发射信号，避免对象已删除的错误
@@ -299,19 +303,19 @@ class RoomDiscovery(QObject):
                 if info.get('room_code') == room_code:
                     return info.get('host_id', '')
         return ""
-    
+
     def get_discovered_rooms(self) -> List[dict]:
         """获取已发现的房间列表（按应答 IP 逐条）"""
         with self._lock:
             return [
                 {
-                    'ip': ip,
+                    'ip': info['ip'],
                     'room_code': info['room_code'],
                     'port': info['port'],
                     'version': info.get('version', ''),
                     'sync_version': info.get('sync_version', '')
                 }
-                for ip, info in self.discovered_rooms.items()
+                for info in self.discovered_rooms.values()
             ]
 
     def get_room_aggregates(self) -> List[dict]:
@@ -336,7 +340,7 @@ class RoomDiscovery(QObject):
         compatible = Config.SYNC_LOGIC_VERSION
         groups: Dict[str, dict] = {}
         with self._lock:
-            for ip, info in self.discovered_rooms.items():
+            for info in self.discovered_rooms.values():
                 # 兼容性过滤：同步逻辑版本不一致的成员不计入 N 且不可作为加入目标
                 if info.get('sync_version') != compatible:
                     continue
@@ -345,13 +349,27 @@ class RoomDiscovery(QObject):
                     continue
                 group = groups.setdefault(code, {'room_code': code, 'members': []})
                 group['members'].append({
-                    'ip': ip,
+                    'ip': info.get('ip'),
                     'port': info.get('port', Config.DEFAULT_PORT),
                     'sync_version': info.get('sync_version', ''),
                 })
+
+        # 同一物理机去重：主机(mgmt) 与同机连接端(reuse 管理监听) 的 UDP 应答会同 IP
+        # 命中多端口，若逐 (ip,port) 各计一条会让"在线 N"虚高。按 ip 聚合成 1 名成员
+        #（取首答）；ip 缺失视为不可去重，保留原条目（不影响 join 决策）。
         result = []
         for code, group in groups.items():
-            members = group['members']
+            seen_ip = set()
+            members = []
+            for m in group['members']:
+                ip = m.get('ip')
+                if ip is None:
+                    members.append(m)  # 无 ip 无法去重，整条保留（理论不含）
+                    continue
+                if ip in seen_ip:
+                    continue
+                seen_ip.add(ip)
+                members.append(m)
             result.append({
                 'room_code': code,
                 'members': members,
