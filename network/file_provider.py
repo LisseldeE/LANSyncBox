@@ -421,9 +421,13 @@ class FileProvider(QObject):
         finally:
             # 发送结束（成功/失败/被接管）：若本连接仍是该文件的 owner 则移除，避免接管表残留
             with self._lock:
-                if self._active_streams.get(key) == conn_id:
+                still_owner = self._active_streams.get(key) == conn_id
+                if still_owner:
                     self._active_streams.pop(key, None)
-            if deliver_end is not None:
+            # 跨通道 'B' 登记仅在【本连接仍为 owner】时才注销：被同文件新连接接管
+            # （断点续传）时旧连接不得清掉新连接仍占用的投递标记，否则主机直推(A)会
+            # 误判 B 已结束而并发直推同一文件。
+            if deliver_end is not None and still_owner:
                 try:
                     self._deliver_controller._unmark_delivering(deliver_end, name, 'B')
                 except Exception:

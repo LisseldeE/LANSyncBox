@@ -11,7 +11,7 @@ import time
 from typing import Dict, Optional, List
 from PySide6.QtCore import QObject, Signal
 
-from config import Config
+from config import Config, UserConfig
 
 
 class RoomDiscovery(QObject):
@@ -71,6 +71,11 @@ class RoomDiscovery(QObject):
             }).encode('utf-8')
 
             # 向所有发现端口发送请求
+            # 枚举本机全部 IPv4 接口：Windows 的 255.255.255.255 常只从默认路由
+            # 网卡出去，桥接/多网卡段可能漏发；对每个接口再发一次"子网定向广播
+            # x.x.x.255 + 该接口IP单播"，保证共享任一广播域的端（如主机桥接的
+            # VM、或双网卡中的 172 段）都能收到发现请求。
+            local_ips = self._get_all_local_v4()
             for port in range(self.DISCOVERY_PORT_START, self.DISCOVERY_PORT_END + 1):
                 # 发送到广播地址
                 self.socket.sendto(discovery_msg, ('<broadcast>', port))
@@ -78,13 +83,16 @@ class RoomDiscovery(QObject):
                 # 发送到本机地址（支持同一台机器双开）
                 self.socket.sendto(discovery_msg, ('127.0.0.1', port))
 
-                # 获取本机IP并发送
-                try:
-                    local_ip = self._get_local_ip()
-                    if local_ip and local_ip != '127.0.0.1':
-                        self.socket.sendto(discovery_msg, (local_ip, port))
-                except Exception:
-                    pass
+                # 逐接口发送：子网定向广播 + 该接口自身 IP（单播到本机口）
+                for ip in local_ips:
+                    try:
+                        self.socket.sendto(discovery_msg, (ip, port))
+                        parts = ip.split('.')
+                        if len(parts) == 4:
+                            bcast = "%s.%s.%s.255" % (parts[0], parts[1], parts[2])
+                            self.socket.sendto(discovery_msg, (bcast, port))
+                    except Exception:
+                        continue
 
             # 设置超时结束
             self._timer = threading.Timer(timeout, self._finish_discovery)
@@ -164,6 +172,27 @@ class RoomDiscovery(QObject):
             return ip
         except Exception:
             return "127.0.0.1"
+
+    def _get_all_local_v4(self) -> set:
+        """枚举本机全部非回环 IPv4 地址（多网卡/桥接场景逐接口广播用）。
+
+        stdlib 无平台无关的 net_if_addrs，这里用 getaddrinfo(gethostname) 尽量收全
+        （Windows 上通常返回每个网卡接口的地址），再补 `_get_local_ip` 兜底默认口。
+        失败时退化为空集——调用方仍会发 255.255.255.255 + 127.0.0.1，不受影响。
+        """
+        addrs: set = set()
+        try:
+            for info in socket.getaddrinfo(
+                    socket.gethostname(), None, socket.AF_INET, socket.SOCK_DGRAM):
+                ip = info[4][0]
+                if ip and ip != '127.0.0.1':
+                    addrs.add(ip)
+        except Exception:
+            pass
+        lip = self._get_local_ip()
+        if lip and lip != '127.0.0.1':
+            addrs.add(lip)
+        return addrs
     
     def stop_discovery(self):
         """停止发现
@@ -220,6 +249,7 @@ class RoomDiscovery(QObject):
                             'port': port,
                             'version': version,
                             'sync_version': sync_version,
+                            'host_id': response.get('host_id', ''),
                             'timestamp': time.time()
                         }
                     
@@ -246,7 +276,8 @@ class RoomDiscovery(QObject):
                     'room_code': info['room_code'],
                     'port': info['port'],
                     'version': info.get('version', ''),
-                    'sync_version': info.get('sync_version', '')
+                    'sync_version': info.get('sync_version', ''),
+                    'host_id': info.get('host_id', '')
                 }
                 for ip, info in self.discovered_rooms.items()
             ]
@@ -257,6 +288,17 @@ class RoomDiscovery(QObject):
         except RuntimeError:
             # 对象已被删除，忽略
             pass
+
+    def get_host_id(self, room_code: str) -> str:
+        """返回最近一次发现中指定房间所在主机的持久 end_id（用于"创建被占且宿主即本机"判断）
+
+        同一房间可能有多个应答端点，取首个携带该端点自身 end_id 的应答。
+        """
+        with self._lock:
+            for info in self.discovered_rooms.values():
+                if info.get('room_code') == room_code:
+                    return info.get('host_id', '')
+        return ""
     
     def get_discovered_rooms(self) -> List[dict]:
         """获取已发现的房间列表（按应答 IP 逐条）"""
@@ -329,13 +371,20 @@ class RoomResponder(QObject):
     DISCOVERY_PORT_START = 9528  # 发现端口起始
     DISCOVERY_PORT_END = 9537    # 发现端口结束（包含）
 
-    def __init__(self, parent=None):
+    def __init__(self, parent=None, host_id: str = None, host_id_provider=None):
         super().__init__(parent)
         self.socket: Optional[socket.socket] = None
         self.running = False
         self.room_code = ""
         self.port = Config.DEFAULT_PORT
         self.discovery_port = None  # 实际使用的发现端口
+        # 本房间主机的持久 end_id：主机端即本机 → 取本端标识；连接端则由使用方传入
+        # 真主机 end_id（client._host_id），让"创建被占且宿主即本机"的判断在连接端
+        # 回退/主机离线静默待机期间仍能识别出自己曾是宿主，从而在创建里变"回归为主机"。
+        self.host_id = host_id or UserConfig.get_end_id()
+        # host_id_provider：连接端传入可调用对象，每次应答时现行取真主机 end_id
+        # （END_INFO 在 join 之后才到达，host_id 需延迟解析）；None 则用固定 self.host_id。
+        self._host_id_provider = host_id_provider
 
     def start(self, room_code: str, port: int = None) -> bool:
         """
@@ -412,12 +461,14 @@ class RoomResponder(QObject):
                     # target_room 为空或匹配时，发送响应（携带版本号供客户端核对：
                     # version=展示用应用版本；sync_version=同步逻辑版本号，加入房间
                     # 只校验后者一致，UI 等非同步变更不要求全员升级）
+                    host_id = self._host_id_provider() if self._host_id_provider else self.host_id
                     response = json.dumps({
                         'type': 'discovery_response',
                         'room_code': self.room_code,
                         'port': self.port,
                         'version': Config.APP_VERSION,
-                        'sync_version': Config.SYNC_LOGIC_VERSION
+                        'sync_version': Config.SYNC_LOGIC_VERSION,
+                        'host_id': host_id
                     }).encode('utf-8')
 
                     self.socket.sendto(response, addr)

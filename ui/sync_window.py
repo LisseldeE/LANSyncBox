@@ -2083,15 +2083,43 @@ class SyncWindow(QMainWindow):
         return super().eventFilter(obj, event)
 
     def _show_client_online(self):
-        """重建连接端状态标签为绿色"在线"。
-
-        连接端在每次文件传输完成等时机都会重建状态标签，此处统一收敛为
-        "在线"文案（断连/心跳超时后由 on_disconnected 切为"离线"）。
-        """
+        """重建连接端状态标签：在线指示由 mesh 数据面（同步状态）驱动。"""
         if self.is_host:
             return
-        self.status_label.setText(
-            f'<span style="color: green;">{I18n.tr("status_online")}</span>')
+        self._refresh_client_online()
+
+    def _refresh_client_online(self):
+        """连接端在线指示 = 同步（数据面 mesh）健康度，而非管理连接。
+
+        控制面只连主机：主机离线进入静默待机时管理连接断开，但只要 mesh 数据面
+        仍与任一网状对端直连（可交换文件状态），连接端依然"在线"（同步中）；
+        仅当 mesh 全断（无任何可同步对端）才判"离线"。"""
+        if self.is_host:
+            return
+        self._ensure_mesh_status_signals()
+        mesh_ok = bool(self.client and self.client.mesh
+                       and self.client.mesh.connected_end_ids())
+        if mesh_ok:
+            self.status_label.setText(
+                f'<span style="color: green;">{I18n.tr("status_online")}</span>')
+        else:
+            self.status_label.setText(
+                f'<span style="color: red;">{I18n.tr("status_offline")}</span>')
+        self.status_label.setStyleSheet("")
+
+    def _ensure_mesh_status_signals(self):
+        """连接 mesh 数据面上下线信号 → 刷新在线指示（同步状态驱动）。
+
+        mesh 在认证成功后（connected.emit 前）即已创建，此处一次性接线，
+        用 _mesh_status_wired 防重复连接。"""
+        if self.is_host:
+            return
+        mesh = self.client.mesh if self.client else None
+        if mesh is None or getattr(self, '_mesh_status_wired', False):
+            return
+        mesh.peer_connected.connect(self._refresh_client_online)
+        mesh.peer_disconnected.connect(self._refresh_client_online)
+        self._mesh_status_wired = True
 
     def on_connected(self):
         """连接成功"""
@@ -2099,7 +2127,7 @@ class SyncWindow(QMainWindow):
             # 主机端显示"已就绪 | 在线: X"，"已就绪"为绿色，其余为系统默认颜色
             self.status_label.setText(f'<span style="color: green;">{I18n.tr("status_ready")}</span> | {I18n.tr("online_count")}: 0')
         else:
-            # 连接端显示绿色"在线"（断连/心跳超时后由 on_disconnected 切为红色"离线"）
+            # 连接端显示绿色"在线"（由 mesh 数据面 / 同步状态驱动）
             self._show_client_online()
             # 首次全量差异同步改由模式确认后触发（sync 模式下收到 MODE_RESP 自动上报）
             # 连接就绪：开启局域网剪切板分发 + 启动本端目录服务（复制端 serve 用）
@@ -2110,7 +2138,12 @@ class SyncWindow(QMainWindow):
             # 主机在线状态/地址；host 亲和由 mesh 既有回探机制负责。只要房间里任意
             # 一端存活应答，新端即可据此加入，消除"仅主机应答"的单点依赖。
             if self.responder is None:
-                self.responder = RoomResponder(self)
+                # 连接端应答时上报"本房间真主机"的 end_id（client._host_id），而非本端
+                # 自身 id——否则宿主设备在创建里查"宿主即本机"永远不匹配，无法变"回归为主机"。
+                # END_INFO 在 join 之后才到达，故用 provider 每次应答现行取；主机离线静默
+                # 待机期间 _host_id 仍保留，回归判断不受影响。
+                self.responder = RoomResponder(
+                    self, host_id_provider=lambda: getattr(self.client, '_host_id', '') or '')
                 # 广播本端真实管理监听端口：reuse 下 9527 被占会顺延，写死 9527
                 # 会让本端虽存活却无法被新端发现（单点盲区）。mgmt_port() 取实际绑定值。
                 if self.responder.start(self.room_code, self.client.mgmt_port()):
@@ -2268,9 +2301,14 @@ class SyncWindow(QMainWindow):
     def on_disconnected(self):
         """断开连接（含心跳超时判定离线）"""
         self._add_record("", I18n.tr('disconnected'), "")
-        # 连接端/主机端统一显示红色"离线"；恢复默认样式以便下次"在线"绿色正常渲染
-        self.status_label.setText(f'<span style="color: red;">{I18n.tr("status_offline")}</span>')
-        self.status_label.setStyleSheet("")
+        if self.is_host:
+            # 主机端统一显示红色"离线"；恢复默认样式以便下次"在线"绿色正常渲染
+            self.status_label.setText(f'<span style="color: red;">{I18n.tr("status_offline")}</span>')
+            self.status_label.setStyleSheet("")
+        else:
+            # 连接端：在线 = mesh 数据面（同步状态）。管理连接（仅连主机）断开不代表
+            # 同步不可用，仅当 mesh 无任何可同步对端时才判"离线"。
+            self._refresh_client_online()
 
     def on_state_sync_done(self, has_diff: bool):
         """一轮端到端状态对比结束：仅在有差异时写日志（周期对账/建连自动补齐/

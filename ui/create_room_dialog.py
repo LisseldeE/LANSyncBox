@@ -89,6 +89,7 @@ class CreateRoomDialog(QDialog):
         self._is_checking = False  # 是否正在检测房间号可用性
         self._discovery = None  # 房间发现服务
         self._loader = None  # 加载动画组件
+        self._regress_as_host = False  # 创建按钮已切换为"回归"，点击以主机身份重新入房
         self.init_ui()
     
     def init_ui(self):
@@ -343,6 +344,8 @@ class CreateRoomDialog(QDialog):
             self._discovery.stop_discovery()
 
         self._is_checking = True
+        self._regress_as_host = False
+        self.create_btn.setText(I18n.tr('create'))
         self.create_btn.setEnabled(False)  # 检测期间禁用创建按钮
         self.status_label.setText(I18n.tr('checking_availability'))
         self.status_label.setStyleSheet("color: #339af0; font-size: 12px;")
@@ -375,18 +378,39 @@ class CreateRoomDialog(QDialog):
     def _on_room_found_check(self, host_ip: str, room_code: str, port: int, version: str = ""):
         """发现房间（说明房间号已被占用）"""
         self._is_checking = False
-        self.create_btn.setEnabled(False)  # 房间号不可用，禁用创建按钮
-        self.status_label.setText(I18n.tr('room_code_exists'))
-        self.status_label.setStyleSheet("color: #ff6b6b; font-size: 12px;")
 
         # 隐藏加载动画
         if self._loader:
             self._loader.hide()
 
-        # 停止检测
+        # 在销毁发现服务前先取回占用者标识，供下述"宿主即本机"判断
+        host_id = ""
         if self._discovery:
+            try:
+                host_id = self._discovery.get_host_id(room_code)
+            except Exception:
+                host_id = ""
             self._discovery.stop_discovery()
             self._discovery = None
+
+        # 占用者即本机（如主机崩溃重启后房间仍存活，宿主 end_id == 本机持久 end_id）：
+        # 允许"回归为主机"——创建按钮切换为"回归"，点击以主机身份重新入房恢复主机管理权，
+        # 而非被当作陌生连接端。宿主非本机则仍视为被占，禁用创建。
+        my_id = UserConfig.get_end_id()
+        if host_id and host_id == my_id:
+            self._regress_as_host = True
+            self.create_btn.setText(I18n.tr('return_as_host'))
+            self.create_btn.setEnabled(True)
+            self.status_label.setText(I18n.tr('room_own_regress'))
+            self.status_label.setStyleSheet("color: #51cf66; font-size: 12px;")
+            return
+
+        # 非本机房间：被占不可创建，禁用按钮
+        self._regress_as_host = False
+        self.create_btn.setText(I18n.tr('create'))
+        self.create_btn.setEnabled(False)  # 房间号不可用，禁用创建按钮
+        self.status_label.setText(I18n.tr('room_code_exists'))
+        self.status_label.setStyleSheet("color: #ff6b6b; font-size: 12px;")
 
     def _on_check_finished(self, rooms: list):
         """检测完成"""
@@ -407,6 +431,22 @@ class CreateRoomDialog(QDialog):
             self.status_label.setStyleSheet("color: #51cf66; font-size: 12px;")
         else:
             # 发现了房间（说明已被占用）
+            # 占用者即本机（宿主 end_id == 本机持久 end_id）→ 无论该被占提示来自
+            # room_found 还是聚合的 discovery_finished，都授权"回归为主机"
+            if self._regress_as_host:
+                return
+            my_id = UserConfig.get_end_id()
+            if any(
+                (r.get('host_id') or '') == my_id
+                for r in rooms if isinstance(r, dict)
+            ):
+                self._regress_as_host = True
+                self.create_btn.setText(I18n.tr('return_as_host'))
+                self.create_btn.setEnabled(True)
+                self.status_label.setText(I18n.tr('room_own_regress'))
+                self.status_label.setStyleSheet("color: #51cf66; font-size: 12px;")
+                return
+            self.create_btn.setText(I18n.tr('create'))
             self.create_btn.setEnabled(False)
             self.status_label.setText(I18n.tr('room_code_exists'))
             self.status_label.setStyleSheet("color: #ff6b6b; font-size: 12px;")

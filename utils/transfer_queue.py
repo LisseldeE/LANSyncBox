@@ -161,6 +161,28 @@ class TransferQueue:
                 if task.get('filename') != filename and not task.get('filename', '').endswith(suffix)
             ])
     
+    def cancel_tasks_by_client(self, client_id: str):
+        """按客户端ID取消该端所有在途/排队的主机直推任务。
+
+        服务端多客户端发送场景的 task_key 形如 "client_id:filename"，按前缀匹配。
+        接收端断开/退出房间时调用：避免发送端继续向已离线的对端推送文件（否则
+        _send_* 会一直打到死 socket，甚至对端重连后残留旧任务）。
+
+        Args:
+            client_id: 客户端ID（"ip:port"）
+        """
+        prefix = client_id + ':'
+        with self.lock:
+            # 设置在途任务的停止标志（_send_* 检查 stop_event 后中止）
+            for task_key, stop_event in list(self.active_tasks.items()):
+                if str(task_key).startswith(prefix):
+                    stop_event.set()
+            # 从排队中移除该端的任务
+            self.queue = deque([
+                task for task in self.queue
+                if not str(task.get('filename', '')).startswith(prefix)
+            ])
+
     def cancel_all_tasks(self):
         """取消所有传输任务"""
         with self.lock:

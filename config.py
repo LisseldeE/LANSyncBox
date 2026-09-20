@@ -270,7 +270,8 @@ class UserConfig:
             "last_announcement_text": "",
             "end_id": "",
             "room_history": [],
-            "default_perm": "rw"
+            "default_perm": "rw",
+            "room_perm": {}  # 每房间最近一次主机下发的本端权限档位（主机离线期间保持只读不放松）
         }
 
         # 首次加载时尝试从旧路径迁移配置
@@ -341,6 +342,27 @@ class UserConfig:
         """设置【新加入连接端】的默认权限并持久化"""
         if perm in ("rw", "ro"):
             cls.set("default_perm", perm)
+
+    @classmethod
+    def get_room_perm(cls, room_code: str) -> str:
+        """获取某房间最近一次主机下发给本端的权限档位（"rw"读写 / "ro"只读）。
+
+        连接端据此在主机离线期间保持只读不放松；无记录或记录非法时回退默认读写。
+        """
+        perms = cls.get("room_perm", {}) or {}
+        perm = (perms or {}).get(room_code, "")
+        return perm if perm in ("rw", "ro") else "rw"
+
+    @classmethod
+    def set_room_perm(cls, room_code: str, perm: str):
+        """记录某房间最近一次主机下发的权限档位并持久化（主机离线时保持生效）"""
+        if not room_code or perm not in ("rw", "ro"):
+            return
+        data = cls.load()
+        perms = dict(data.get("room_perm", {}) or {})
+        perms[room_code] = perm
+        data["room_perm"] = perms
+        cls.save()
 
     @classmethod
     def get_end_id(cls) -> str:

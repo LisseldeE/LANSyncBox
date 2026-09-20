@@ -743,6 +743,11 @@ class FileStateStore(QObject):
         ok, _received, err = pull_file(
             host, port, session_id, token, name, dest,
             msg_type=MessageType.SYNC_PULL_REQ,
+            # 把本 store 的停止事件透传给拉取：退出房间/整体停止时设置 _stop，
+            # pull_file 会在下一次 recv 超时(≤1s) 感知并取消，释放 .part 句柄并删除
+            # 临时文件——否则工作线程会一直占着句柄（直到整体超时或对端关连接），
+            # 导致传输中的临时文件死锁、退出房间无法删除。
+            stop_event=self._stop,
             progress_cb=lambda recv, size: self.pull_progress.emit(name, recv, size),
             overall_timeout=self.PULL_OVERALL_TIMEOUT)
         if ok:

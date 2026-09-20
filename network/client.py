@@ -83,8 +83,10 @@ class SyncClient(QObject):
         self.mode = "sync"
         self.mode_received = False  # 是否已收到主机模式下发（复用连接时用于补偿 UI 状态）
 
-        # 当前权限：认证后由主机端下发（"rw"读写 / "ro"只读），默认读写（向后兼容）
-        self.perm = "rw"
+        # 当前权限：认证后由主机端下发（"rw"读写 / "ro"只读）。
+        # 回退默认读写（向后兼容），但若本房间上次被主机指定为只读，则跨重启/主机
+        # 离线期间加载持久化档位保持只读——不再因无主机下发而放松成读写。
+        self.perm = UserConfig.get_room_perm(self.room_code)
         self.perm_received = False  # 是否已收到主机权限下发（复用连接时用于补偿 UI 状态）
 
         # 心跳探测线程控制：周期性 PING 主机并核对 PONG 回包，判定本端在线/离线
@@ -122,6 +124,14 @@ class SyncClient(QObject):
         # （对端离线后不再每轮超时干等；主机回归经 JOIN/END_INFO 重新登记）。
         # 首位占位主机（end_id=''）永不降级。
         self._fail_counts = {}
+        # 已识别的主机 end_id：来自管理连接上收到的 END_INFO（真主机身份）。
+        # 以此按"身份"而非"IP"回填首位占位，主机多网卡/IP 变化时仍稳定排在候选首位，
+        # 使重连始终"先够主机"，避免主机被挤到列表末尾而错挂到对端上。
+        self._host_id = ""
+        # 控制面"只连主机"待机状态：主机离线时静默待机（静默=不刷端点连接失败日志，
+        # 只提示一次"主机离线，静默待机"）；不再连对端 mgmt，"不互相取暖"。
+        self._host_offline_logged = False   # 是否已就"主机离线，静默待机"提示过（主机回归后复位）
+        self._silent_standby = False        # 是否处于主机静默待机（屏蔽 connect 失败日志）
 
         # 自动重连参数
         self.RECONNECT_BASE = 1.0          # 整轮端点试连失败后的初始退避（秒）
@@ -203,7 +213,10 @@ class SyncClient(QObject):
             self.socket = None
             if self._reconnect_active:
                 # 自动重连试连失败：节流去重（同端点窗口内仅记一次，防断连风暴
-                # 刷屏），交重连循环试下一端点
+                # 刷屏），交重连循环试下一端点。主机静默待机期（_silent_standby）
+                # 静默：已提示过"主机离线"，不再逐轮刷"端点连接失败"。
+                if self._silent_standby:
+                    return False
                 now = time.time()
                 key = f"{host}:{port}"
                 if key != self._last_fail_key \
@@ -312,7 +325,7 @@ class SyncClient(QObject):
             with self._ping_lock:
                 last = self._last_pong
             if last is not None and time.time() - last > self.OFFLINE_TIMEOUT:
-                self.log_message.emit("主机心跳超时，判定离线，切换下一端点")
+                self.log_message.emit("主机心跳超时，判定离线，进入主机待机")
                 self._handle_management_lost()
                 break
             try:
@@ -344,54 +357,76 @@ class SyncClient(QObject):
             self._reconnect_wake.set()
 
     def _reconnect_loop(self):
-        """自动重连循环：无管理连接时按序试连可用端点（一个不可用立即试下一个，
-        整轮失败 1s→30s 退避）；已保持管理连接且挂接非主机端点时，每 10s 回探
-        列表首位（主机），主机回归立即切回主机管理连接。"""
+        """自动重连循环：控制面只连主机（_host_candidate）。
+
+        - 已保持管理连接且挂在真主机 → 仅等待不探活；
+        - 挂在非主机对端（异常态，不应发生）→ 不互相取暖，立即丢开对端管理连接，
+          回到主机静默待机（只够主机）；
+        - 无管理连接 → 只试主机候选；连不上则静默待机（固定 10s 回探，不连对端，
+          不叠加 30s 退避，也不刷"端点连接失败"）。"""
         while self.running and not self._reconnect_stop.is_set():
             try:
                 if self.socket and self.authenticated:
-                    # 已保持管理连接：仅当挂接非主机端点时周期回探主机
+                    # 已保持管理连接：确认挂在主机（index0 恒为主机占位），挂在非主机
+                    # 对端则丢开回待机（不互相取暖）
                     idx = self._current_ep_index()
                     if idx == 0 or idx == -1:
-                        # 已挂主机 / 无法识别挂接端点：仅等待不探活
+                        # 已挂主机（含 end_id='' 的占位主机） / 无法识别挂接端点：
+                        # 仅等待不探活
+                        self._silent_standby = False
                         self._reconnect_wake.wait(self.PREFERRED_REPROBE_INTERVAL)
                         self._reconnect_wake.clear()
                         continue
-                    head = self._best_endpoint(0)
-                    if head and self._probe_endpoint(head):
-                        self.log_message.emit("主机已回归，切换回主机管理连接")
-                        self._close_mgmt_socket()
-                        continue
-                    self._reconnect_wake.wait(self.PREFERRED_REPROBE_INTERVAL)
-                    self._reconnect_wake.clear()
-                    continue
-                # 无管理连接：按序试连端点
-                eps = self._endpoint_snapshot()
-                if not eps:
+                    # 挂在非主机对端（end_id 非空且 != 主机）：不互相取暖，立即丢开
+                    self.log_message.emit(
+                        "已在非主机端点，释放对端连接，回主机静默待机")
+                    self._close_mgmt_socket()
                     self._report_offline_once()
-                    self._reconnect_wake.wait(self.RECONNECT_BASE)
-                    self._reconnect_wake.clear()
+                    self._host_offline_logged = True
+                    self._enter_host_standby()
                     continue
-                if self._try_endpoints(eps):
+                # 无管理连接：只连主机
+                self._silent_standby = True
+                host = self._host_candidate()
+                if not host or not int(host.get('mgmt_port', 0) or 0):
+                    self._enter_host_standby()
                     continue
-                self._report_offline_once()
-                self._backoff = min(self._backoff * 2, self.RECONNECT_MAX)
-                self._reconnect_wake.wait(self._backoff)
-                self._reconnect_wake.clear()
+                if self._try_attach(host):
+                    # 主机回归：复位待机标志，管理连接已挂主机
+                    self._host_offline_logged = False
+                    self._silent_standby = False
+                    self._backoff = self.RECONNECT_BASE
+                    continue
+                # 主机连不上：静默待机，周期重探（不连对端）
+                self._enter_host_standby()
             except Exception:
                 pass
 
-    def _try_endpoints(self, eps: list) -> bool:
-        """按序试连端点列表：一个不可用立即试下一个；首个成功返回 True。"""
-        for ep in eps:
-            if self._reconnect_stop.is_set() or not self.running:
-                return False
-            try:
-                if self._try_attach(ep):
-                    return True
-            except Exception:
-                continue
-        return False
+    def _host_candidate(self) -> Optional[dict]:
+        """主机候选：控制面唯一允许连接的目标（真主机）。
+
+        - 已识别主机身份 _host_id → 列表内 end_id==_host_id 的端点；
+        - 未知身份 → 首位占位（end_id=='' 的原始主机）。
+        对端 end_id 非空且 !=_host_id 永不作管理候选 —— 控制面只连主机。"""
+        if self._host_id:
+            with self._ep_lock:
+                for ep in self._endpoint_list:
+                    if ep.get('end_id') == self._host_id:
+                        return dict(ep)
+            return None  # 主机不在列表：静默待机
+        return self._best_endpoint(0)
+
+    def _enter_host_standby(self):
+        """进入/维持主机静默待机：固定间隔重探主机，只提示一次"主机离线"。
+
+        待机期屏蔽 connect 失败日志（_silent_standby=True），避免刷屏。"""
+        self._report_offline_once()
+        if not self._host_offline_logged:
+            self._host_offline_logged = True
+            self.log_message.emit("主机离线，静默待机，仅等待主机回归")
+        self._silent_standby = True
+        self._reconnect_wake.wait(self.PREFERRED_REPROBE_INTERVAL)
+        self._reconnect_wake.clear()
 
     def _try_attach(self, ep: dict) -> bool:
         """试连单个端点（管理连接）：TCP 建连 + 等待认证结果。
@@ -431,7 +466,8 @@ class SyncClient(QObject):
         end_id = ep.get('end_id', '')
         with self._ep_lock:
             self._fail_counts[end_id] = self._fail_counts.get(end_id, 0) + 1
-            if (end_id and self._fail_counts[end_id] >= self.FAIL_DROP_LIMIT
+            if (end_id and end_id != self._host_id
+                    and self._fail_counts[end_id] >= self.FAIL_DROP_LIMIT
                     and len(self._endpoint_list) > 1):
                 self._endpoint_list = [
                     e for e in self._endpoint_list if e.get('end_id') != end_id
@@ -497,12 +533,18 @@ class SyncClient(QObject):
                 'mgmt_port': int(port or 0),
             }]
         self._attached_ep = None
+        self._host_id = ""  # 重置后主机身份未知，待首条 END_INFO 重新识别
+        self._host_offline_logged = False  # 手动重连复位：下次离线仍提示一次
+        self._silent_standby = False
 
     def _upsert_endpoint(self, info: dict):
         """登记/更新可用端点（来自 END_INFO/MESH_PEER_LIST/MESH_PEER_JOIN）。
 
-        按 end_id 匹配合并（非空字段覆盖）；end_id 为空或本端跳过；新端点若与
-        首位占位（原主机）同 ip 则回填占位，否则追加到列表尾部（保持首位=主机）。
+        按 end_id 匹配合并（非空字段覆盖）；end_id 为空或本端跳过。新端点登记：
+        - 若其 end_id 是本端已识别的主机 _host_id → 按"身份"回填/更新首位占位
+          （无论 IP 是否变化，主机稳定排在首位，重连先够主机）。
+        - 若字段 IP 与首位占位（原主机）一致，且在获知主机身份前 → 回填占位并记录身份。
+        - 否则视为普通对端追加到列表尾部（保持首位=主机）。
         """
         if not isinstance(info, dict):
             return
@@ -518,15 +560,31 @@ class SyncClient(QObject):
         }
         with self._ep_lock:
             self._fail_counts.pop(end_id, None)  # 重新登记 → 重置失败计数
+
+            # 1) 已识别的真主机：按 end_id 身份稳定放在首位占位，即使 IP 已变
+            if end_id == self._host_id:
+                if self._endpoint_list and not self._endpoint_list[0].get('end_id'):
+                    # 占位转正：原位合并且补上身份
+                    self._endpoint_list[0] = self._merge_endpoint(self._endpoint_list[0], entry)
+                for i, ep in enumerate(self._endpoint_list):
+                    if ep.get('end_id') == end_id:
+                        self._endpoint_list[i] = self._merge_endpoint(ep, entry)
+                        return
+                self._endpoint_list.insert(0, entry)  # 理论不会到：兜底前置为 0 号
+                return
+
+            # 2) 常规：按 end_id 合并已登记端点
             for i, ep in enumerate(self._endpoint_list):
                 if ep.get('end_id') == end_id:
                     self._endpoint_list[i] = self._merge_endpoint(ep, entry)
                     return
-            # 新端点：与首位占位同主机（ip 一致）→ 回填占位（主机回归登记）；
-            # 否则追加到列表尾部
+
+            # 3) 新端点：与首位占位同 ip（尚未获知主机身份时的首连主机）→ 回填占位并记录身份；
+            #    否则追加到列表尾部（保持首位=主机）
             for i, ep in enumerate(self._endpoint_list):
                 if not ep.get('end_id') and entry.get('ip') == ep.get('ip'):
                     self._endpoint_list[i] = self._merge_endpoint(ep, entry)
+                    self._host_id = end_id
                     return
             self._endpoint_list.append(entry)
 
@@ -882,6 +940,8 @@ class SyncClient(QObject):
                         'ip': self.host_ip or '',
                         'mesh_port': int(content.get('mesh_port', 0) or 0),
                     })
+                    # END_INFO 来自管理连接上的真主机：按身份稳定其首位排序，IP 变化不失位
+                    self._host_id = end_id
                     self._upsert_endpoint({
                         'end_id': end_id,
                         'name': content.get('name', ''),
@@ -945,13 +1005,17 @@ class SyncClient(QObject):
         """确保数据平面就绪：mesh/distributor/file_state_store（已存在则保留，
         仅 mesh 停止时重新 start）。故障切换重复调用不重建、不重连信号。"""
         if self.mesh is None:
-            self.mesh = MeshManager(parent=self)
+            # 注意：此处运行在接收线程，而 SyncClient 的线程亲和在 UI 线程；
+            # 不能把 mesh/distributor/store 作为 self 的子对象创建（"Cannot create
+            # children for a parent that is in a different thread"）。故 parent=None，
+            # 由本端自持引用装卸载（disconnect 显式 stop），避免跨线程挂父导致告警。
+            self.mesh = MeshManager()
             self.mesh.log_message.connect(self.log_message)
             self.mesh.start()
             # 分发链路引擎：本地操作 → 网状直连传播；收到信号去重/应用/转发
             self.distributor = Distributor(
                 UserConfig.get_end_id(), self.sync_folder,
-                mesh=self.mesh, parent=self)
+                mesh=self.mesh)
             self.distributor.log_message.connect(self.log_message)
             self.distributor.signal_applied.connect(self._on_distributor_applied)
             self.mesh.set_message_handler(self._on_mesh_message)
@@ -959,7 +1023,7 @@ class SyncClient(QObject):
             self.file_state_store = FileStateStore(
                 UserConfig.get_end_id(), self.sync_folder,
                 mesh=self.mesh, distributor=self.distributor,
-                provider=self._file_provider, parent=self)
+                provider=self._file_provider)
             # 跨通道互斥（阶段 6）：同一文件被主机直推通道(A)经 FILE_BEGIN..FILE_END
             # 正在接收时，自同步拉取(B)应让位，避免同文件两通道重复投递/字节翻倍。
             self.file_state_store.set_host_push_guard(
@@ -1198,6 +1262,8 @@ class SyncClient(QObject):
             self.transfer_queue.cancel_all_tasks()
         self.perm = new_perm
         self.perm_received = True
+        # 持久化本房间权限档位：主机离线期间据此保持只读不放松，跨重启亦生效
+        UserConfig.set_room_perm(self.room_code, new_perm)
         # 阶段 4：只读端不发起自同步推送（不供他端拉取其文件），仅单向下拉
         if self.file_state_store:
             self.file_state_store.set_readonly(new_perm == "ro")
@@ -1236,6 +1302,12 @@ class SyncClient(QObject):
                 # 启动会因跨线程 queued 信号产生竞态，UI 可能读到未就绪的端口而回落默认值。
                 self._start_mesh_and_send_end_info()
                 self.connected.emit()
+                # 主机离线期间保持先前只读档位：若主机此刻未下发权限（离线/挂其他端点），
+                # 仍按本机持久化档位落定只读态（禁自同步推送 + UI 只读），不放松成读写。
+                if not self.perm_received and self.perm == "ro":
+                    if self.file_state_store:
+                        self.file_state_store.set_readonly(True)
+                    self.perm_changed.emit("ro")
                 self.log_message.emit("验证成功")
                 # 认证成功：心跳计时起点（此后周期 PING 主机并核对 PONG 判定在线/离线）
                 with self._ping_lock:

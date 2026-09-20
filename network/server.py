@@ -1810,7 +1810,14 @@ class SyncServer(QObject):
                 except Exception:
                     pass
                 del self.clients[client_id]
-        
+
+        # 接收端断开：取消该端所有在途/排队的主机直推任务，避免发送端继续向已离线
+        # 对端推送文件（_send_* 会打到死 socket，且对端重连后可能残留旧任务重复推）。
+        try:
+            self.transfer_queue.cancel_tasks_by_client(client_id)
+        except Exception:
+            pass
+
         self.client_disconnected.emit(client_id)
 
         # 去中心化：端离线 → 通告其余端拆除直连 + 主机侧拆除网状直连。

@@ -753,10 +753,15 @@ class JoinRoomDialog(QDialog):
             # 保存房间号与目标 IP
             self._pending_room_code = room_code
             self._manual_ip = host_address
+            # 定向探测标识 + 广播回退只做一次（防定向→广播无限叠加）
+            self._direct_probe = True
+            self._fallback_broadcast_done = False
 
             # 定向探测该 IP 上是否存在该房间号（1.5秒超时）
             self.discovery.discover_room_at(host_address, room_code, timeout=1.5)
             return
+
+        self._direct_probe = False
         
         # 没有指定主机地址，进行房间发现
         # 显示状态：正在搜索房间
@@ -830,7 +835,22 @@ class JoinRoomDialog(QDialog):
             return
         self._is_checking = False
         if not rooms:
-            # 没有找到房间
+            # 定向探测未命中且未做过广播回退：历史/发现者 IP 可能已过期（房间换了
+            # IP）或定向一次性 UDP 丢包。清掉手动 IP 回退广播重扫一次，按房间号重定位
+            # 新 IP——否则会误报"未找到房间"并把连接按钮禁用，用户只能退出重进才连上。
+            if getattr(self, '_direct_probe', False) \
+                    and not getattr(self, '_fallback_broadcast_done', False):
+                self._fallback_broadcast_done = True
+                self._direct_probe = False
+                # 隐藏式清空地址框（不触发 textChanged 重扫，避免搞出探测叠加）
+                self.host_edit.blockSignals(True)
+                self.host_edit.clear()
+                self.host_edit.blockSignals(False)
+                self.host_address = ""
+                self.discovered_host = ""
+                self._check_room_exists()  # 空 host → 进入广播 discover_room
+                return
+            # 广播（或已回退）仍未找到：判未找到并禁用按钮
             self._show_status(I18n.tr('room_not_found'), color='#ff6b6b')
             self._room_checked = False
             self.connect_btn.setEnabled(False)
