@@ -82,5 +82,5 @@
 
 | OS | Architecture | Mirror | Link |
 |:---|:---|:---|:---|
-| Windows | x64 | amd64 | [**Download**](https://github.com/LisseldeE/LANSyncBox/releases/download/pro-R1.1.0.0/LANSyncBoxPro_Setup.exe) |
-| Linux | x64 | amd64 | [**Download**](https://github.com/LisseldeE/LANSyncBox/releases/download/pro-R1.1.0.0/lansyncboxpro_amd64.deb) |
+| Windows | x64 | GitHub | [**Download**](https://github.com/LisseldeE/LANSyncBox/releases/download/pro-R1.1.0.0/LANSyncBoxPro_Setup.exe) |
+| Linux | x64 | GitHub | [**Download**](https://github.com/LisseldeE/LANSyncBox/releases/download/pro-R1.1.0.0/lansyncboxpro_amd64.deb) |

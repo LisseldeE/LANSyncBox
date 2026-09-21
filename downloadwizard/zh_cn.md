@@ -82,5 +82,5 @@
 
 | 支持系统 | 支持架构 | 获取方式 | 链接 |
 |:---|:---|:---|:---|
-| Windows | x64 | amd64 | [**下载**](https://github.com/LisseldeE/LANSyncBox/releases/download/pro-R1.1.0.0/LANSyncBoxPro_Setup.exe) |
-| Linux | x64 | amd64 | [**下载**](https://github.com/LisseldeE/LANSyncBox/releases/download/pro-R1.1.0.0/lansyncboxpro_amd64.deb) |
+| Windows | x64 | GitHub | [**下载**](https://github.com/LisseldeE/LANSyncBox/releases/download/pro-R1.1.0.0/LANSyncBoxPro_Setup.exe) |
+| Linux | x64 | GitHub | [**下载**](https://github.com/LisseldeE/LANSyncBox/releases/download/pro-R1.1.0.0/lansyncboxpro_amd64.deb) |
