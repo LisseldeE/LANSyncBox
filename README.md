@@ -91,12 +91,10 @@ LANSyncBox Pro 是一款跨平台、专注局域网多人协作的文件实时�
 </p>
 
 <p align="center">
-  <a href="https://github.com/LisseldeE/LANSyncBox/releases">
+  <a href="https://github.com/LisseldeE/LANSyncBox/blob/pro/downloadwizard/zh_cn.md#LANSyncBox Pro">
     <img src="https://img.shields.io/badge/GitHub%20Releases-Download-181717?style=for-the-badge&logo=github&logoColor=white" alt="GitHub Releases"/>
   </a>
 </p>
-
-> 当前暂时移除 Gitee 镜像下载，如需重新加入可在社交平台反馈。
 
 ## 使用方法
 
