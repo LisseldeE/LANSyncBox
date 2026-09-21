@@ -78,16 +78,10 @@ LANSyncBox 是一款跨平台、专为局域网场景设计的文件实时同步
 </p>
 
 <p align="center">
-  <a href="https://github.com/LisseldeE/LANSyncBox/releases">
-    <img src="https://img.shields.io/badge/GitHub-Releases-181717?style=flat-square&logo=github&logoColor=white" alt="GitHub Releases">
-  </a>
-  &nbsp;&nbsp;
-  <a href="https://gitee.com/Lisselde_E/LANSyncBox/releases">
-    <img src="https://img.shields.io/badge/Gitee-镜像下载-C71D23?style=flat-square&logo=gitee&logoColor=white" alt="Gitee 镜像下载">
+  <a href="https://github.com/LisseldeE/LANSyncBox/blob/pro/downloadwizard/zh_cn.md#LANSyncBox-标准版">
+    <img src="https://img.shields.io/badge/GitHub%20Releases-Download-181717?style=for-the-badge&logo=github&logoColor=white" alt="GitHub Releases"/>
   </a>
 </p>
-
-> 💡 国内用户推荐使用 Gitee 镜像下载
 
 ## 使用方法
 

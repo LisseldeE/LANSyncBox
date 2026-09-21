@@ -78,16 +78,10 @@ LANSyncBox is a cross-platform file synchronization tool built specifically for 
 </p>
 
 <p align="center">
-  <a href="https://github.com/LisseldeE/LANSyncBox/releases">
-    <img src="https://img.shields.io/badge/GitHub-Releases-181717?style=flat-square&logo=github&logoColor=white" alt="GitHub Releases">
-  </a>
-  &nbsp;&nbsp;
-  <a href="https://gitee.com/Lisselde_E/LANSyncBox/releases">
-    <img src="https://img.shields.io/badge/Gitee-Mirror-C71D23?style=flat-square&logo=gitee&logoColor=white" alt="Gitee Mirror">
+  <a href="https://github.com/LisseldeE/LANSyncBox/blob/pro/downloadwizard/en.md#LANSyncBox-standard">
+    <img src="https://img.shields.io/badge/GitHub%20Releases-Download-181717?style=for-the-badge&logo=github&logoColor=white" alt="GitHub Releases"/>
   </a>
 </p>
-
-> 💡 Recommended for users in China: Gitee Mirror
 
 ## Usage
 
