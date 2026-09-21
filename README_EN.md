@@ -91,7 +91,7 @@ LANSyncBox Pro is a cross-platform, LAN-focused real-time file synchronization t
 </p>
 
 <p align="center">
-  <a href="https://github.com/LisseldeE/LANSyncBox/blob/pro/downloadwizard/en.md#LANSyncBox Pro">
+  <a href="https://github.com/LisseldeE/LANSyncBox/blob/pro/downloadwizard/en.md#LANSyncBox-Pro">
     <img src="https://img.shields.io/badge/GitHub%20Releases-Download-181717?style=for-the-badge&logo=github&logoColor=white" alt="GitHub Releases"/>
   </a>
 </p>

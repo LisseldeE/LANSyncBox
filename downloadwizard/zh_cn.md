@@ -21,6 +21,8 @@
 
 > 最新构建
 
+[![从 Microsoft Store 获取](https://get.microsoft.com/images/zh-cn%20dark.svg)](https://apps.microsoft.com/detail/9nsjvp7fxkm3?referrer=appbadge&mode=full)
+
 | 支持系统 | 支持架构 | 获取方式 | 链接 |
 |:---|:---|:---|:---|
 | Windows | x64 | Gitee（推荐国内用户） | [**下载**](https://gitee.com/Lisselde_E/LANSyncBox/releases/download/R7.1.6.0/LANSyncBox_Setup.exe) |
@@ -67,6 +69,8 @@
 ### [R1.1.0.0](https://github.com/LisseldeE/LANSyncBox/releases/tag/pro-R1.1.0.0)
 
 > 最新构建
+
+[![从 Microsoft Store 获取](https://get.microsoft.com/images/zh-cn%20dark.svg)](https://apps.microsoft.com/detail/9n4g6w3rm3q6?referrer=appbadge&mode=full)
 
 | 支持系统 | 支持架构 | 获取方式 | 链接 |
 |:---|:---|:---|:---|

@@ -21,6 +21,8 @@
 
 > Latest build
 
+[![从 Microsoft Store 获取](https://get.microsoft.com/images/en-us%20dark.svg)](https://apps.microsoft.com/detail/9nsjvp7fxkm3?referrer=appbadge&mode=full)
+
 | OS | Architecture | Mirror | Link |
 |:---|:---|:---|:---|
 | Windows | x64 | Gitee (recommended in CN) | [**Download**](https://gitee.com/Lisselde_E/LANSyncBox/releases/download/R7.1.6.0/LANSyncBox_Setup.exe) |
@@ -67,6 +69,8 @@
 ### [R1.1.0.0](https://github.com/LisseldeE/LANSyncBox/releases/tag/pro-R1.1.0.0)
 
 > Latest build
+
+[![从 Microsoft Store 获取](https://get.microsoft.com/images/en-us%20dark.svg)](https://apps.microsoft.com/detail/9n4g6w3rm3q6?referrer=appbadge&mode=full)
 
 | OS | Architecture | Mirror | Link |
 |:---|:---|:---|:---|
