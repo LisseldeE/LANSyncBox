@@ -30,6 +30,8 @@
 | Linux | x64 | Gitee（推荐国内用户） | [**下载**](https://gitee.com/Lisselde_E/LANSyncBox/releases/download/R7.1.6.0/lansyncbox_amd64.deb) |
 | Linux | x64 | GitHub | [**下载**](https://github.com/LisseldeE/LANSyncBox/releases/download/R7.1.6.0/lansyncbox_amd64.deb) |
 
+---
+
 ### [R7.1.5.0](https://github.com/LisseldeE/LANSyncBox/releases/tag/R7.1.5.0)
 
 | 支持系统 | 支持架构 | 获取方式 | 链接 |
@@ -39,6 +41,8 @@
 | Linux | x64 | Gitee（推荐国内用户） | [**下载**](https://gitee.com/Lisselde_E/LANSyncBox/releases/download/R7.1.5.0/lansyncbox_amd64.deb) |
 | Linux | x64 | GitHub | [**下载**](https://github.com/LisseldeE/LANSyncBox/releases/download/R7.1.5.0/lansyncbox_amd64.deb) |
 
+---
+
 ### [R7.1.4.0](https://github.com/LisseldeE/LANSyncBox/releases/tag/R7.1.4.0)
 
 | 支持系统 | 支持架构 | 获取方式 | 链接 |
@@ -46,12 +50,16 @@
 | Windows | x64 | Gitee（推荐国内用户） | [**下载**](https://gitee.com/Lisselde_E/LANSyncBox/releases/download/R7.1.4.0/LANSyncBox.exe) |
 | Windows | x64 | GitHub | [**下载**](https://github.com/LisseldeE/LANSyncBox/releases/download/R7.1.4.0/LANSyncBox.exe) |
 
+---
+
 ### [R7.1.2.0](https://github.com/LisseldeE/LANSyncBox/releases/tag/R7.1.2.0)
 
 | 支持系统 | 支持架构 | 获取方式 | 链接 |
 |:---|:---|:---|:---|
 | Windows | x64 | Gitee（推荐国内用户） | [**下载**](https://gitee.com/Lisselde_E/LANSyncBox/releases/download/R7.1.2.0/LANSyncBox.exe) |
 | Windows | x64 | GitHub | [**下载**](https://github.com/LisseldeE/LANSyncBox/releases/download/R7.1.2.0/LANSyncBox.exe) |
+
+---
 
 ### [R7.1.1.0](https://github.com/LisseldeE/LANSyncBox/releases/tag/R7.1.1.0)
 

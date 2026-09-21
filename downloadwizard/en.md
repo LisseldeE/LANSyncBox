@@ -30,6 +30,8 @@
 | Linux | x64 | Gitee (recommended in CN) | [**Download**](https://gitee.com/Lisselde_E/LANSyncBox/releases/download/R7.1.6.0/lansyncbox_amd64.deb) |
 | Linux | x64 | GitHub | [**Download**](https://github.com/LisseldeE/LANSyncBox/releases/download/R7.1.6.0/lansyncbox_amd64.deb) |
 
+---
+
 ### [R7.1.5.0](https://github.com/LisseldeE/LANSyncBox/releases/tag/R7.1.5.0)
 
 | OS | Architecture | Mirror | Link |
@@ -39,6 +41,8 @@
 | Linux | x64 | Gitee (recommended in CN) | [**Download**](https://gitee.com/Lisselde_E/LANSyncBox/releases/download/R7.1.5.0/lansyncbox_amd64.deb) |
 | Linux | x64 | GitHub | [**Download**](https://github.com/LisseldeE/LANSyncBox/releases/download/R7.1.5.0/lansyncbox_amd64.deb) |
 
+---
+
 ### [R7.1.4.0](https://github.com/LisseldeE/LANSyncBox/releases/tag/R7.1.4.0)
 
 | OS | Architecture | Mirror | Link |
@@ -46,12 +50,16 @@
 | Windows | x64 | Gitee (recommended in CN) | [**Download**](https://gitee.com/Lisselde_E/LANSyncBox/releases/download/R7.1.4.0/LANSyncBox.exe) |
 | Windows | x64 | GitHub | [**Download**](https://github.com/LisseldeE/LANSyncBox/releases/download/R7.1.4.0/LANSyncBox.exe) |
 
+---
+
 ### [R7.1.2.0](https://github.com/LisseldeE/LANSyncBox/releases/tag/R7.1.2.0)
 
 | OS | Architecture | Mirror | Link |
 |:---|:---|:---|:---|
 | Windows | x64 | Gitee (recommended in CN) | [**Download**](https://gitee.com/Lisselde_E/LANSyncBox/releases/download/R7.1.2.0/LANSyncBox.exe) |
 | Windows | x64 | GitHub | [**Download**](https://github.com/LisseldeE/LANSyncBox/releases/download/R7.1.2.0/LANSyncBox.exe) |
+
+---
 
 ### [R7.1.1.0](https://github.com/LisseldeE/LANSyncBox/releases/tag/R7.1.1.0)
 
