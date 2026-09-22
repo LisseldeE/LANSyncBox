@@ -188,6 +188,7 @@ class I18n:
             "clipboard_deliver": "投递",
             "clipboard_deliver_done": "投递完成",
             "clipboard_deliver_partial": "投递完成，{fail} 个失败",
+            "clipboard_deliver_cancelled": "投递已取消",
             "clipboard_deliver_send": "发送",
             "clipboard_deliver_sent": "投递完成",
             "clipboard_deliver_send_fail": "投递失败",
@@ -195,6 +196,7 @@ class I18n:
             "sync_action": "同步",
             "sync_transfer_done": "完成",
             "sync_transfer_fail": "失败",
+            "sync_transfer_cancel": "已取消",
             # 自同步进度条动作（恢复旧版"发送/接收"显示逻辑）
             "sync_transfer_send": "发送",
             "sync_transfer_receive": "接收",
@@ -500,6 +502,7 @@ class I18n:
             "clipboard_deliver": "Deliver",
             "clipboard_deliver_done": "Delivered",
             "clipboard_deliver_partial": "Delivered, {fail} failed",
+            "clipboard_deliver_cancelled": "Delivery cancelled",
             "clipboard_deliver_send": "Sending",
             "clipboard_deliver_sent": "Delivered",
             "clipboard_deliver_send_fail": "Deliver failed",
@@ -507,6 +510,7 @@ class I18n:
             "sync_action": "Sync",
             "sync_transfer_done": "Done",
             "sync_transfer_fail": "Failed",
+            "sync_transfer_cancel": "Cancelled",
             # Sync progress bar actions (restore old "Send/Receive" display)
             "sync_transfer_send": "Sending",
             "sync_transfer_receive": "Receiving",

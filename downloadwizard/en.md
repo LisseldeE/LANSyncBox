@@ -7,10 +7,19 @@
 </div>
 
 <p align="center">
-  <a href="#LANSyncBox Standard">LANSyncBox</a> |
-  <a href="#LANSyncBox Pro">LANSyncBox Pro</a>
+  <a href="#LANSyncBox-Standard">LANSyncBox</a> |
+  <a href="#LANSyncBox-Pro">LANSyncBox Pro</a>
 </p>
 
+---
+This page lists download entries for two editions. Choose based on your needs:
+
+- **LANSyncBox Standard**: a stable, mature release for most daily sync scenarios.
+- **LANSyncBox Pro**: an advanced edition that adds cross-device copy-paste (delivery), collection mode, finer-grained permission control, and is built on a brand-new decentralized architecture.
+
+For a detailed feature comparison, please refer to each edition's project page. Once you have decided, fetch the corresponding installer from the section below.
+
+---
 ## LANSyncBox Standard
 
 <p align="center">
@@ -31,6 +40,9 @@
 | Linux | x64 | GitHub | [**Download**](https://github.com/LisseldeE/LANSyncBox/releases/download/R7.1.6.0/lansyncbox_amd64.deb) |
 
 ---
+
+<details>
+<summary>Older releases (click to expand)</summary>
 
 ### [R7.1.5.0](https://github.com/LisseldeE/LANSyncBox/releases/tag/R7.1.5.0)
 
@@ -67,6 +79,8 @@
 |:---|:---|:---|:---|
 | Windows | x64 | Gitee (recommended in CN) | [**Download**](https://gitee.com/Lisselde_E/LANSyncBox/releases/download/R7.1.1.0/LANSyncBox.exe) |
 | Windows | x64 | GitHub | [**Download**](https://github.com/LisseldeE/LANSyncBox/releases/download/R7.1.1.0/LANSyncBox.exe) |
+
+</details>
 
 ## LANSyncBox Pro
 

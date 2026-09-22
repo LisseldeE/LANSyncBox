@@ -600,9 +600,8 @@ class MainWindow(QMainWindow):
         dialog.exec()
 
     def _on_update_clicked(self, event):
-        """点击提醒标签：打开下载落地页（中文 Gitee / 其他 GitHub）"""
-        releases_url = Config.GITEE_RELEASES if I18n.get_language() == "zh_CN" else Config.GITHUB_RELEASES
-        QDesktopServices.openUrl(QUrl(releases_url))
+        """点击提醒标签：打开下载向导页（按语言选中/英文版）"""
+        QDesktopServices.openUrl(QUrl(Config.get_download_wizard_url(I18n.get_language())))
     
     def on_about(self):
         """关于"""

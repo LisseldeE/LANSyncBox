@@ -133,10 +133,16 @@ class _ElideLabel(QLabel):
 class _CheckMark(QWidget):
     """状态图标：绿色圆底对钩（完成态，描边随进度生长）。"""
 
-    def __init__(self, size=28, parent=None):
+    def __init__(self, size=28, color="#51cf66", parent=None):
         super().__init__(parent)
         self.setFixedSize(size, size)
         self._progress = 0.0
+        self._color = QColor(color)
+
+    def set_color(self, color: str):
+        """设置对钩底色（完成=绿，取消=红）。"""
+        self._color = QColor(color)
+        self.update()
 
     def get_progress(self) -> float:
         return self._progress
@@ -153,7 +159,7 @@ class _CheckMark(QWidget):
         p.setPen(Qt.NoPen)
         w, h = self.width(), self.height()
         # 圆底
-        p.setBrush(QColor("#51cf66"))
+        p.setBrush(self._color)
         p.drawEllipse(QRectF(0, 0, w, h))
 
         # 对钩折线路径
@@ -189,6 +195,9 @@ class _CapsuleItem(QFrame):
     # Linux（IS_LINUX）：可用态胶囊上的"接收"按钮被点击 → 请求选择保存位置后接收。
     # 仅 IS_LINUX 创建该按钮，Windows 无此按钮也不会发射该信号。
     receive_requested = Signal()
+    # 传输态：胶囊右侧红色"取消"按钮被点击 → 请求取消当前投递（接收）任务。
+    # 仅在传输态展示（begin_transfer 显示，其余状态隐藏），无论平台。
+    cancel_requested = Signal()
     # 冲突询问（目标已有同名文件）用户决策：True=替换(覆盖)，False=取消(跳过)
     confirm_chosen = Signal(bool)
     # 几何变化（展开帧/宽度动画/隐藏）→ 协调者重排整组
@@ -333,7 +342,11 @@ class _CapsuleItem(QFrame):
         self._bar.setRange(0, 1000)
         self._bar.setValue(0)
         self._bar.setTextVisible(True)
-        self._bar.setFixedWidth(280)
+        # 进度条宽度须保证「整体自然宽度 ≤ 屏幕上限」：内容钉在 full_w = min(自然宽,
+        # screen_max)，若自然宽超上限，进度条一出现便挤压标题（320→300）。此前传输
+        # 自然宽约 712 落在窄屏上限(752)内；右侧新增"取消"按钮(~60px)后自然宽涨到
+        # ~772 越界，故同步收窄进度条，让标题省略宽度在进度条显隐时恒定。
+        self._bar.setFixedWidth(250)
         self._bar.setFixedHeight(20)
         self._bar.set_text_color("#94a3b8")
         self._bar.setVisible(False)
@@ -355,6 +368,16 @@ class _CapsuleItem(QFrame):
         self._cancel_btn.clicked.connect(lambda: self.confirm_chosen.emit(False))
         self._cancel_btn.setVisible(False)
         inner.addWidget(self._cancel_btn, 0, Qt.AlignVCenter)
+
+        # 传输"取消"按钮（接收进度条旁的最右侧，红色白字）：仅传输态展示，
+        # 点击请求取消当前投递（接收）任务。独立于上面的询问"取消"按钮（询问态）。
+        self._fetch_cancel_btn = QPushButton("取消", self._content)
+        self._fetch_cancel_btn.setFixedHeight(22)
+        self._fetch_cancel_btn.setCursor(Qt.PointingHandCursor)
+        self._fetch_cancel_btn.setFocusPolicy(Qt.NoFocus)
+        self._fetch_cancel_btn.clicked.connect(self.cancel_requested.emit)
+        self._fetch_cancel_btn.setVisible(False)
+        inner.addWidget(self._fetch_cancel_btn, 0, Qt.AlignVCenter)
 
         # 尾部弹性伸缩项：进度条隐藏（可用态 / 展开动画早期）时吸收 inner 布局的
         # 多余空间，文本区不被拉宽——标题省略长度不随进度条显隐跳动
@@ -494,6 +517,8 @@ class _CapsuleItem(QFrame):
         self._queue_waiting = 0
         self._transfer_hint = f"正在投递  {format_bytes(self._total_bytes)}"
         self._transferring = True
+        # 传输态展示红色"取消"按钮（最右侧，随进度条一起出现）
+        self._fetch_cancel_btn.setVisible(True)
         self._present()
         self._sync_bar_visibility()
 
@@ -559,11 +584,36 @@ class _CapsuleItem(QFrame):
         self._bar.setValue(1000)
         self._bar.setVisible(False)
         self._hint.setVisible(False)
+        self._fetch_cancel_btn.setVisible(False)
+        self._icon.set_color("#51cf66")
         self._icon.setVisible(True)
         self._queue_waiting = 0
         self._transferring = False
         # 完成态收起提示与进度条，内容整体淡入 + 长度收缩；高度保持不变，
         # 避免收起进度条/提示后胶囊高度被重新测量而明显变窄
+        self._present(keep_height=True)
+        self._check_anim.stop()
+        self._check_anim.setStartValue(0.0)
+        self._check_anim.setEndValue(1.0)
+        self._check_anim.start()
+
+    def show_cancelled(self):
+        """取消态 —— 取消当前投递：样式参考完成态，仅以红色对钩 + "投递已取消"
+        文字区分，停留片刻后自动收起。
+
+        进度条与"取消"按钮同时收起，播放对钩动画后淡出（复用完成态生命周期）。
+        """
+        if not self.isVisible():
+            return
+        self._bar.setValue(0)
+        self._bar.setVisible(False)
+        self._hint.setVisible(False)
+        self._fetch_cancel_btn.setVisible(False)
+        self._queue_waiting = 0
+        self._transferring = False
+        self._title.setText("投递已取消")
+        self._icon.set_color("#f03e3e")
+        self._icon.setVisible(True)
         self._present(keep_height=True)
         self._check_anim.stop()
         self._check_anim.setStartValue(0.0)
@@ -802,8 +852,10 @@ class _CapsuleItem(QFrame):
         self._icon.setVisible(False)
         self._confirm_btn.setVisible(False)
         self._cancel_btn.setVisible(False)
+        self._fetch_cancel_btn.setVisible(False)
         if self._receive_btn is not None:
             self._receive_btn.setVisible(False)
+        self._icon.set_color("#51cf66")
         self._queue_waiting = 0
         self._transferring = False
 
@@ -819,6 +871,10 @@ class _CapsuleItem(QFrame):
         # Linux"接收"按钮仅在可用态展示：进入提示/错误/公告/询问/传输态前隐藏
         if self._receive_btn is not None:
             self._receive_btn.setVisible(False)
+        # 传输"取消"按钮仅传输态展示：其他任何状态进入前隐藏
+        self._fetch_cancel_btn.setVisible(False)
+        # 对钩底色复位为完成绿（取消态会临时改为红）
+        self._icon.set_color("#51cf66")
 
     def _on_check_done(self):
         # 对钩停留片刻后淡出
@@ -862,6 +918,8 @@ class _CapsuleItem(QFrame):
                 f"QPushButton:hover {{ background-color: {hover}; }}")
         self._confirm_btn.setStyleSheet(_btn_css("#74c0fc", "#5fb3e8"))
         self._cancel_btn.setStyleSheet(_btn_css("#f03e3e", "#e03131"))
+        # 传输"取消"按钮：红色白字，与"取消"（询问态）同款警示配色
+        self._fetch_cancel_btn.setStyleSheet(_btn_css("#f03e3e", "#e03131"))
         # Linux"接收"按钮：与"替换"同款主题蓝，深浅模式白字对比恒成立
         if self._receive_btn is not None:
             self._receive_btn.setStyleSheet(_btn_css("#74c0fc", "#5fb3e8"))
@@ -987,6 +1045,8 @@ class CapsuleNotification(QObject):
     # Linux：可用态胶囊"接收"按钮被点击（聚合自 _available，sender 守卫）。
     # Windows 无此按钮，信号永不发射。
     receive_requested = Signal()
+    # 传输胶囊"取消"按钮被点击（聚合自 _transfer，sender 守卫）→ 请求取消当前投递
+    cancel_requested = Signal()
     # 冲突询问（目标已有同名文件）用户决策：True=替换(覆盖)，False=取消(跳过)
     replace_confirmed = Signal(bool)
     # 瞬态"可用远程文件"胶囊已收起/隐藏（超时、点击或被动 dismiss 均触发）：
@@ -1008,6 +1068,7 @@ class CapsuleNotification(QObject):
             cap.paste_requested.connect(self._on_available_clicked)
             cap.confirm_chosen.connect(self._on_confirm_chosen)
             cap.receive_requested.connect(self._on_receive_requested)
+            cap.cancel_requested.connect(self._on_cancel_requested)
             cap.layout_dirty.connect(self._relayout)
             cap.layout_dirty.connect(self._on_available_layout_dirty)
         self._avail_timer = QTimer(self)
@@ -1214,6 +1275,21 @@ class CapsuleNotification(QObject):
             return
         self._avail_timer.stop()
         self.receive_requested.emit()
+
+    def _on_cancel_requested(self):
+        """点击传输胶囊"取消"按钮 → 通知调用方取消当前投递（接收）任务。
+
+        sender 守卫只响应传输槽位（同胶囊过渡换位后触发者不一定是"可用/传输"，
+        以"传输胶囊"为准）。传输态取消后胶囊去向（下一排队/已取消显示）由调用方
+        决定并回调，本协调者仅透明转发。
+        """
+        if self.sender() is not self._transfer:
+            return
+        self.cancel_requested.emit()
+
+    def show_cancelled(self):
+        """取消状态：传输胶囊显示"投递已取消"（样式参考完成态）。"""
+        self._transfer.show_cancelled()
 
     def _on_avail_timeout(self):
         self._hint_active = False

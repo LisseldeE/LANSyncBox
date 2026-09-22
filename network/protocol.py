@@ -210,6 +210,29 @@ class Protocol:
         return Protocol.pack_message(MessageType.FILE_CANCEL, filename)
 
     @staticmethod
+    def create_file_cancel_for_pull(session_id: str, name: str) -> bytes:
+        """创建"接收端主动取消拉取"控制帧（独立控制连接，路由信息编码在文件名）。
+
+        数据连接正在被拆除时，其上内联的 FILE_CANCEL 可能随关闭/RST 一起丢弃，
+        不足以可靠通知发送端；故接收端取消时另开一条健康短暂连接，发送带
+        session_id/name 的取消帧，发送端据此精确中断在途流式发送并上报"已取消"。
+
+        路由信息不放进 content：FILE_CANCEL 是 MessageReceiver 的"无 content"类型
+        （has_complete_message/get_message 一律按 content_size=0 解析，content 会被
+        忽略并残留为下一条消息的头字节而解析错乱）。故把 (session_id, name) 用
+        分隔符 \\x1f 拼接编码到 filename 字段，file_size/content 均留空。
+
+        Args:
+            session_id: 取消的拉取会话
+            name: 取消的条目名（与 _stream_file 登记的键 (session_id, name) 一致）
+
+        Returns:
+            消息字节（filename=session_id + \\x1f + name，无 content）
+        """
+        filename = f"{session_id}\x1f{name}"
+        return Protocol.pack_message(MessageType.FILE_CANCEL, filename)
+
+    @staticmethod
     def create_sync_request() -> bytes:
         """创建手动同步请求消息（主机→连接端）
         

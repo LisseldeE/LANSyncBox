@@ -14,7 +14,7 @@ class Config:
 
     # 应用信息
     APP_NAME = "LANSyncBox Pro"
-    APP_VERSION = "R1.1.0.0"
+    APP_VERSION = "R1.1.1.0"
     # 同步逻辑版本号
     SYNC_LOGIC_VERSION = "26.9C1"
     APP_SERIAL = "P269.WH"
@@ -41,11 +41,29 @@ class Config:
 
     # 版本号托管于 GitHub Pages 纯文本文件，避免 raw 外链滥用/API tags 频率限制
     UPDATE_URL = "https://lisseldee.github.io/version/lansyncboxpro"
-    # 公告文件：首行版本号（如 26.9.15.1），其后为公告正文
-    ANNOUNCEMENT_URL = "https://lisseldee.github.io/announcement/lansyncboxpro"
+    # 公告文件（v2 版本定向投递）：首行批次号（如 26.9.15.2），其后为 "# 目标：正文" 指令行。
+    # 文件改为 lansyncboxprov2：旧版不升级仍读旧文件，避免解析新格式出错而导致公告显示异常。
+    ANNOUNCEMENT_URL = "https://lisseldee.github.io/announcement/lansyncboxprov2"
     # 下载落地页（按语言区分，保持不变）
     GITHUB_RELEASES = f"https://github.com/{GITHUB_REPO}/releases"
     GITEE_RELEASES = f"https://gitee.com/{GITEE_REPO}/releases"
+    # 下载向导页（Pro 版检查更新跳转目标），按语言分中文/英文文件
+    DOWNLOAD_WIZARD_URL_ZH = (
+        f"https://github.com/{GITHUB_REPO}/blob/pro/downloadwizard/zh_cn.md#LANSyncBox-pro"
+    )
+    DOWNLOAD_WIZARD_URL_EN = (
+        f"https://github.com/{GITHUB_REPO}/blob/pro/downloadwizard/en.md#LANSyncBox-pro"
+    )
+
+    @staticmethod
+    def get_download_wizard_url(language: str) -> str:
+        """按语言返回下载向导页 URL（中文 zh_cn.md，其他 en.md）。
+
+        调用方传入 I18n.get_language()（'zh_CN'/'en' 等）；config 不依赖 I18n，避免循环导入。
+        """
+        if str(language).lower() in ('zh_cn', 'zh', 'zh-cn', '中文', '简体中文'):
+            return Config.DOWNLOAD_WIZARD_URL_ZH
+        return Config.DOWNLOAD_WIZARD_URL_EN
 
     # 默认同步文件夹
     SYNC_FOLDER_NAME = "SyncFolder"

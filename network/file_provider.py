@@ -42,6 +42,9 @@ class FileProvider(QObject):
     send_progress = Signal(str, str, str, 'qlonglong', 'qlonglong')
     # 单文件发送结束：(连接标识, session_id, 条目名, 是否成功发完 FILE_END)
     send_finished = Signal(str, str, str, bool)
+    # 接收端主动取消拉取（显式取消握手）：读到 FILE_CANCEL 控制帧后触发。
+    # 与 send_finished(False) 区分——"接收端主动取消" ≠ 网络真失败，UI 据此优雅显示"已取消"。
+    send_cancelled = Signal(str, str, str)
 
     CHUNK_SIZE = 64 * 1024
     DEFAULT_START_PORT = 21300  # 独立于同步主端口的目录服务起始端口
@@ -237,6 +240,7 @@ class FileProvider(QObject):
                     'client_ip': addr[0],   # 接收端 IP（同文件接管去重的键之一）
                     'cancel': threading.Event(),  # 被新拉取接管时置位，中断在途流式发送
                     'superseded': False,    # 已被同文件新连接接管（忽略其失败上报）
+                    'cancelled_by_receiver': False,  # 接收端主动取消（显式取消握手）：上报"已取消"
                 }
             threading.Thread(target=self._handle_pull, args=(conn_id,), daemon=True).start()
 
@@ -284,11 +288,27 @@ class FileProvider(QObject):
                 pull_name = info.get('pull_name')
                 pull_done = info.get('pull_done')
                 superseded = info.get('superseded', False)
-            # 连接关闭且未发完 FILE_END：向 UI 上报该文件发送失败（取消/中断）。
-            # 被同文件新拉取连接接管（superseded）是断点续传的预期接管，非失败，
-            # 不上报以免 UI 误弹"发送取消"。
-            if pull_session and pull_name and not pull_done and not superseded:
-                self.send_finished.emit(conn_id, pull_session, pull_name, False)
+            # 连接关闭后向 UI 上报该文件发送结束。
+            # - 被同文件新拉取连接接管（superseded）是断点续传的预期接管，非失败，不上报；
+            # - 接收端主动取消（cancelled_by_receiver）→ 上报 send_cancelled，优雅显示"已取消"；
+            #   （取消帧为使连接尽快关闭会把 pull_done 置位，故取消优先于 not pull_done 判断）
+            # - 其余且确未发完 FILE_END（pull_done 假）才视为失败（网络中断/源端异常）；
+            #   成功发完 pull_done 为真，_stream_file 已自行上报 send_finished(True)，此处不重复。
+            if pull_session and pull_name and not superseded:
+                # 接收端主动取消经"独立控制连接"下发，与数据连接被 RST 拆除几乎同时
+                # 到达，存在微小竞争：本连接可能先于取消帧路由到位就已从中途返回。
+                # 此处短暂等待取消标记落地，避免在取消帧还在途时误报"失败"。真实
+                # 网络故障时不会收到取消帧，最多多等这个短窗（~0.1s）即按失败上报。
+                cancel_ev = info.get('cancel')
+                if cancel_ev is not None and not info.get('cancelled_by_receiver'):
+                    for _ in range(10):
+                        if info.get('cancelled_by_receiver'):
+                            break
+                        time.sleep(0.01)
+                if info.get('cancelled_by_receiver'):
+                    self.send_cancelled.emit(conn_id, pull_session, pull_name)
+                elif not pull_done:
+                    self.send_finished.emit(conn_id, pull_session, pull_name, False)
             self._close_conn(conn_id)
 
     def _process_pull_message(self, conn_id: str, message):
@@ -297,6 +317,34 @@ class FileProvider(QObject):
         if not info:
             return
         msg_type, filename, file_size, mtime, hide, content = message
+        if msg_type == MessageType.FILE_CANCEL:
+            # 接收端主动取消拉取（优雅取消握手）：标记后结束本连接，使收尾上报
+            # send_cancelled（"已取消"）而非 send_finished(False)（"失败"）。
+            # FILE_CANCEL 的 content 恒为空（MessageReceiver 按无 content 类型解析），
+            # 路由信息 (session_id/name) 由 create_file_cancel_for_pull 编码在 filename
+            # （以分隔符 \x1f 拼接）。filename 带该分隔符时，这是"独立控制连接"发来的
+            # 取消帧——数据连接正被拆除，其上内联帧可能随 RST 丢弃，故须把取消标记
+            # 与中断信号精确下发到真正在途服务该文件的拉取连接，使其收尾上报取消；
+            # 本控制连接自身无活动会话，仅结束即可，不产生 UI 事件。
+            target_sid = target_name = None
+            if '\x1f' in filename:
+                _sid, _sep, _nm = filename.partition('\x1f')
+                if _sid and _nm:
+                    target_sid, target_name = _sid, _nm
+            if target_sid and target_name:
+                with self._lock:
+                    tid = self._active_streams.get((target_sid, target_name))
+                tinfo = (self._conns.get(tid) if tid is not None else None)
+                if tinfo is not None:
+                    with self._lock:
+                        tinfo['cancelled_by_receiver'] = True
+                    _ce = tinfo.get('cancel')
+                    if _ce is not None:
+                        _ce.set()   # 立即中断在途 _stream_file（含阻塞中的发送）
+            with self._lock:
+                info['cancelled_by_receiver'] = True
+                info['pull_done'] = True   # 阻止 _handle_pull 继续读本连接
+            return
         # 剪贴板拉取（0x18，content=bytes JSON）与同步拉取（0x23，content 已由
         # MessageReceiver 解析为 dict）同构：统一为 {session_id, token, name}。
         if msg_type == MessageType.SYNC_PULL_REQ and isinstance(content, dict):
@@ -398,7 +446,8 @@ class FileProvider(QObject):
                 ok = False
                 try:
                     if not self._send_retry(conn_socket, send_guard, Protocol.pack_message(
-                            MessageType.FILE_BEGIN, name, total_size, False, b'', mtime)):
+                            MessageType.FILE_BEGIN, name, total_size, False, b'', mtime),
+                            stop_event=cancel_event):
                         return False
                     sent = offset
                     with open(abs_path, 'rb') as fh:
@@ -411,7 +460,8 @@ class FileProvider(QObject):
                                 break
                             if not self._send_retry(
                                     conn_socket, send_guard,
-                                    Protocol.create_file_data_message(name, chunk_index, chunk)):
+                                    Protocol.create_file_data_message(name, chunk_index, chunk),
+                                    stop_event=cancel_event):
                                 return False
                             sent += len(chunk)
                             chunk_index += 1
@@ -420,7 +470,8 @@ class FileProvider(QObject):
                             and not (cancel_event is not None and cancel_event.is_set())):
                         if not self._send_retry(
                                 conn_socket, send_guard,
-                                Protocol.create_file_end_message(name, total_size, mtime)):
+                                Protocol.create_file_end_message(name, total_size, mtime),
+                                stop_event=cancel_event):
                             return False
                         ok = True
                         self.send_finished.emit(conn_id, session_id, name, True)
@@ -463,17 +514,22 @@ class FileProvider(QObject):
         except Exception:
             pass
 
-    def _send_retry(self, conn_socket, send_guard: SendLock, data: bytes) -> bool:
+    def _send_retry(self, conn_socket, send_guard: SendLock, data: bytes,
+                    stop_event=None) -> bool:
         """发送一条消息：可恢复发送，连接错误返回 False。
 
         与同步 server._send_with_cancel 同一策略：背压超时（接收端处理慢导致发送
         缓冲区满）时不重发已发送字节、短暂退避后续发剩余部分，直至整条消息完整写出
         （避免 sendall 超时后整条重发、重复数据流加剧背压）；连接错误
         （BrokenPipe/Reset/Aborted/OSError）立即返回 False。
+        stop_event: 置位时立即中止本消息发送并返回 False（交接给 send_resumable 的
+            内部轮询）——接收端主动取消（独立控制连接下发）或同文件接管时，即使正
+            阻塞在背压等待（send 持续超时），也能立刻中断在途发送，不空转拖到对端
+            自我超时。None 时保持原"仅在连接错误/自然完成时返回"语义。
         """
         while self.running:
             try:
-                return send_guard.send_resumable(conn_socket, data)
+                return send_guard.send_resumable(conn_socket, data, stop_event=stop_event)
             except Exception:
                 return False
         return False
@@ -642,6 +698,27 @@ def pull_file(host: str, port: int, session_id: str, token: str, name: str, dest
                     pass  # 连接中断（Reset/BrokenPipe/Aborted）：按本段是否收过字节决定续传
                 finally:
                     try:
+                        # 接收端主动取消（优雅取消握手）：断开前向发送端发一个最小
+                        # FILE_CANCEL 控制帧，让发送端 _handle_pull 在其 send 中断后能读
+                        # 到该帧，据此把该文件上报为"已取消"而非"失败"。帧极小、不阻塞。
+                        if cancelled or (stop_event is not None and stop_event.is_set()):
+                            try:
+                                conn.sendall(Protocol.create_file_cancel(''))
+                            except Exception:
+                                pass  # 对端已断开则放弃内联握手
+                            # 数据连接正在被拆除，其上内联取消帧可能随关闭/RST 一起丢弃；
+                            # 另开一条健康的短暂控制连接，携带 (session_id, name) 精确中断
+                            # 发送端在途流式发送，保证其上报"已取消"而非"失败"。此时
+                            # stop_event 已置位（故不传入 _connect_provider，直接原始建连）。
+                            try:
+                                _c2 = socket.create_connection((host, port), timeout=2)
+                                try:
+                                    _c2.sendall(Protocol.create_file_cancel_for_pull(
+                                        session_id, name))
+                                finally:
+                                    _c2.close()
+                            except Exception:
+                                pass
                         conn.close()
                     except Exception:
                         pass

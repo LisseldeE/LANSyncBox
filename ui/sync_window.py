@@ -9,6 +9,7 @@ import json
 import uuid
 import time
 import sys
+from collections import deque
 
 from PySide6.QtWidgets import (
     QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, 
@@ -498,6 +499,8 @@ class SyncWindow(QMainWindow):
         self._send_rows = {}           # "session_id:name" -> 本机发送进度行信息（复制端）
         self._pending_transfers = []   # [(session_id, 首文件名, 总字节), ...]：传输中又收到新粘贴时排队，
                                        # 等当前会话完成后按序接管胶囊进度（避免进度被重置回 0%）
+        self._cancelled_recv_sessions = set()  # 已取消的接收会话 id（其残留 tcp_file_done 不再参与结算）
+        self._recv_dirs = {}           # session_id -> 目标保存目录（取消时清理残留缓存用）
         self._pending_confirm = None   # 冲突询问待确认上下文（见 _paste_remote_files/_on_paste_confirm）
         self._self_temp_images = []    # 本端复制图片时生成的临时 PNG（下次复制时清理）
         self._own_copy_fps = []        # 本端最近复制文件指纹 [(名字集合, 时间戳)]，识别共享剪贴板回环
@@ -509,6 +512,8 @@ class SyncWindow(QMainWindow):
         self._capsule.paste_requested.connect(self._paste_remote_files)
         # Linux"接收"按钮（仅 IS_LINUX 存在，Windows 信号不发）：选择保存位置后接收
         self._capsule.receive_requested.connect(self._on_linux_receive)
+        # 传输胶囊"取消"按钮：取消当前投递（接收）任务
+        self._capsule.cancel_requested.connect(self._on_cancel_recv)
         # 可用胶囊收起/超时 → 释放系统级 Ctrl+V 劫持
         self._capsule.available_hidden.connect(self._update_global_hotkey)
         self.tcp_file_done.connect(self._on_tcp_file_done)
@@ -932,6 +937,8 @@ class SyncWindow(QMainWindow):
         self._provider = FileProvider(self)
         self._provider.send_progress.connect(self._on_tcp_send_progress)
         self._provider.send_finished.connect(self._on_tcp_send_finished)
+        # 接收端主动取消拉取：优雅显示"已取消"（显式取消握手）
+        self._provider.send_cancelled.connect(self._on_tcp_send_cancelled)
         if not self._provider.start():
             self._add_record(I18n.tr('tcp_provider_start_fail', port=self._provider.DEFAULT_START_PORT or ""), "错误", "")
         # 自同步链路（阶段 2）需要本端具备会话服务能力：注入 provider 供对端端到端拉取
@@ -1538,6 +1545,10 @@ class SyncWindow(QMainWindow):
         total_bytes = sum(int(f.get('size', 0)) for f in files)
         self.add_log("投递", I18n.tr('clipboard_files_dispatching', count=count))
         self._add_tcp_progress(session_id, count, total_bytes)
+        # 记录本会话目标目录：点击"取消"时清理该目录下本次接收残留的 .part 缓存
+        # （getattr 兜底：测试以 mock 构建 SyncWindow 时可能未走 __init__）
+        self._recv_dirs = getattr(self, '_recv_dirs', {})
+        self._recv_dirs[session_id] = target_dir
 
         # 胶囊进入传输态：同一会话已在传输（如重复 Ctrl+V）时不重置。
         # 已有**其他**会话在传输时，新粘贴排队等待，等当前会话完成后按序接管
@@ -1627,6 +1638,10 @@ class SyncWindow(QMainWindow):
 
     def _on_tcp_file_done(self, session_key: str, ok: bool):
         """单文件拉取结束（成功/失败均计入）：刷新排队等待数，全部完成后胶囊播放对勾。"""
+        # 已被"取消当前投递"同步清账过的会话：其残留收尾信号不再参与结算，
+        # 避免双重扣除 _pull_remaining / 二次驱动胶囊去向
+        if session_key in getattr(self, '_cancelled_recv_sessions', ()):
+            return
         self._pull_remaining = max(0, self._pull_remaining - 1)
         # 会话内统计：全部拉取结束后把进度行转为"已完成"状态（不再残留进度条）
         info = self._clipboard_rows.get(session_key)
@@ -1678,14 +1693,116 @@ class SyncWindow(QMainWindow):
                 self._tcp_error_names.pop(session_key, None)
                 self._tcp_error_msgs.pop(session_key, None)
 
-    def _finish_tcp_progress(self, session_key: str):
+    def _on_cancel_recv(self):
+        """点击传输胶囊"取消"按钮：取消当前投递（接收）会话。
+
+        中止 tcp_queue 中该会话的全部任务（在途任务置 stop_event，其 .part
+        缓存由 pull_file 的取消路径清理；排队中未启动的任务直接出队），同步修正
+        _pull_remaining 与进度行计数，清理该会话残留缓存；随后把胶囊移交给
+        下一排队会话继续投递，或显示"投递已取消"完成样式胶囊。
+
+        本条路径同步清账，因此本会话其后到达的 tcp_file_done（在途 worker
+        收尾）在 _on_tcp_file_done 中被跳过，避免双扣/二次驱动胶囊。
+        """
+        session = self._transfer_session
+        if not session:
+            if self._capsule is not None:
+                self._capsule.dismiss()
+            return
+        # 1) 取消旗帜：其残留 tcp_file_done 不再参与结算（本路径已同步清账）
+        self._cancelled_recv_sessions = getattr(self, '_cancelled_recv_sessions', set())
+        self._cancelled_recv_sessions.add(session)
+        # 2) 取消 tcp_queue 中该会话全部任务；removed = 排队中未启动的被移除数
+        removed = self._cancel_recv_tasks(session)
+        active = self._recv_active_count(session)
+        # 3) 同步清账：扣掉本会话全部任务（在途 + 排队未启动，均已计出数）
+        total = removed + active
+        self._pull_remaining = max(0, self._pull_remaining - total)
+        info = self._clipboard_rows.get(session)
+        if info:
+            info['remaining'] = max(0, info.get('remaining', 1) - total)
+            self._finish_tcp_progress(session, cancelled=True)
+        # 4) 清理本会话接收残留的 .part 缓存
+        self._cleanup_recv_cache(session)
+        getattr(self, '_recv_dirs', {}).pop(session, None)
+        self._tcp_received.pop(session, None)   # 残留进度清零（已取消，不再展示）
+        self._tcp_error_names.pop(session, None)   # 残留错误提示随取消一起丢弃
+        self._tcp_error_msgs.pop(session, None)
+        if self._capsule is None:
+            return
+        # 5) 有排队会话 → 立即移交下一项（其任务已在其 _start_paste 时入队，
+        #    tcp_queue 会在此后自动接续拉取）
+        if self._pending_transfers:
+            next_session_id, next_file, next_total = self._pending_transfers.pop(0)
+            self._transfer_session = next_session_id
+            self._capsule.begin_transfer(next_file, next_total, next_session_id)
+            self._capsule.set_queue_waiting(max(0, self._pull_remaining - 1))
+            return
+        # 6) 无排队 → 显示"投递已取消"完成样式胶囊
+        self._transfer_session = None
+        self._capsule.show_cancelled()
+
+    def _cancel_recv_tasks(self, session: str) -> int:
+        """取消 tcp_queue 中会话 session 的全部拉取任务。
+
+        在途任务置 stop_event（其 .part 缓存由 pull_file 取消路径清理）；
+        排队中未启动的任务直接出队并计数返回。
+        """
+        prefix = f"{session}:"
+        q = self.tcp_queue
+        with q.lock:
+            for task_key, ev in list(q.active_tasks.items()):
+                if task_key == session or task_key.startswith(prefix):
+                    ev.set()
+            kept = []
+            removed = 0
+            for task in q.queue:
+                key = task.get('filename', '')
+                if key == session or key.startswith(prefix):
+                    removed += 1
+                else:
+                    kept.append(task)
+            q.queue = deque(kept)
+        return removed
+
+    def _recv_active_count(self, session: str) -> int:
+        """该会话当前在 tcp_queue 中在途（active）的任务数（串行接收，实为 0/1）。"""
+        prefix = f"{session}:"
+        with self.tcp_queue.lock:
+            return sum(1 for k in self.tcp_queue.active_tasks
+                       if k == session or k.startswith(prefix))
+
+    def _cleanup_recv_cache(self, session: str):
+        """清理本次接收在目标目录留下的 .tcp_*.part 半截缓存文件。
+
+        在途拉取的 .part 会由 pull_file 的取消路径自行删除；此处兜底清扫同目录
+        残余半截文件（pull_file 线程尚未到达清理点或被中断的瞬间），避免垃圾残留。
+        仅清理属于本会话的 .part 尾巴，不动目标目录已有/已完成的最终文件。
+        """
+        target_dir = getattr(self, '_recv_dirs', {}).get(session)
+        if not target_dir or not os.path.isdir(target_dir):
+            return
+        try:
+            for name in os.listdir(target_dir):
+                if not name.startswith('.tcp_') or not name.endswith('.part'):
+                    continue
+                try:
+                    os.remove(os.path.join(target_dir, name))
+                except Exception:
+                    pass
+        except Exception:
+            pass
+
+    def _finish_tcp_progress(self, session_key: str, cancelled: bool = False):
         """投递会话全部结束后：进度条行移出钉住区，完成记录进入上方历史区流转。
 
         与同步传输的 _finish_transfer_progress 对应：完成态以文本留在历史区。
-        投递完成使用淡蓝色（#74c0fc，同进度条）；部分失败则显示失败数（橙色）。
+        投递完成使用淡蓝色（#74c0fc，同进度条）；部分失败则显示失败数（橙色）；
+        cancelled=True 表示用户主动取消，显示灰色"已取消"。
         """
         info = self._clipboard_rows.pop(session_key, None)
         self._tcp_received.pop(session_key, None)
+        getattr(self, '_recv_dirs', {}).pop(session_key, None)
         if not info:
             return
         row = info['row']
@@ -1698,7 +1815,10 @@ class SyncWindow(QMainWindow):
         action_item.setTextAlignment(Qt.AlignCenter)
         self.records_table.setItem(insert_row, 0, action_item)
         fail = info['count'] - info.get('ok_count', 0)
-        if fail > 0:
+        if cancelled:
+            status_item = QTableWidgetItem(I18n.tr('clipboard_deliver_cancelled'))
+            status_item.setForeground(QColor("#94a3b8"))
+        elif fail > 0:
             status_item = QTableWidgetItem(I18n.tr('clipboard_deliver_partial', fail=fail))
             status_item.setForeground(QColor("#ff922b"))
         else:
@@ -1766,11 +1886,13 @@ class SyncWindow(QMainWindow):
         bar.setFormat(f"{act} [{peer_ip}] {display} - {percent}% ({cur_m:.1f}/{tot_m:.1f}M)")
 
     @Slot(str, str, str, bool)
-    def _on_tcp_send_finished(self, conn_id: str, session_id: str, name: str, ok: bool):
+    def _on_tcp_send_finished(self, conn_id: str, session_id: str, name: str, ok: bool,
+                              cancelled: bool = False):
         """发送结束（FileProvider 信号）：进度行移出钉住区，完成记录进入上方历史区流转。
 
         sync_ 会话（自同步拉取）用同步样式：动作"发送"、状态"完成/失败"、绿色；
-        投递会话保持淡蓝投递样式。
+        投递会话保持淡蓝投递样式。cancelled=True 表示接收端主动取消拉取（显式
+        取消握手），状态字与颜色用"取消"而非"失败"。现有调用（ok 布尔）不受影响。
         """
         sync = session_id.startswith("sync_")
         act = I18n.tr('sync_transfer_send') if sync else I18n.tr('clipboard_deliver_send')
@@ -1793,17 +1915,29 @@ class SyncWindow(QMainWindow):
         if len(display) > 25:
             display = display[:22] + "..."
         if sync:
-            suffix = I18n.tr('sync_transfer_done') if ok else I18n.tr('sync_transfer_fail')
-            color = "#51cf66" if ok else "#ff922b"
+            if cancelled:
+                suffix = I18n.tr('sync_transfer_cancel')
+                color = "#94a3b8"
+            else:
+                suffix = I18n.tr('sync_transfer_done') if ok else I18n.tr('sync_transfer_fail')
+                color = "#51cf66" if ok else "#ff922b"
         else:
-            suffix = I18n.tr('clipboard_deliver_sent') if ok else I18n.tr('clipboard_deliver_send_fail')
-            color = "#74c0fc" if ok else "#ff922b"
+            if cancelled:
+                suffix = I18n.tr('clipboard_deliver_cancelled')
+                color = "#94a3b8"
+            else:
+                suffix = I18n.tr('clipboard_deliver_sent') if ok else I18n.tr('clipboard_deliver_send_fail')
+                color = "#74c0fc" if ok else "#ff922b"
         status_item = QTableWidgetItem(f"{display} - {suffix}")
         status_item.setToolTip(f"{name} ({peer_ip}) - {suffix}")  # 完整路径+对端 IP，供导出使用
         status_item.setForeground(QColor(color))
         self.records_table.setItem(insert_row, 1, status_item)
         self.records_table.scrollToBottom()
         self._trim_history()
+
+    def _on_tcp_send_cancelled(self, conn_id: str, session_id: str, name: str):
+        """接收端主动取消拉取（显式取消握手）：复用完成记录流转，状态置"已取消"。"""
+        self._on_tcp_send_finished(conn_id, session_id, name, False, cancelled=True)
 
     def _log_worker(self, section: str, message: str):
         """工作线程中安全地追加日志（排队回主线程）。"""
