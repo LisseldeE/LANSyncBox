@@ -4,6 +4,7 @@ __pycache__/
 .md/
 output/
 SyncFolder/
+wiki/
 old/
 dist/
 test/

@@ -132,7 +132,7 @@ class SettingsDialog(QDialog):
     左侧分类菜单（常规/系统/缓存）+ 右侧内容区，分类切换带淡出淡入过渡。
     - 常规：退出房间询问（= confirm_leave_no_ask 取反）、自动检查更新
       （Config.ENABLE_CHECK_UPDATE=False 时整行隐藏）
-    - 系统：接收推送公告（仅开关，功能后续构建）
+    - 系统：接收推送公告、新公告通过胶囊栏显示
     - 缓存：列出 SyncFolder 下全部一级子目录（排除 preview，含空目录与
       非房间号干扰目录），每项显示名称/占用/「清空」按钮（删除整个目录），
       右上角「管理文件夹」按钮打开 SyncFolder
@@ -246,6 +246,14 @@ class SettingsDialog(QDialog):
         )
         announce_sw.stateChanged.connect(self.announcements_toggled.emit)
         lay.addWidget(announce_row)
+
+        # 新公告通过胶囊栏显示（关闭后公告仅在主界面显示，不播放胶囊）
+        capsule_row, capsule_sw = self._make_switch_row(
+            I18n.tr('settings_capsule_announcements'),
+            UserConfig.get_capsule_announcements(),
+            lambda checked: UserConfig.set_capsule_announcements(checked),
+        )
+        lay.addWidget(capsule_row)
 
         lay.addStretch()
         return page

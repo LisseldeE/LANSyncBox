@@ -808,7 +808,10 @@ class _CapsuleItem(QFrame):
         self._start_fade_out()
 
     def _start_fade_out(self):
-        """收起时挂载临时透明度效果并淡出（仅射线收起，非展开状态）。"""
+        """收起时挂载临时透明度效果并淡出（仅射线收起，非展开状态）。
+        """
+        if self.width() >= int(self._screen_max_w() * 0.8):
+            return
         self._clear_fade()
         effect = QGraphicsOpacityEffect(self)
         effect.setOpacity(1.0)

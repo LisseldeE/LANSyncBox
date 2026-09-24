@@ -352,10 +352,10 @@ class MainWindow(QMainWindow):
         bottom_layout.addStretch()
         
         # 关于按钮（设备像素对齐边框）
-        about_btn = SnapOutlineButton(I18n.tr('about'))
-        about_btn.setFixedSize(100, 34)
-        about_btn.clicked.connect(self.on_about)
-        bottom_layout.addWidget(about_btn)
+        self.about_btn = SnapOutlineButton(I18n.tr('about'))
+        self.about_btn.setFixedSize(100, 34)
+        self.about_btn.clicked.connect(self.on_about)
+        bottom_layout.addWidget(self.about_btn)
         
         # 弹性空间 - 尾部
         bottom_layout.addStretch()
@@ -472,17 +472,11 @@ class MainWindow(QMainWindow):
                     if join_btn:
                         join_btn.setText(I18n.tr('join_room'))
                 
-                # 底部按钮（布局：stretch, lang_btn, stretch, manage_cache_btn, stretch, about_btn, stretch）
-                bottom_layout = layout.itemAt(6)
-                if bottom_layout:
-                    # manage_cache_btn（设置入口）在索引 3
-                    manage_cache_btn = bottom_layout.itemAt(3).widget()
-                    if manage_cache_btn:
-                        manage_cache_btn.setText(I18n.tr('settings'))
-                    # about_btn 在索引 5
-                    about_btn = bottom_layout.itemAt(5).widget()
-                    if about_btn:
-                        about_btn.setText(I18n.tr('about'))
+                # 底部按钮（直接用创建时保存的引用，不依赖布局索引）
+                if self.manage_cache_btn:
+                    self.manage_cache_btn.setText(I18n.tr('settings'))
+                if self.about_btn:
+                    self.about_btn.setText(I18n.tr('about'))
 
                 # 公告入口（语言切换后按当前语言刷新预览，持久显示）
                 self._refresh_announcement_entry()
@@ -577,7 +571,9 @@ class MainWindow(QMainWindow):
         if not is_newer(version, UserConfig.get_last_announcement()):
             return
         self._announcement = (version, text)
-        self._announce_capsule.show_announcement(text)
+        # 「新公告通过胶囊栏显示」关闭时跳过胶囊播放，公告仅在主界面入口显示
+        if UserConfig.get_capsule_announcements():
+            self._announce_capsule.show_announcement(text)
         UserConfig.set_last_announcement(version)
         UserConfig.set_last_announcement_text(text)
         self._refresh_announcement_entry()

@@ -466,6 +466,16 @@ class UserConfig:
         cls.set("receive_announcements", bool(enabled))
 
     @classmethod
+    def get_capsule_announcements(cls) -> bool:
+        """获取「新公告通过胶囊栏显示」状态（默认开启）"""
+        return bool(cls.get("capsule_announcements", True))
+
+    @classmethod
+    def set_capsule_announcements(cls, enabled: bool):
+        """设置「新公告通过胶囊栏显示」并持久化"""
+        cls.set("capsule_announcements", bool(enabled))
+
+    @classmethod
     def get_last_announcement(cls) -> str:
         """获取已显示公告的版本号（config.json 中的记录，空串表示从未显示）"""
         return str(cls.get("last_announcement", ""))
