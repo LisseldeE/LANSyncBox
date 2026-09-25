@@ -26,7 +26,7 @@ For a detailed feature comparison, please refer to each edition's project page. 
   <img src="https://lisseldee.github.io/assets/images/webp/1-e.webp" width="100%" alt="LANSyncBox">
 </p>
 
-### [R7.1.6.0](https://github.com/LisseldeE/LANSyncBox/releases/tag/R7.1.6.0)
+### [R7.1.7.0](https://github.com/LisseldeE/LANSyncBox/releases/tag/R7.1.7.0)
 
 > Latest build
 
@@ -34,15 +34,24 @@ For a detailed feature comparison, please refer to each edition's project page. 
 
 | OS | Architecture | Mirror | Link |
 |:---|:---|:---|:---|
-| Windows | x64 | Gitee (recommended in CN) | [**Download**](https://gitee.com/Lisselde_E/LANSyncBox/releases/download/R7.1.6.0/LANSyncBox_Setup.exe) |
-| Windows | x64 | GitHub | [**Download**](https://github.com/LisseldeE/LANSyncBox/releases/download/R7.1.6.0/LANSyncBox_Setup.exe) |
-| Linux | x64 | Gitee (recommended in CN) | [**Download**](https://gitee.com/Lisselde_E/LANSyncBox/releases/download/R7.1.6.0/lansyncbox_amd64.deb) |
-| Linux | x64 | GitHub | [**Download**](https://github.com/LisseldeE/LANSyncBox/releases/download/R7.1.6.0/lansyncbox_amd64.deb) |
+| Windows | x64 | Gitee (recommended in CN) | [**Download**](https://gitee.com/Lisselde_E/LANSyncBox/releases/download/R7.1.7.0/LANSyncBox_Setup.exe) |
+| Windows | x64 | GitHub | [**Download**](https://github.com/LisseldeE/LANSyncBox/releases/download/R7.1.7.0/LANSyncBox_Setup.exe) |
+| Linux | x64 | Gitee (recommended in CN) | [**Download**](https://gitee.com/Lisselde_E/LANSyncBox/releases/download/R7.1.7.0/lansyncbox_amd64.deb) |
+| Linux | x64 | GitHub | [**Download**](https://github.com/LisseldeE/LANSyncBox/releases/download/R7.1.7.0/lansyncbox_amd64.deb) |
 
 ---
 
 <details>
 <summary>Older releases (click to expand)</summary>
+
+### [R7.1.6.0](https://github.com/LisseldeE/LANSyncBox/releases/tag/R7.1.6.0)
+
+| OS | Architecture | Mirror | Link |
+|:---|:---|:---|:---|
+| Windows | x64 | Gitee (recommended in CN) | [**Download**](https://gitee.com/Lisselde_E/LANSyncBox/releases/download/R7.1.6.0/LANSyncBox_Setup.exe) |
+| Windows | x64 | GitHub | [**Download**](https://github.com/LisseldeE/LANSyncBox/releases/download/R7.1.6.0/LANSyncBox_Setup.exe) |
+| Linux | x64 | Gitee (recommended in CN) | [**Download**](https://gitee.com/Lisselde_E/LANSyncBox/releases/download/R7.1.6.0/lansyncbox_amd64.deb) |
+| Linux | x64 | GitHub | [**Download**](https://github.com/LisseldeE/LANSyncBox/releases/download/R7.1.6.0/lansyncbox_amd64.deb) |
 
 ### [R7.1.5.0](https://github.com/LisseldeE/LANSyncBox/releases/tag/R7.1.5.0)
 
