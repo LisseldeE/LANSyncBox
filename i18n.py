@@ -158,6 +158,9 @@ class I18n:
             "refresh": "刷新",
             "go_up": "↑ 上级",
             
+            # 快捷操作栏状态指示
+            "selected_count": "已选 {count} 项",
+            
             # 拖拽操作
             "drag_add": "添加文件",
             "drag_copy": "复制文件",
@@ -228,6 +231,7 @@ class I18n:
             "about_check_update": "检查更新",
             "about_feedback": "问题反馈",
             "about_details": "查看详情",
+            "about_support_author": "支持作者",
             "about_info": "提示",
             "about_email_copied": "邮箱已复制到剪贴板",
             "about_no_tags": "未找到版本信息",
@@ -383,6 +387,9 @@ class I18n:
             "refresh": "Refresh",
             "go_up": "↑ Up",
             
+            # Quick action bar status
+            "selected_count": "Selected {count}",
+            
             # Drag operations
             "drag_add": "Add Files",
             "drag_copy": "Copy Files",
@@ -453,6 +460,7 @@ class I18n:
             "about_check_update": "Check for Updates",
             "about_feedback": "Feedback",
             "about_details": "Details",
+            "about_support_author": "Support Author",
             "about_info": "Info",
             "about_email_copied": "Email copied to clipboard",
             "about_no_tags": "No version tags found",

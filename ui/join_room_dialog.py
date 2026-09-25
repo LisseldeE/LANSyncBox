@@ -361,6 +361,11 @@ class JoinRoomDialog(QDialog):
         self._history_items = []  # 历史行控件列表
         self._history_status = {}  # 历史行在线状态 {(ip, room_code): online}，扫描结果即时写入
         self._manual_ip = ""  # 手动指定的主机地址（定向探测目标）
+        self._connect_pending = False  # 点击连接触发的定向扫描：确认存在后是否自动续接连接
+        # 房间号输入完成后的延迟探测：可取消，避免旧调度在用户后续输入时误触发探测
+        self._probe_timer = QTimer(self)
+        self._probe_timer.setSingleShot(True)
+        self._probe_timer.timeout.connect(self._check_room_exists)
         self.init_ui()
         # 开启对话框级鼠标追踪：用于图例浮层在空白区域的移出隐藏
         self.setMouseTracking(True)
@@ -627,21 +632,29 @@ class JoinRoomDialog(QDialog):
         super().leaveEvent(event)
 
     def _on_code_completed(self):
-        """输入完成时自动检测房间（探测确认存在后才可点连接）"""
+        """输入完成时：手动指定 IP 则直接启用连接按钮；未指定 IP 才广播探测确认"""
         # 用户换了个新房间号：取消仍在进行中的连接验证，让新探测接管
         self._cancel_verifying()
         # 若旧探测还未结束，先取消旧的再重新调度，否则新房间号会被防重入吞掉
         if self._is_checking:
             self._cancel_checking()
+        self._connect_pending = False
 
-        # 探测期间保持连接按钮禁用，可否点击交由探测结果判定（存在才可点）
+        # 手动指定了 IP：不自动扫描，连接按钮直接亮起；点击连接时再携带该 IP 定向扫描确认
+        if self.host_edit.text().strip():
+            self._room_checked = False
+            self.connect_btn.setEnabled(True)
+            return
+
+        # 未指定 IP：探测期间保持连接按钮禁用，可否点击交由探测结果判定（存在才可点）
         self.connect_btn.setEnabled(False)
 
-        # 添加一个小延迟，让用户看到输入完成
-        QTimer.singleShot(300, self._check_room_exists)
+        # 添加一个小延迟，让用户看到输入完成；用成员定时器便于后续输入时取消
+        self._probe_timer.start(300)
 
     def _cancel_checking(self):
         """取消正在进行的房间探测，避免旧探测结果污染新输入"""
+        self._probe_timer.stop()  # 同时取消尚未触发的延迟探测，防止其按新输入误探测
         self._check_seq += 1  # 使本代旧探测的回调全部失效
         d = getattr(self, 'discovery', None)
         if d is not None:
@@ -672,19 +685,22 @@ class JoinRoomDialog(QDialog):
             loop.quit()
 
     def _on_host_edit_text_changed(self, text: str = ""):
-        """手动修改主机 IP：使此前针对旧 IP 的『已探测/已锚定』结论失效
+        """手动修改主机 IP：不再自动扫描，仅按『房间号是否完整 + IP 是否有内容』刷新连接按钮
 
-        取消在途的验证与探测，并（房间号已填满时）针对新 IP 自动重新探测确认，
-        存在才启用连接按钮——避免用旧锚点去连错误 IP 而长时间卡在验证中。
+        房间号已完整且 IP 非空时连接按钮直接亮起；点击连接时才携带该 IP 定向扫描
+        确认房间是否存在（存在即加入，不存在界面提示）。移除逐字触发的定向探测，
+        避免快速输入 IP 时反复起停探测线程/套接字导致的界面卡顿。
         """
+        # 输入变化即作废此前的『已探测/已锚定』结论，并取消在途验证与探测
         self._cancel_verifying()
         self._cancel_checking()
+        self._connect_pending = False
         self._room_checked = False
-        self.connect_btn.setEnabled(False)
-        # 房间号已填满且 IP 形如地址（含小数点）：立即定向重新探测，无防抖延迟。
-        # 探测取消/线程回收已健硕（取消即回收线程+定时器，回调用 seq 失效），逐字触发不会堆积。
-        if self.room_code_input.is_complete() and '.' in text:
-            self._check_room_exists()
+
+        has_ip = bool(text.strip())
+        self.connect_btn.setEnabled(self.room_code_input.is_complete() and has_ip)
+        # 输入变化即作废此前的探测结论：状态回到中性等待态，避免残留红/绿提示
+        self._show_status(I18n.tr('ready_waiting'), color='#868e96')
 
     def _schedule_host_probe(self):
         """中断旧探测并针对『当前房间号 + 当前 IP』立即重新定向探测
@@ -693,6 +709,7 @@ class JoinRoomDialog(QDialog):
         同 IP 的另一房间号而不变化，此时 textChanged 不会激活探测，必须显式调用。
         """
         self._cancel_checking()    # 中断在途的旧扫描/探测（回收线程与定时器）
+        self._connect_pending = False
         self._room_checked = False
         self.connect_btn.setEnabled(False)  # 探测确认存在前保持禁用
         # 立即定向探测（无防抖延迟）；房间号不完整时 _check_room_exists 会静默复位
@@ -702,6 +719,7 @@ class JoinRoomDialog(QDialog):
         """房间号输入变化时更新连接按钮状态，并清除"已找到"等历史状态"""
         # 用户正在改房间号：若此刻有进行中的连接验证，取消它解堵 UI
         self._cancel_verifying()
+        self._connect_pending = False
         if not self.room_code_input.is_complete():
             self.connect_btn.setEnabled(False)
             # 房间号不完整：立即取消正在进行的探测（stop + 使旧回调失效），
@@ -769,6 +787,17 @@ class JoinRoomDialog(QDialog):
         self.status_label.setText(text)
         self.status_label.setStyleSheet(f"color: {color}; font-size: 12px;")
     
+    def _refresh_connect_btn(self):
+        """按当前输入状态刷新连接按钮可用性
+
+        可用条件：房间号完整，且『手动填写了 IP』或『已探测确认房间存在（锚已建立）』。
+        用于验证结束后的按钮复位，避免无条件 setEnabled(True) 在房间号被改到不完整时仍可点击。
+        """
+        self.connect_btn.setEnabled(
+            self.room_code_input.is_complete()
+            and (bool(self.host_edit.text().strip()) or self._room_checked)
+        )
+
     def on_room_found(self, host_ip: str, room_code: str, port: int, version: str = "", seq: int = None):
         """发现房间
         Args:
@@ -803,6 +832,7 @@ class JoinRoomDialog(QDialog):
             self.connect_btn.setEnabled(False)
             self._room_checked = False
             self._is_checking = False
+            self._connect_pending = False
             return
         
         # 版本一致：显示已找到房间，探测确认存在 → 连接按钮才可点击
@@ -810,6 +840,11 @@ class JoinRoomDialog(QDialog):
         self._room_checked = True
         self._is_checking = False
         self.connect_btn.setEnabled(True)
+
+        # 点击连接触发的定向扫描：确认存在后自动续接连接（发现存在则加入）
+        if self._connect_pending:
+            self._connect_pending = False
+            self.on_connect()
     
     def on_discovery_finished(self, rooms: list, seq: int = None):
         """发现完成"""
@@ -822,6 +857,8 @@ class JoinRoomDialog(QDialog):
             self._show_status(I18n.tr('room_not_found'), color='#ff6b6b')
             self._room_checked = False
             self.connect_btn.setEnabled(False)
+        # 点击连接触发的定向扫描到此结束：未找到时界面已提示，不自动连接
+        self._connect_pending = False
     
     def on_discovery_error(self, error: str, seq: int = None):
         """发现错误"""
@@ -831,6 +868,10 @@ class JoinRoomDialog(QDialog):
         self._show_status(error, color='#ff6b6b')
         self._room_checked = False
         self._is_checking = False
+        self._connect_pending = False
+        # 手动指定 IP 时扫描出错：恢复连接按钮，便于用户修改后重试
+        if self.host_edit.text().strip() and self.room_code_input.is_complete():
+            self.connect_btn.setEnabled(True)
     
     def on_connect(self):
         """连接房间：先以空密码尝试，无密码房间直接进入；被拒（需要密码）则弹出密码对话框"""
@@ -845,9 +886,18 @@ class JoinRoomDialog(QDialog):
             QMessageBox.warning(self, I18n.tr('join_room_title'), I18n.tr('invalid_room_code'))
             return
 
-        # 锚未建立（含修改 IP 后已失效）：先探测确认房间存在于当前输入再连接，
-        # 避免用旧锚点直接连错 IP 而卡在验证中
-        if not self._room_checked:
+        host_address = self.host_edit.text().strip()
+
+        # 手动指定 IP：点击后携带该 IP 定向扫描房间是否存在——存在则加入，不存在界面提示。
+        # （已针对同一 IP 确认过则直接连接，不重复扫描）
+        if host_address and not (self._room_checked and self._manual_ip == host_address):
+            self._connect_pending = True
+            self.connect_btn.setEnabled(False)  # 扫描期间不可重复点击
+            self._check_room_exists()
+            return
+
+        # 未指定 IP：锚未建立时先广播探测确认房间存在再连接（原逻辑）
+        if not host_address and not self._room_checked:
             self._check_room_exists()
             return
 
@@ -855,7 +905,6 @@ class JoinRoomDialog(QDialog):
         self.room_code = room_code
 
         # 如果用户指定了主机地址，使用它
-        host_address = self.host_edit.text().strip()
         if host_address:
             self.host_address = host_address
             self.discovered_host = host_address
@@ -971,7 +1020,7 @@ class JoinRoomDialog(QDialog):
 
             # 失败 / 超时 / 错误 / 取消：断开 client，恢复按钮，交还原对话框判断后续走向
             self._is_verifying = False
-            self.connect_btn.setEnabled(True)
+            self._refresh_connect_btn()  # 按当前输入状态复位（取消验证时输入可能已被改动）
             self.cancel_btn.setEnabled(True)
             self._verified_client = None
 

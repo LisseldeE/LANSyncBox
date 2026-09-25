@@ -163,7 +163,9 @@ class SyncClient(QObject):
             if not self.socket or not self.authenticated:
                 continue
             try:
-                self._send_guard.send(self.socket, Protocol.create_ping(time.time()))
+                # 可恢复发送：大文件传输背压时不重发、不长时间占住发送锁，
+                # 避免延迟探测被卡住导致延迟虚高
+                self._send_guard.send_resumable(self.socket, Protocol.create_ping(time.time()))
             except Exception:
                 pass
     
@@ -356,10 +358,10 @@ class SyncClient(QObject):
             self.sync_result.emit(has_diff)
 
         elif msg_type == MessageType.PING:
-            # 主机探测延迟：立即回 PONG 并原样带回发送时刻
+            # 主机探测延迟：立即回 PONG 并原样带回发送时刻（可恢复发送，背压不丢包）
             try:
                 send_time = struct.unpack('!d', content)[0]
-                self._send_guard.send(self.socket, Protocol.create_pong(send_time))
+                self._send_guard.send_resumable(self.socket, Protocol.create_pong(send_time))
             except Exception:
                 pass
 
@@ -527,30 +529,22 @@ class SyncClient(QObject):
         """
         发送数据，支持取消（已内置发送锁，保证一条消息不被并发写交错）。
 
-        socket 为阻塞模式带 1 秒超时。sendall 最多阻塞 1 秒。
+        可恢复发送：背压超时（接收端处理慢导致发送缓冲区满）时不重发已发送字节、
+        短暂退避后续发剩余部分，直至整条消息完整写出。相比 sendall 超时后整条重发
+        的旧逻辑：重复数据流会加剧背压，把 PING/PONG 等控制消息长时间挡在发送锁外
+        （同步延迟虚高上万毫秒的根因）。
         - stop_event 被设置：立即返回 False
-        - 连接错误（BrokenPipe/ConnectionReset/ConnectionAborted/OSError）：返回 False，不重试
-        - 超时（socket.timeout）：可能是背压（接收端处理慢），只要 stop_event 未设置就继续重试
+        - 连接错误（BrokenPipe/ConnectionReset/ConnectionAborted/OSError）：返回 False
 
         Returns:
             True 表示发送完成，False 表示被取消或连接异常
         """
         if stop_event and stop_event.is_set():
             return False
-        while True:
-            if stop_event and stop_event.is_set():
-                return False
-            try:
-                self._send_guard.send(self.socket, data)
-                return True
-            except socket.timeout:
-                # 背压超时：接收端处理慢导致发送缓冲区满
-                # 只要没被取消就继续重试，确保大文件传输不会因背压而失败
-                continue
-            except (BrokenPipeError, ConnectionResetError, ConnectionAbortedError, OSError):
-                return False
-            except Exception:
-                return False
+        try:
+            return self._send_guard.send_resumable(self.socket, data, stop_event=stop_event)
+        except Exception:
+            return False
     
     def _send_large_file_to_server(self, filename: str, file_path: str, file_size: int, mtime: float, stop_event: threading.Event = None):
         """流式发送大文件给主机端
