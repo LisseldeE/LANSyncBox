@@ -451,6 +451,10 @@ class SyncClient(QObject):
             self._host_id = host_id
             self._attached_ep = None
         self.host_ip = host_ip
+        # 主机端点线索交给 mesh 置顶（mesh_port 未知时暂无效，待真主机 END_INFO 补全）
+        if self.mesh:
+            self.mesh.set_host(Endpoint(end_id=host_id, name='主机',
+                                        ip=host_ip, mesh_port=0, mgmt_port=host_port))
         self._reported_offline = False
         self._host_offline_logged = False
         # 换接真主机：丢开当前中间端管理连接，交给"只连主机"重连收敛
@@ -696,10 +700,19 @@ class SyncClient(QObject):
     def emit_files_notify(self, notify_dict: dict) -> bool:
         """投递通知沿网状分发链路广播（阶段 5）：mesh 就绪返回 True，否则 False。
 
-        返回 False 时调用方回退旧路径（send_files_notify，经主机转发）。
+        返回 False 时调用方记日志（纯 mesh，不回退主机转发）。
         """
         if self.distributor:
             return self.distributor.emit_files_notify(notify_dict)
+        return False
+
+    def emit_clipboard_text(self, mime_type: str, data: bytes) -> bool:
+        """文本投递沿网状分发链路广播（去中心化）：mesh 就绪返回 True，否则 False。
+
+        返回 False 时调用方记日志（纯 mesh，不回退主机转发）。
+        """
+        if self.distributor:
+            return self.distributor.emit_clipboard_text(mime_type, data)
         return False
 
     def _receive_loop(self):
@@ -968,7 +981,11 @@ class SyncClient(QObject):
                         'name': content.get('name', ''),
                         'ip': self.host_ip or '',
                         'mesh_port': int(content.get('mesh_port', 0) or 0),
+                        'mgmt_port': int(content.get('mgmt_port', 0) or 0),
                     })
+                    # 主机端点线索交给 mesh 置顶辐射（is_host）：供本端及后续接到的对端寻回主机
+                    if self.mesh:
+                        self.mesh.set_host(self.host_endpoint)
                     # END_INFO 来自管理连接上的真主机：按身份稳定其首位排序，IP 变化不失位
                     self._host_id = end_id
                     self._upsert_endpoint({
@@ -1043,7 +1060,7 @@ class SyncClient(QObject):
             # 不能把 mesh/distributor/store 作为 self 的子对象创建（"Cannot create
             # children for a parent that is in a different thread"）。故 parent=None，
             # 由本端自持引用装卸载（disconnect 显式 stop），避免跨线程挂父导致告警。
-            self.mesh = MeshManager()
+            self.mesh = MeshManager(room_code=self.room_code, password=self.password)
             self.mesh.log_message.connect(self.log_message)
             self.mesh.start()
             # 分发链路引擎：本地操作 → 网状直连传播；收到信号去重/应用/转发
@@ -1072,6 +1089,8 @@ class SyncClient(QObject):
                 self.file_state_store.request_conflict_pull)
             # 阶段 5：网状投递通知 → 复用既有 files_notify_received 信号回投 UI
             self.distributor.files_notify_received.connect(self.files_notify_received)
+            # 投递去中心化：网状文本投递 → 复用既有 clipboard_received 信号回投 UI 写系统剪贴板
+            self.distributor.clipboard_text_received.connect(self.clipboard_received)
             self.mesh.peer_connected.connect(self._on_mesh_peer_connected)
         elif not self.mesh.running:
             self.mesh.start()
@@ -1156,7 +1175,7 @@ class SyncClient(QObject):
                 self.distributor.on_signal(content)
         elif msg_type == MessageType.FILE_STATE_REQ and isinstance(content, dict):
             if self.file_state_store:
-                self.file_state_store.handle_state_req(end_id)
+                self.file_state_store.handle_state_req(end_id, content)
         elif msg_type == MessageType.FILE_STATE_RESP and isinstance(content, dict):
             if self.file_state_store:
                 self.file_state_store.handle_state_resp(end_id, content)
@@ -1164,6 +1183,10 @@ class SyncClient(QObject):
             # 阶段 5：投递通知沿网状直连到达（不经主机转发）→ 交 UI 展示远程文件胶囊
             if self.distributor:
                 self.distributor.on_files_notify(content)
+        elif msg_type == MessageType.CLIPBOARD_TEXT_SIGNAL:
+            # 投递去中心化：文本内容沿网状直连到达（不经主机转发）→ 交 UI 写系统剪贴板
+            if self.distributor:
+                self.distributor.on_clipboard_text(_filename, content)
 
     def _on_mesh_peer_connected(self, end_id: str, name: str):
         """网状直连建立：同步模式自动发起一轮状态对比（断线重连自动补齐，阶段 2）。

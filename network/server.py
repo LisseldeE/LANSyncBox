@@ -14,7 +14,7 @@ from typing import Dict, Optional
 from PySide6.QtCore import QObject, Signal
 
 from config import Config, UserConfig
-from network.protocol import Protocol, MessageType, MessageReceiver
+from network.protocol import Protocol, MessageType, MessageReceiver, RoomProbeState
 from network.mesh import MeshManager
 from sync.distributor import Distributor
 from sync.file_state_store import FileStateStore
@@ -169,9 +169,14 @@ class SyncServer(QObject):
                 # （连接端宿主）注入，此处仅承担管理监听职责。
                 if not reuse:
                     # 启动网状监听（去中心化数据平面，主机作为网状节点；失败不阻断主服务）
-                    self.mesh = MeshManager(parent=self)
+                    self.mesh = MeshManager(parent=self, room_code=self.room_code,
+                                            password=self.password)
                     self.mesh.log_message.connect(self.log_message)
-                    self.mesh.start()
+                    if self.mesh.start():
+                        # 主机即本端：置顶自己的端点线索（is_host），供各端寻回主机统领权限
+                        host_ep = self.mesh.endpoint
+                        host_ep.mgmt_port = self.port
+                        self.mesh.set_host(host_ep)
 
                     # 分发链路引擎：本地操作 → 网状直连传播；收到信号去重/应用/转发
                     self.distributor = Distributor(
@@ -197,6 +202,8 @@ class SyncServer(QObject):
                         self.file_state_store.request_conflict_pull)
                     # 阶段 5：网状投递通知 → 复用既有 files_notify_received 信号回投 UI
                     self.distributor.files_notify_received.connect(self.files_notify_received)
+                    # 投递去中心化：网状文本投递 → 复用既有 clipboard_received 信号回投 UI 写系统剪贴板
+                    self.distributor.clipboard_text_received.connect(self.clipboard_received)
                     self.mesh.peer_connected.connect(self._on_mesh_peer_connected)
 
                 return True
@@ -329,7 +336,8 @@ class SyncServer(QObject):
                 client_socket, addr = self.server_socket.accept()
                 client_id = f"{addr[0]}:{addr[1]}"
 
-                self.log_message.emit(f"客户端连接: {client_id}")
+                # 连接日志延迟到首条消息时打印（见 _process_message）：探活连接
+                # （ROOM_PROBE）只回状态、不留任何日志，避免主机端被探活刷屏
 
                 # 增大 TCP 缓冲区，避免大文件传输时 sendall 因缓冲区满而 1 秒超时
                 # 单机多开场景下，发送端写入速度远超接收端处理速度，
@@ -349,7 +357,8 @@ class SyncServer(QObject):
                         'ip': addr[0],       # 客户端IP（自 client_id 取地址部分）
                         'last_pong': None,   # 心跳时间戳（收到 PONG 时更新），供 _ping_loop 判定在线/离线
                         'receiving_files': {},  # 大文件接收状态：{filename: {handle, file_size, mtime, received_size, temp_path}}
-                        'send_guard': SendLock()  # 发送串行化：同一 socket 并发写不交错
+                        'send_guard': SendLock(),  # 发送串行化：同一 socket 并发写不交错
+                        'logged': False  # 连接日志是否已打印（首条消息时判定，探活不打印）
                     }
                 
                 # 启动客户端处理线程
@@ -411,11 +420,24 @@ class SyncServer(QObject):
         if not client_info:
             return
         
-        # 验证检查
-        if not client_info['authenticated'] and msg_type != MessageType.AUTH_REQ:
+        # 连接日志延迟到首条消息：探活/对端查询连接静默，不产生任何日志
+        if not client_info.get('logged'):
+            client_info['logged'] = True
+            if msg_type not in (MessageType.ROOM_PROBE, MessageType.ROOM_PEER_QUERY):
+                self.log_message.emit(f"客户端连接: {client_id}")
+        
+        # 验证检查（探活/对端查询免认证：只回状态/清单，不注册客户端、不写日志）
+        if not client_info['authenticated'] and msg_type not in (
+                MessageType.AUTH_REQ, MessageType.ROOM_PROBE, MessageType.ROOM_PEER_QUERY):
             return
         
-        if msg_type == MessageType.AUTH_REQ:
+        if msg_type == MessageType.ROOM_PROBE:
+            self._handle_room_probe(client_id, content)
+
+        elif msg_type == MessageType.ROOM_PEER_QUERY:
+            self._handle_room_peer_query(client_id, content)
+
+        elif msg_type == MessageType.AUTH_REQ:
             self._handle_auth(client_id, content)
 
         elif msg_type == MessageType.END_INFO:
@@ -666,10 +688,19 @@ class SyncServer(QObject):
     def emit_files_notify(self, notify_dict: dict) -> bool:
         """投递通知沿网状分发链路广播（阶段 5）：mesh 就绪返回 True，否则 False。
 
-        返回 False 时调用方回退旧路径（send_files_notify，经主机转发）。
+        返回 False 时调用方记日志（纯 mesh，不回退主机转发）。
         """
         if self.distributor:
             return self.distributor.emit_files_notify(notify_dict)
+        return False
+
+    def emit_clipboard_text(self, mime_type: str, data: bytes) -> bool:
+        """文本投递沿网状分发链路广播（去中心化）：mesh 就绪返回 True，否则 False。
+
+        返回 False 时调用方记日志（纯 mesh，不回退主机转发）。
+        """
+        if self.distributor:
+            return self.distributor.emit_clipboard_text(mime_type, data)
         return False
 
     def _handle_clipboard(self, client_id: str, mime_type: str, data: bytes):
@@ -698,6 +729,66 @@ class SyncServer(QObject):
         msg = Protocol.create_clipboard_message(mime_type, data)
         self._broadcast_data(msg)
     
+    def _handle_room_probe(self, client_id: str, content: bytes):
+        """处理房间探活请求（0x2A）：只回状态，不注册客户端、不写日志、不下发权限。
+
+        供 UDP 摸不到（跨网段/防火墙/对端发现应答器未启动）时的 TCP 定向确认。
+        """
+        try:
+            data = content.decode('utf-8').split(':')
+            sync_version = data[0] if len(data) > 0 else ''
+            room_code = data[1] if len(data) > 1 else ''
+
+            if sync_version != Config.SYNC_LOGIC_VERSION:
+                state = RoomProbeState.VERSION_MISMATCH
+            elif room_code != self.room_code:
+                state = RoomProbeState.ROOM_MISMATCH
+            elif self._reuse:
+                # 连接端复用管理监听：真主机已知才算可加入，否则端点存活但主机暂不可用
+                host = self._host_provider() if self._host_provider else None
+                state = RoomProbeState.ONLINE if (
+                    host and host.get('ip')
+                    and int(host.get('mgmt_port', 0) or 0) > 0
+                    and (host.get('end_id') or '')
+                ) else RoomProbeState.HOST_UNAVAILABLE
+            else:
+                state = RoomProbeState.ONLINE
+
+            client_info = self.clients.get(client_id)
+            if client_info:
+                self._socket_send(client_info, Protocol.create_room_probe_resp(state))
+                # 顺带推送对端清单：探测端据此直接建 mesh 直连，无需主机介绍
+                if state in (RoomProbeState.ONLINE, RoomProbeState.HOST_UNAVAILABLE) \
+                        and self.mesh and self.mesh.mesh_port:
+                    self._socket_send(client_info,
+                                      Protocol.create_room_peer_list(self._local_peer_list()))
+        except Exception:
+            pass
+
+    def _handle_room_peer_query(self, client_id: str, content: bytes):
+        """处理对端查询（0x2D）：版本/房间匹配才回本端端点 + 已知对端清单；零日志。"""
+        try:
+            data = content.decode('utf-8').split(':')
+            sync_version = data[0] if len(data) > 0 else ''
+            room_code = data[1] if len(data) > 1 else ''
+            if sync_version != Config.SYNC_LOGIC_VERSION or room_code != self.room_code:
+                return
+            client_info = self.clients.get(client_id)
+            if client_info:
+                self._socket_send(client_info,
+                                  Protocol.create_room_peer_list(self._local_peer_list()))
+        except Exception:
+            pass
+
+    def _local_peer_list(self) -> list:
+        """本端地址线索清单（置顶主机条目 + 活跃直连端），供探测端直接建直连。"""
+        if not (self.mesh and self.mesh.mesh_port):
+            return []
+        try:
+            return self.mesh.peer_list()
+        except Exception:
+            return []
+
     def _handle_auth(self, client_id: str, content: bytes):
         """处理验证请求"""
         try:
@@ -829,6 +920,7 @@ class SyncServer(QObject):
         if self.mesh and self.mesh.mesh_port:
             host_ep = self.mesh.endpoint.to_dict()
             host_ep['mgmt_port'] = self.port
+            host_ep['is_host'] = True  # 置顶主机条目：引导端据此寻回主机统领权限
             peers.append(host_ep)
         with self._lock:
             for cid, cinfo in list(self.clients.items()):
@@ -893,7 +985,7 @@ class SyncServer(QObject):
                 self.distributor.on_signal(content)
         elif msg_type == MessageType.FILE_STATE_REQ and isinstance(content, dict):
             if self.file_state_store:
-                self.file_state_store.handle_state_req(end_id)
+                self.file_state_store.handle_state_req(end_id, content)
         elif msg_type == MessageType.FILE_STATE_RESP and isinstance(content, dict):
             if self.file_state_store:
                 self.file_state_store.handle_state_resp(end_id, content)
@@ -901,6 +993,10 @@ class SyncServer(QObject):
             # 阶段 5：投递通知沿网状直连到达（不经主机转发）→ 交 UI 展示远程文件胶囊
             if self.distributor:
                 self.distributor.on_files_notify(content)
+        elif msg_type == MessageType.CLIPBOARD_TEXT_SIGNAL:
+            # 投递去中心化：文本内容沿网状直连到达（不经主机转发）→ 交 UI 写系统剪贴板
+            if self.distributor:
+                self.distributor.on_clipboard_text(_filename, content)
 
     def _on_mesh_peer_connected(self, end_id: str, name: str):
         """网状直连建立：同步模式下自动发起一轮状态对比（断线重连自动补齐，阶段 2）。"""
@@ -1834,9 +1930,11 @@ class SyncServer(QObject):
     def _remove_client(self, client_id: str):
         """移除客户端"""
         end_id = None
+        authenticated = False  # 仅已认证端才向 UI 通告"断开"；探活/失败连接未通告"连接"，静默移除
         with self._lock:
             if client_id in self.clients:
                 client_info = self.clients[client_id]
+                authenticated = client_info.get('authenticated', False)
                 end_id = client_info.get('end_id') or None  # 网状身份（LEAVE 通告用）
                 # 清理大文件接收状态：关闭句柄、删除临时文件
                 self._cleanup_client_receiving(client_info)
@@ -1853,12 +1951,13 @@ class SyncServer(QObject):
         except Exception:
             pass
 
-        self.client_disconnected.emit(client_id)
+        if authenticated:
+            self.client_disconnected.emit(client_id)
 
-        # 去中心化：端离线 → 通告其余端拆除直连 + 主机侧拆除网状直连。
+        # 去中心化：端离线 → 通告其余端拆除直连 + 主机侧清掉其地址线索。
         # reuse 模式（全网状管理平面）下本服务仅作管理监听：guest 直连断开
         # 不代表该端离线（其 mesh 数据平面可能仍存活），不广播 LEAVE、
-        # 不 mesh.remove_peer（避免墓碑阻断其网状重连），由主机权威下发生命周期。
+        # 不 mesh.remove_peer（避免误拆其网状直连），由主机权威下发生命周期。
         if end_id and not self._reuse:
             try:
                 self._broadcast_to_mesh_peers(Protocol.create_mesh_peer_leave(end_id))

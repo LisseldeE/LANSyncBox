@@ -105,6 +105,7 @@ class Endpoint:
     name: str = ''
     ip: str = ''
     mesh_port: int = 0
+    mgmt_port: int = 0    # 管理监听端口（供管理面故障切换；非建连必需）
     conn: object = None  # 网状直连连接对象（所有对端均为直连，无中心连接）
 
     def to_dict(self) -> dict:
@@ -113,6 +114,7 @@ class Endpoint:
             'name': self.name,
             'ip': self.ip,
             'mesh_port': self.mesh_port,
+            'mgmt_port': self.mgmt_port,
         }
 
     @classmethod
@@ -122,6 +124,7 @@ class Endpoint:
             name=d.get('name', ''),
             ip=d.get('ip', ''),
             mesh_port=int(d.get('mesh_port', 0) or 0),
+            mgmt_port=int(d.get('mgmt_port', 0) or 0),
         )
 
     def is_valid(self) -> bool:

@@ -12,6 +12,7 @@ from typing import Dict, Optional, List
 from PySide6.QtCore import QObject, Signal
 
 from config import Config, UserConfig
+from network.protocol import Protocol, MessageType, MessageReceiver, RoomProbeState
 
 
 class RoomDiscovery(QObject):
@@ -22,6 +23,7 @@ class RoomDiscovery(QObject):
     # sync_version = 同步逻辑版本号（加入房间只校验此号一致）
     room_found = Signal(str, str, int, str, str)  # (ip, room_code, port, version, sync_version)
     discovery_finished = Signal(list)  # 发现完成 [(ip, room_code, port, version, sync_version), ...]
+    peers_found = Signal(list)  # 本轮发现到的可直连对端 [{end_id,name,ip,mesh_port,mgmt_port}, ...]
     error_occurred = Signal(str)  # 错误消息
 
     # UDP端口范围
@@ -34,6 +36,7 @@ class RoomDiscovery(QObject):
         self.socket: Optional[socket.socket] = None
         self.running = False
         self.discovered_rooms: Dict[tuple, dict] = {}  # {(ip, port): {ip, room_code, port, version, sync_version, host_id, timestamp}}
+        self.discovered_peers: Dict[str, dict] = {}  # {end_id: {end_id,name,ip,mesh_port,mgmt_port,room_code,sync_version}}
         self._lock = threading.Lock()
         self._timer = None  # 超时定时器（stop_discovery 时需 cancel，避免取消探测后仍触发 _finish_discovery）
         self._receive_thread = None  # 接收线程（stop_discovery 时须回收，避免线程堆积）
@@ -50,6 +53,7 @@ class RoomDiscovery(QObject):
         try:
             timeout = timeout or self.DISCOVERY_TIMEOUT
             self.discovered_rooms.clear()
+            self.discovered_peers.clear()
 
             # 创建UDP socket
             self.socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
@@ -127,6 +131,7 @@ class RoomDiscovery(QObject):
         try:
             timeout = timeout or self.DISCOVERY_TIMEOUT
             self.discovered_rooms.clear()
+            self.discovered_peers.clear()
 
             # 创建UDP socket
             self.socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
@@ -256,6 +261,36 @@ class RoomDiscovery(QObject):
                             'host_id': response.get('host_id', ''),
                             'timestamp': time.time()
                         }
+                        # 去中心化发现：应答方自报端点（end_id/mesh_port）+ 其已知对端清单，
+                        # 收到即可直接建 mesh 直连，无需主机介绍。旧端不携带这些字段（空）。
+                        self_end_id = response.get('end_id', '')
+                        if self_end_id:
+                            self.discovered_peers[self_end_id] = {
+                                'end_id': self_end_id,
+                                'name': response.get('name', ''),
+                                'ip': host_ip,
+                                'mesh_port': int(response.get('mesh_port', 0) or 0),
+                                'mgmt_port': int(port or 0),
+                                'room_code': room_code,
+                                'sync_version': sync_version,
+                                'is_host': bool(response.get('is_host')),
+                            }
+                        for p in (response.get('peers') or []):
+                            if not isinstance(p, dict):
+                                continue
+                            pid = p.get('end_id', '')
+                            if not pid:
+                                continue
+                            self.discovered_peers[pid] = {
+                                'end_id': pid,
+                                'name': p.get('name', ''),
+                                'ip': p.get('ip', ''),
+                                'mesh_port': int(p.get('mesh_port', 0) or 0),
+                                'mgmt_port': int(p.get('mgmt_port', 0) or 0),
+                                'room_code': room_code,
+                                'sync_version': sync_version,
+                                'is_host': bool(p.get('is_host')),
+                            }
                     
                     # 安全发射信号
                     try:
@@ -292,6 +327,37 @@ class RoomDiscovery(QObject):
         except RuntimeError:
             # 对象已被删除，忽略
             pass
+        # 去中心化发现：本轮可直连对端清单（过滤房间号 + 同步逻辑版本一致）
+        try:
+            self.peers_found.emit(self.get_discovered_peers())
+        except RuntimeError:
+            pass
+
+    def get_discovered_peers(self, room_code: str = None) -> List[dict]:
+        """本轮发现到的可直连对端（自报端点 + 应答方携带的对端清单）。
+
+        仅保留 sync_version 与本端一致、且房间号匹配（room_code 传入时）的条目；
+        过滤后逐条去重（按 end_id），供调用方直接 mesh.add_peer。
+        """
+        compatible = Config.SYNC_LOGIC_VERSION
+        out: Dict[str, dict] = {}
+        with self._lock:
+            for eid, info in self.discovered_peers.items():
+                if info.get('sync_version') != compatible:
+                    continue
+                if room_code and info.get('room_code') != room_code:
+                    continue
+                if not info.get('end_id') or not info.get('ip') or info.get('mesh_port', 0) <= 0:
+                    continue
+                out[eid] = {
+                    'end_id': info['end_id'],
+                    'name': info.get('name', ''),
+                    'ip': info.get('ip', ''),
+                    'mesh_port': int(info.get('mesh_port', 0) or 0),
+                    'mgmt_port': int(info.get('mgmt_port', 0) or 0),
+                    'is_host': bool(info.get('is_host')),
+                }
+        return list(out.values())
 
     def get_host_id(self, room_code: str) -> str:
         """返回最近一次发现中指定房间所在主机的持久 end_id（用于"创建被占且宿主即本机"判断）
@@ -399,7 +465,8 @@ class RoomResponder(QObject):
     DISCOVERY_PORT_START = 9528  # 发现端口起始
     DISCOVERY_PORT_END = 9537    # 发现端口结束（包含）
 
-    def __init__(self, parent=None, host_id: str = None, host_id_provider=None):
+    def __init__(self, parent=None, host_id: str = None, host_id_provider=None,
+                 endpoint_provider=None, peers_provider=None):
         super().__init__(parent)
         self.socket: Optional[socket.socket] = None
         self.running = False
@@ -413,6 +480,11 @@ class RoomResponder(QObject):
         # host_id_provider：连接端传入可调用对象，每次应答时现行取真主机 end_id
         # （END_INFO 在 join 之后才到达，host_id 需延迟解析）；None 则用固定 self.host_id。
         self._host_id_provider = host_id_provider
+        # endpoint_provider：返回本端端点 dict（end_id/name/mesh_port/mgmt_port）。
+        # 供应答携带自身端点，令探测端无需主机介绍即可直连本端。
+        self._endpoint_provider = endpoint_provider
+        # peers_provider：返回本端已知对端清单 list[dict]，应答时附带下发（对端自扩散）。
+        self._peers_provider = peers_provider
 
     def start(self, room_code: str, port: int = None) -> bool:
         """
@@ -490,18 +562,232 @@ class RoomResponder(QObject):
                     # version=展示用应用版本；sync_version=同步逻辑版本号，加入房间
                     # 只校验后者一致，UI 等非同步变更不要求全员升级）
                     host_id = self._host_id_provider() if self._host_id_provider else self.host_id
-                    response = json.dumps({
+                    response = {
                         'type': 'discovery_response',
                         'room_code': self.room_code,
                         'port': self.port,
                         'version': Config.APP_VERSION,
                         'sync_version': Config.SYNC_LOGIC_VERSION,
                         'host_id': host_id
-                    }).encode('utf-8')
+                    }
+                    # 去中心化发现：附带本端端点与已知对端清单（旧端忽略未知字段，混版安全）
+                    if self._endpoint_provider:
+                        try:
+                            ep = self._endpoint_provider() or {}
+                            response['end_id'] = ep.get('end_id', '')
+                            response['name'] = ep.get('name', '')
+                            response['mesh_port'] = int(ep.get('mesh_port', 0) or 0)
+                            # 应答方即主机 → 标记 is_host，探测端据此置顶寻回主机
+                            response['is_host'] = bool(
+                                ep.get('end_id') and ep.get('end_id') == host_id)
+                        except Exception:
+                            pass
+                    if self._peers_provider:
+                        try:
+                            response['peers'] = self._peers_provider() or []
+                        except Exception:
+                            pass
 
-                    self.socket.sendto(response, addr)
+                    self.socket.sendto(json.dumps(response).encode('utf-8'), addr)
 
             except socket.timeout:
                 continue
             except Exception:
                 continue
+
+
+class TcpRoomProbe(QObject):
+    """房间 TCP 探活（探测端运行，对已知 IP 定向确认房间是否在线）
+
+    历史房间携带上次手动指定的主机 IP 时使用：UDP 广播/定向在跨网段、防火墙或对端
+    发现应答器未启动（发现端口 9528-9537 全被占用）时都摸不到，只有 TCP 可靠。
+    发一帧 ROOM_PROBE 即得状态，对端不注册客户端、不写日志、不下发权限。
+    """
+
+    probed = Signal(str, str, bool)  # (room_code, ip, online)
+
+    PROBE_TIMEOUT = 1.0  # 连接与收包超时（秒），遵循"所有 socket 传输超时 1s"
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self._stopped = False
+
+    def stop(self):
+        """停止后续回调（对话框关闭时调用）；在途探测靠 1s 超时自然收敛"""
+        self._stopped = True
+
+    def probe(self, ip: str, room_code: str, port: int = None):
+        """对指定 IP 发起一次探活（独立线程，不阻塞 GUI）"""
+        if not ip or not room_code:
+            return
+        threading.Thread(
+            target=self._probe_task,
+            args=(ip, room_code, port or Config.DEFAULT_PORT),
+            daemon=True,
+        ).start()
+
+    def _probe_task(self, ip: str, room_code: str, port: int):
+        """探活线程：连接 → 发请求 → 收状态码；任何异常一律视为未探到"""
+        online = False
+        sock = None
+        try:
+            sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            sock.settimeout(self.PROBE_TIMEOUT)
+            sock.connect((ip, port))
+            sock.sendall(Protocol.create_room_probe(Config.SYNC_LOGIC_VERSION, room_code))
+
+            receiver = MessageReceiver()
+            state = None
+            deadline = time.time() + self.PROBE_TIMEOUT
+            while time.time() < deadline:
+                data = sock.recv(4096)
+                if not data:
+                    break
+                receiver.feed(data)
+                while receiver.has_complete_message():
+                    message = receiver.get_message()
+                    if message and message[0] == MessageType.ROOM_PROBE_RESP:
+                        state = (message[5] or b'').decode('utf-8', 'ignore')
+                        break
+                if state is not None:
+                    break
+            # 端点存活即算在线（HOST_UNAVAILABLE 表示有成员在但真主机暂不可用，
+            # 与广播扫描把该成员计为在线一致）
+            online = state in (RoomProbeState.ONLINE, RoomProbeState.HOST_UNAVAILABLE)
+        except Exception:
+            online = False
+        finally:
+            if sock is not None:
+                try:
+                    sock.close()
+                except Exception:
+                    pass
+
+        if self._stopped:
+            return
+        try:
+            self.probed.emit(room_code, ip, online)
+        except RuntimeError:
+            pass
+
+
+def query_peers(ip: str, room_code: str, port: int = None,
+                timeout: float = 1.0) -> list:
+    """TCP 定向取回对端清单（0x2D/0x2E）：UDP 摸不到的已知 IP 用此补齐 mesh 对端。
+
+    发一帧 ROOM_PEER_QUERY 即得对方自身端点 + 其已知对端清单；对端免认证应答、
+    零日志。任何异常一律返回空表（不重试）。
+    """
+    peers: list = []
+    sock = None
+    try:
+        sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        sock.settimeout(timeout)
+        sock.connect((ip, port or Config.DEFAULT_PORT))
+        sock.sendall(Protocol.create_room_peer_query(
+            Config.SYNC_LOGIC_VERSION, room_code))
+        receiver = MessageReceiver()
+        deadline = time.time() + timeout
+        while time.time() < deadline:
+            data = sock.recv(65536)
+            if not data:
+                break
+            receiver.feed(data)
+            got = False
+            while receiver.has_complete_message():
+                message = receiver.get_message()
+                if message and message[0] == MessageType.ROOM_PEER_LIST:
+                    content = message[5]
+                    if isinstance(content, dict):
+                        peers = content.get('peers') or []
+                    got = True
+            if got:
+                break
+    except Exception:
+        peers = []
+    finally:
+        if sock is not None:
+            try:
+                sock.close()
+            except Exception:
+                pass
+    return peers
+
+
+class MeshPeerDiscovery(QObject):
+    """运行期对端自发现（去中心化）：周期广播 + 定向 TCP 查询，持续补齐对端表。
+
+    主机仅"介绍一次"；主机离线或未介绍到时，各端仍能相互发现并建直连：
+    - UDP：同网段各端应答携带自身端点与已知对端清单；
+    - TCP：对已知 IP（历史房间/手动 IP）定向 ROOM_PEER_QUERY 取回清单
+      （跨网段、UDP 不可达场景的唯一通道）。
+    """
+
+    peers_found = Signal(list)  # [{end_id,name,ip,mesh_port,mgmt_port}, ...]
+
+    INTERVAL = 10.0   # 轮询间隔（秒），遵循"不高于每 10 秒一次"
+    UDP_TIMEOUT = 2   # 每轮 UDP 收集窗口（秒）
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self._running = False
+        self._thread = None
+        self._room_code = ''
+        self._tcp_provider = None
+
+    def start(self, room_code: str, tcp_targets_provider=None):
+        """启动自发现线程；tcp_targets_provider() 返回需定向查询的 IP 列表。"""
+        if self._running or not room_code:
+            return
+        self._room_code = room_code
+        self._tcp_provider = tcp_targets_provider
+        self._running = True
+        self._thread = threading.Thread(target=self._loop, daemon=True)
+        self._thread.start()
+
+    def stop(self):
+        """停止自发现（下次轮询前生效；在途一轮靠超时自然收敛）。"""
+        self._running = False
+
+    def _loop(self):
+        disc = RoomDiscovery()
+        while self._running:
+            peers: Dict[str, dict] = {}
+            try:
+                disc.discover_room(self._room_code, timeout=self.UDP_TIMEOUT)
+                # 等收集窗口结束（超时 Timer 在自身线程收敛并回填结果）
+                deadline = time.time() + self.UDP_TIMEOUT + 0.3
+                while self._running and time.time() < deadline:
+                    time.sleep(0.1)
+                for p in disc.get_discovered_peers(self._room_code):
+                    peers[p['end_id']] = p
+                for ip in (self._tcp_provider() if self._tcp_provider else []):
+                    if not self._running:
+                        break
+                    for p in query_peers(ip, self._room_code):
+                        if isinstance(p, dict) and p.get('end_id'):
+                            peers[p['end_id']] = {
+                                'end_id': p['end_id'],
+                                'name': p.get('name', ''),
+                                'ip': p.get('ip', ''),
+                                'mesh_port': int(p.get('mesh_port', 0) or 0),
+                                'mgmt_port': int(p.get('mgmt_port', 0) or 0),
+                                'is_host': bool(p.get('is_host')),
+                            }
+            except Exception:
+                pass
+            peers.pop(UserConfig.get_end_id(), None)
+            if self._running and peers:
+                try:
+                    self.peers_found.emit(list(peers.values()))
+                except RuntimeError:
+                    pass
+            # 分片休眠，便于 stop() 快速生效
+            for _ in range(int(self.INTERVAL)):
+                if not self._running:
+                    return
+                time.sleep(1.0)
+        try:
+            disc.stop_discovery()
+        except Exception:
+            pass

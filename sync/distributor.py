@@ -32,6 +32,8 @@ class Distributor(QObject):
     conflict_pull_requested = Signal(str, str)
     # 投递通知（阶段 5）：收到对端复制文件会话通知（content=JSON 字节），交 UI 展示远程文件胶囊
     files_notify_received = Signal(bytes)
+    # 文本投递：收到对端文本内容 (mime_type, data)，交 UI 写系统剪贴板
+    clipboard_text_received = Signal(str, bytes)
 
     # 操作类型（DISTRIBUTE_SIGNAL 的 op 字段取值）
     OP_ADD = 'add'
@@ -62,6 +64,7 @@ class Distributor(QObject):
         self._protected_dirs = set()  # 受保护目录(相对路径,如收集模式 IP 文件夹名):本体不可删,内部可删
         self._log_handler = None      # 日志回调（无事件循环场景/单测）
         self._files_notify_handler = None  # 投递通知回调 cb(content_bytes)（阶段 5，测试/无事件循环场景）
+        self._clipboard_text_handler = None  # 文本投递回调 cb(mime_type, data)（测试/无事件循环场景）
 
         self._worker = threading.Thread(target=self._worker_loop, daemon=True)
         self._worker.start()
@@ -89,6 +92,11 @@ class Distributor(QObject):
         """设置投递通知回调 cb(content_bytes)（在 mesh 连接线程调用；GUI 场景用
         Qt 信号 files_notify_received）。阶段 5。"""
         self._files_notify_handler = cb
+
+    def set_clipboard_text_handler(self, cb: Callable[[str, bytes], None]):
+        """设置文本投递回调 cb(mime_type, data)（在 mesh 连接线程调用；GUI 场景用
+        Qt 信号 clipboard_text_received）。"""
+        self._clipboard_text_handler = cb
 
     def _notify_log(self, msg: str):
         # 修正：原为 self._notify_log(msg) 自递归（永不 emit），导致分发层日志在
@@ -166,11 +174,14 @@ class Distributor(QObject):
         return signal
 
     def remove_state(self, file: str):
-        """移除端内文件状态条目（自同步链路列表收敛：双方均已删除的文件）。"""
+        """移除端内文件状态条目（自同步链路列表收敛：双方均已删除的文件）。
+
+        保留 _op_counters/_clocks（会话内按路径单调）：对端墓碑的收敛清理各端
+        独立、可能滞后，本地计数若归零，删除后同名重建会复用低 op_no/clock，
+        被对端墓碑去重丢弃或被其反向删除，形成删除-重建震荡。
+        """
         with self._lock:
             self._states.pop(file, None)
-            self._op_counters.pop(file, None)
-            self._clocks.pop(file, None)
 
     def emit_pulled(self, file: str, remote_src_id: str, remote_op_no: int,
                     remote_clock: int = 0, remote_ts: float = 0.0,
@@ -243,27 +254,72 @@ class Distributor(QObject):
         self._notify_applied(signal)
         return signal
 
-    # ---- 投递通知（阶段 5）：复制文件信号改走分发链路，替换主机转发 ----
+    # ---- 投递（阶段 5 起）：复制信号改走分发链路，不经主机转发 ----
 
     def emit_files_notify(self, notify_dict: dict) -> bool:
-        """本地复制文件 → 投递通知沿网状直连广播（不经主机转发）。
+        """本地复制文件 → 投递通知沿网状直连广播（纯 mesh，不经主机）。
 
         文件字节仍由接收端端到端直连复制端 FileProvider 拉取（不动）。
-        返回 True 表示已沿网状发出；分发链路未就绪或无直连对端返回 False，
-        调用方应回退旧路径（经主机转发，阶段 5 迁移兜底）。
+        返回 True 表示已发出；mesh 未就绪 / 无直连对端 / 全部发送失败均返回
+        False，调用方据 False 记日志（不回退主机）。
         """
         if self.mesh is None:
             return False
         if not self.mesh.connected_end_ids():
             return False
         try:
-            self.mesh.send_to_all(
+            sent = self.mesh.send_to_all(
                 Protocol.create_clipboard_notify_signal(notify_dict),
                 except_end_id=self.end_id)
         except Exception as e:
             self._notify_log(f"投递通知广播失败: {e}")
             return False
+        if not sent:
+            self._notify_log("投递通知广播失败: 无可达对端")
+            return False
         return True
+
+    def emit_clipboard_text(self, mime_type: str, data: bytes) -> bool:
+        """本地复制文本 → 文本投递沿网状直连广播（纯 mesh，不经主机）。
+
+        返回 True 表示已发出；mesh 未就绪 / 无直连对端 / 全部发送失败均返回
+        False，调用方据 False 记日志（不回退主机）。
+        """
+        if self.mesh is None or not data:
+            return False
+        if not self.mesh.connected_end_ids():
+            return False
+        try:
+            sent = self.mesh.send_to_all(
+                Protocol.create_clipboard_text_signal(mime_type, data),
+                except_end_id=self.end_id)
+        except Exception as e:
+            self._notify_log(f"文本投递广播失败: {e}")
+            return False
+        if not sent:
+            self._notify_log("文本投递广播失败: 无可达对端")
+            return False
+        return True
+
+    def on_clipboard_text(self, mime_type: str, data):
+        """收到对端文本投递（网状直连）：转交 UI 写系统剪贴板。
+
+        双通道：回调（mesh 连接线程直接调用，测试/无事件循环场景）+ Qt 信号
+        （GUI 主线程）。文本投递是一次性广播（接收端不转发），不进文件状态/
+        冲突裁决，与同步信号（需洪泛去重）语义不同。
+        """
+        if mime_type != 'text' or not isinstance(data, (bytes, bytearray)) or not data:
+            return
+        payload = bytes(data)
+        if self._clipboard_text_handler:
+            try:
+                self._clipboard_text_handler(mime_type, payload)
+            except Exception:
+                pass
+        try:
+            self.clipboard_text_received.emit(mime_type, payload)
+        except Exception:
+            pass
 
     def on_files_notify(self, content):
         """收到对端投递通知（网状直连，阶段 5）：转 bytes 交 UI 展示远程文件胶囊。
@@ -430,10 +486,20 @@ class Distributor(QObject):
                                       exists=exists, clock=clock, ts=ts,
                                       vv=vv))
             elif op == self.OP_DELETE:
-                self._delete_local(file)
+                # 删除留「墓碑」（exists=False）：源端延迟的 dir_create/add 信号到达时
+                # 本端 state.exists=False 判本地胜出，只记知识并转发、不再重建；他端据
+                # 转发收敛。否则会把已删目录/文件重建出幽灵条目。
+                try:
+                    self._delete_local(file)
+                except OSError as e:
+                    # 目录内有在途拉取的 .part 被占用（WinError 32）等：磁盘删不掉也
+                    # 必须记录墓碑并转发，否则删除知识丢失、对端持续供该条目，删除
+                    # 永不收敛（幽灵条目反复复活）。
+                    self._notify_log(f"本地删除失败，仍记录删除: {file}: {e}")
                 self._store(FileState(name=file, op_no=op_no, state=STATE_CHANGE,
                                       exists=False, clock=clock, ts=ts,
                                       vv=vv))
+                self._tombstone_children(file, op_no, clock, ts, vv)
             elif op in (self.OP_RENAME, self.OP_MOVE):
                 old_name = old or file
                 if not self._rename_local(old_name, file):
@@ -559,6 +625,7 @@ class Distributor(QObject):
                 self._store(FileState(name=file, op_no=op_no, state=STATE_CHANGE,
                                       exists=False, clock=clock, ts=ts,
                                       vv=vv))
+                self._tombstone_children(file, op_no, clock, ts, vv)
             elif op in (self.OP_RENAME, self.OP_MOVE):
                 old = signal.get('old', file)
                 old_st = self._states.get(old)
@@ -631,8 +698,29 @@ class Distributor(QObject):
                     new_state.bytes_clock = 0
                     new_state.bytes_ts = 0.0
             self._states[new_state.name] = new_state
+            # 本地计数步进到已应用版本（Lamport 收信步进）：不步进则后续本地操作的
+            # clock 可能低于状态表，被对端更新的墓碑判「本地胜出」丢弃（他端删除后
+            # 本端同名重建不同步）。
+            self._clocks[new_state.name] = max(
+                self._clocks.get(new_state.name, 0), new_state.clock)
             if remove:
                 self._states.pop(remove, None)
+
+    def _tombstone_children(self, folder: str, op_no: int, clock: int, ts: float,
+                            vv: dict):
+        """删除目录时给其下所有既有条目留同版本墓碑。
+
+        目录删除只记父目录墓碑时，子项状态仍为「存在」，对账会把它当缺失而重拉、
+        连带重建已删目录（幽灵目录/幽灵文件反复复活）。此处同步墓碑子项，使
+        _state_delete_wins 拦截其重拉。删除普通文件时无匹配子项，为空操作。
+        """
+        pfx = folder + '/'
+        with self._lock:
+            names = [n for n in self._states if n.startswith(pfx)]
+        for n in names:
+            self._store(FileState(name=n, op_no=op_no, state=STATE_CHANGE,
+                                  exists=False, clock=clock, ts=ts,
+                                  vv=dict(vv)))
 
     # ---- 本地 FS 操作 ----
 

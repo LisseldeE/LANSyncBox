@@ -16,14 +16,14 @@ class Config:
     APP_NAME = "LANSyncBox Pro"
     APP_VERSION = "R1.1.1.0"
     # 同步逻辑版本号
-    SYNC_LOGIC_VERSION = "26.9C1"
+    SYNC_LOGIC_VERSION = "26.9C2"
     APP_SERIAL = "P269.WH"
     APP_SERIAL_FULL = ".".join(x for x in (APP_NAME, APP_VERSION, APP_SERIAL) if x)
     APP_VERSION_SERIAL = ".".join(x for x in (APP_VERSION, APP_SERIAL) if x)
     APP_AUTHOR = "Lisselde_E"
     APP_AUTHOR_LINK = "https://lisseldee.github.io/#1"  # 作者主页链接
 
-    # 运行平台（单个手动变量，跨平台调试时直接改此值即可切换分支，不自动检测）
+    # 运行平台
     PLATFORM = 'w'
 
     # 平台派生布尔标志，供各处分支使用（勿手动改，由上方 PLATFORM 推导）
@@ -254,9 +254,7 @@ class UserConfig:
 
     @classmethod
     def _get_config_path(cls) -> Path:
-        """获取配置文件路径（位于用户主目录\\LANSyncBox\\config.json）
-        注意：此方法不创建文件夹，避免在加载配置时触发文件系统操作。
-        使用用户主目录下的独立文件夹（避开MSIX虚拟化），确保配置文件与同步文件夹在同一位置。"""
+        """获取配置文件路径（位于用户主目录\\LANSyncBox\\config.json）"""
         if cls._config_path is None:
             # 使用用户主目录下的独立文件夹（避开MSIX虚拟化）
             appdata = Config.get_real_appdata()  # 已经包含LANSyncBox
@@ -521,23 +519,12 @@ class UserConfig:
 
     # Pro 版专属历史房间号键。与标准版共用同一 config.json 文件，但历史用独立命名空间：
     # 标准版只解析它认识的 "room_history"(room_code+ip)，天然忽略本键 → 互不污染、不读崩。
-    # Pro 的历史只记房间号（去中心化加入不依赖 IP），故与标准版的 history 无法语义互用，
-    # 分键隔离是最干净的方案。
+    # Pro 的历史以房间号为主键；ip 只在"用户手动指定主机 IP 且连接成功"时记录，作为
+    # 下次扫描的定向探活线索（UDP 摸不到时用），广播发现仍是主路径。
     PRO_ROOM_HISTORY_KEY = "pro_room_history"
 
     @classmethod
     def _ensure_pro_history(cls, data: dict) -> list:
-        """确保 Pro 历史命名空间存在并做一次性迁移。
-
-        - 首次（新键缺失）时，从旧版 "room_history" 播种：取其中所有房间号并入 Pro 历史；
-        - 顺带清理旧版里 Pro 此前写入的『无 IP』条目（其 IP 字段为空/缺失，已是 Pro 专属，
-          标准版无法识别，留着会污染标准版列表）。
-
-        Args:
-            data: 已 load 的配置字典
-        Returns:
-            新键下的 Pro 历史条目列表 [{"room_code": str}, ...]
-        """
         if cls.PRO_ROOM_HISTORY_KEY not in data:
             codes = []
             legacy = data.get("room_history", [])
@@ -546,7 +533,7 @@ class UserConfig:
                 if c and c not in codes:
                     codes.append(c)
             data[cls.PRO_ROOM_HISTORY_KEY] = [{"room_code": c} for c in codes[:3]]
-            # 清理旧版里无 IP 的 Pro 专属条目（保留带 IP 的，那仍属标准版可用数据）
+            # 清理旧版里无 IP 的 Pro 遗留条目（保留带 IP 的，那仍属标准版可用数据）
             cleaned = [
                 h for h in legacy
                 if not (isinstance(h, dict) and h.get("room_code") and not h.get("ip"))
@@ -558,30 +545,38 @@ class UserConfig:
         return data.get(cls.PRO_ROOM_HISTORY_KEY, []), False
 
     @classmethod
-    def get_room_history(cls) -> list:
-        """获取 Pro 版历史房间号列表（最新在前，去重，容量 3）
+    def get_room_history_entries(cls) -> list:
+        """获取 Pro 版历史条目（最新在前，去重，容量 3）
 
-        去中心化改版后不再记忆 IP，历史只保留房间号，便于新端凭编号即可入房。
         Returns:
-            [room_code, ...]（最新在前）
+            [{"room_code": str, "ip": str}, ...]（ip 为空串表示未记录定向线索）
         """
         data = cls.load()
         history, changed = cls._ensure_pro_history(data)
         if changed:
             cls.save()  # 首次迁移实际改了数据（清无 IP 条目/播种新键）时落盘，避免延迟
-        codes = []
+        entries = []
+        seen = set()
         for h in data.get(cls.PRO_ROOM_HISTORY_KEY, []):
-            code = h.get("room_code") if isinstance(h, dict) else None
-            if code and code not in codes:
-                codes.append(code)
-        return codes[:3]
+            if not isinstance(h, dict):
+                continue
+            code = h.get("room_code")
+            if not code or code in seen:
+                continue
+            seen.add(code)
+            entries.append({"room_code": code, "ip": (h.get("ip") or "").strip()})
+        return entries[:3]
 
     @classmethod
-    def add_room_history(cls, room_code: str):
-        """记录一条成功加入过/匹配过的 Pro 房间历史（上限 3 条，超出丢弃最旧）
-        只记房间号，不再记 IP；写入 Pro 专属命名空间，不影响标准版 history。
+    def add_room_history(cls, room_code: str, ip: str = ""):
+        """记录一条成功加入的 Pro 房间历史（上限 3 条，超出丢弃最旧）
+
+        房间号始终记录；ip 仅在"用户手动指定主机 IP 且连接成功"时传入，作为定向探活
+        线索。未传 ip 时不覆盖该房间已有的旧线索（旧 IP 仍可能有效）。
+        写入 Pro 专属命名空间，不影响标准版 history。
         Args:
             room_code: 房间号
+            ip: 上次手动指定的主机 IP（非手动输入模式传空串）
         """
         if not room_code:
             return
@@ -589,9 +584,19 @@ class UserConfig:
         history, _ = cls._ensure_pro_history(data)
         # 兼容脏数据：仅保留 dict 条目，避免残留的畸形数据导致崩溃
         history = [h for h in history if isinstance(h, dict)]
+        ip = (ip or "").strip()
+        # 未传 ip 时保留该房间原有线索，避免广播/列表加入把已记录的手输 IP 抹掉
+        if not ip:
+            for h in history:
+                if h.get("room_code") == room_code and h.get("ip"):
+                    ip = h.get("ip")
+                    break
         # 去重：该房间号已存在则先移除，再作为最新插入
         filtered = [h for h in history if h.get("room_code") != room_code]
-        filtered.insert(0, {"room_code": room_code})
+        entry = {"room_code": room_code}
+        if ip:
+            entry["ip"] = ip
+        filtered.insert(0, entry)
         data[cls.PRO_ROOM_HISTORY_KEY] = filtered[:3]  # 只保留最新 3 条
         cls.save()
 

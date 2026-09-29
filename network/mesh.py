@@ -17,7 +17,11 @@ from utils.send_guard import SendLock
 
 
 class MeshManager(QObject):
-    """网状连接管理器：本端常驻监听端口，维护对端表与直连连接集合。"""
+    """网状连接管理器：本端常驻监听端口，维护地址线索表与当前活跃直连集合。
+
+    peers 仅为「拨号缓存」（知道地址就试连，不代表在线）；对外辐射的清单只反映
+    此刻的真实直连（conns），另置顶一条主机条目（is_host）供主机回归统领权限。
+    """
 
     log_message = Signal(str)
     peer_connected = Signal(str, str)      # (end_id, name)
@@ -36,7 +40,8 @@ class MeshManager(QObject):
                                 # 静默死亡，拆除连接并触发退避重连（防断电/拔线/WiFi
                                 # 断这类无 FIN/RST 的半开链路永久留在 conns 中）
 
-    def __init__(self, name: str = '', end_id: str = '', parent=None):
+    def __init__(self, name: str = '', end_id: str = '', parent=None,
+                 room_code: str = '', password: str = ''):
         super().__init__(parent)
         self.end_id = end_id or UserConfig.get_end_id()
         self.name = name or socket.gethostname()
@@ -45,12 +50,15 @@ class MeshManager(QObject):
         self.mesh_port = 0
         self.ip = self._find_local_ip()
         self.server_socket = None
+        self.room_code = room_code
+        self._mesh_auth = Protocol.mesh_auth(room_code, password)  # 握手准入凭据
 
         self._lock = threading.Lock()
-        self.peers: dict = {}        # end_id -> Endpoint（对端表）
-        self.conns: dict = {}        # end_id -> {socket, receiver, send_guard, role, name, heartbeat_stop}
+        self.peers: dict = {}        # end_id -> Endpoint（地址线索/拨号缓存，非在线状态）
+        self.conns: dict = {}        # end_id -> {socket, receiver, send_guard, role, name, endpoint, heartbeat_stop}
         self._reconnect_threads: dict = {}   # end_id -> Thread
-        self._removed_peers: set = set()     # 墓碑：被 remove_peer 显式移除的对端，防在途拨号复活
+        self.host_ep: Optional[Endpoint] = None  # 房间主机端点线索（辐射清单置顶条目，带 is_host 标识）
+        self.host_id = ''            # 主机权威身份，仅由管理面认证路径写入（wire 声明须与此一致）
         self._reconnect_wait = threading.Event()  # 唤醒所有重连线程（stop 用）
         self._on_message = None      # 可选回调 on_message(end_id, message)
 
@@ -69,6 +77,60 @@ class MeshManager(QObject):
     def get_peer(self, end_id: str) -> Optional[Endpoint]:
         with self._lock:
             return self.peers.get(end_id)
+
+    def peer_list(self) -> list:
+        """地址线索清单（供 UDP/TCP 应答与建连互换，清单即「此刻的直连快照」）。
+
+        置顶一条主机条目（is_host=True，供主机回归统领权限），其后为当前活跃直连
+        的端；不含已知但未连通的历史地址（那些留在 peers 拨号缓存里）。旧端忽略
+        is_host 未知字段，混版安全。
+        """
+        out = []
+        seen = set()
+        with self._lock:
+            host = self.host_ep
+            if host is not None and host.is_valid() and host.end_id not in seen:
+                d = host.to_dict()
+                d['is_host'] = True
+                out.append(d)
+                seen.add(host.end_id)
+            for info in self.conns.values():
+                ep = info.get('endpoint')
+                if ep is None or not ep.is_valid() or ep.end_id in seen:
+                    continue
+                seen.add(ep.end_id)
+                out.append(ep.to_dict())
+        return out
+
+    def set_host(self, ep: Optional[Endpoint]):
+        """登记/刷新房间主机端点线索（置顶辐射用），同时记下主机权威身份。
+
+        仅由管理面认证路径（自身、主机 END_INFO、HOST_INFO 重定向）调用；wire 上
+        他人清单里的 is_host 声明须先与本端已知 host_id 一致才允许刷新（见 merge_peers）。
+        """
+        if not ep or not ep.end_id:
+            return
+        with self._lock:
+            self.host_ep = ep
+            self.host_id = ep.end_id
+
+    def merge_peers(self, peer_dicts: list):
+        """合并地址线索（gossip/发现入口）：登记拨号缓存；带 is_host 的条目刷新主机置顶线索。
+
+        is_host 声明须与已认证得到的主机身份一致才采信，防任意端置顶冒充主机。
+        """
+        for d in peer_dicts or []:
+            if not isinstance(d, dict):
+                continue
+            ep = Endpoint.from_dict(d)
+            if not ep.end_id or ep.end_id == self.end_id:
+                continue
+            if d.get('is_host'):
+                with self._lock:
+                    known = self.host_id
+                if known and ep.end_id == known:
+                    self.set_host(ep)
+            self.add_peer(ep)
 
     def set_message_handler(self, cb):
         """设置消息回调 cb(end_id, message)；None 表示仅发 Qt 信号。"""
@@ -144,28 +206,26 @@ class MeshManager(QObject):
         self.server_socket = None
         del peers
 
-    # ---- 对端表维护（引导/JOIN/LEAVE 入口） ----
+    # ---- 地址线索维护（引导/JOIN/GOSSIP/LEAVE 入口） ----
 
     def add_peer(self, ep: Endpoint):
-        """登记对端（引导清单/JOIN 通告入口）；若未连通则启动/唤醒重连。"""
+        """登记地址线索（引导清单/JOIN/gossip 入口）：知道地址即试连，不代表在线。"""
         if not ep or not ep.end_id or ep.end_id == self.end_id:
             return
         with self._lock:
-            self._removed_peers.discard(ep.end_id)  # 显式重新登记（JOIN）清除墓碑
             self.peers[ep.end_id] = ep
         self._ensure_reconnect(ep.end_id)
 
     def remove_peer(self, end_id: str):
-        """移除对端（LEAVE 通告入口）：拆除直连、停止重连并立墓碑。
+        """移除对端（LEAVE 通告入口）：拆除直连、停止重连并清掉地址线索。
 
-        墓碑在显式 add_peer（JOIN/引导清单重新登记）前一直生效，防止
-        「移除时已在途的拨号在握手完成后将已移除对端复活」的竞态。
+        不立墓碑：mesh 层不维护生命周期裁决，被移除端若再次宣告/拨入即重新登记，
+        离房语义由主机成员配置（认证面）把关。
         """
         with self._lock:
             self.peers.pop(end_id, None)
             info = self.conns.pop(end_id, None)
-            thread = self._reconnect_threads.pop(end_id, None)
-            self._removed_peers.add(end_id)
+            self._reconnect_threads.pop(end_id, None)
         if info:
             self._close_conn_info(info)
             self.peer_disconnected.emit(end_id)
@@ -189,23 +249,29 @@ class MeshManager(QObject):
         t.start()
 
     def _reconnect_loop(self, end_id: str):
-        """断线退避重连：未连通则拨号，失败递增退避；对端被移除即退出。"""
+        """断线重连：未连通则拨号，失败递增退避；退避到上限仍连不上即停止。
+
+        地址线索留在 peers（不删），待对方主动宣告或被重新介绍时经 add_peer 再试，
+        避免跨网段死对端在后台无限重试。
+        """
         backoff = self.RECONNECT_BASE
         while self.running:
             with self._lock:
                 ep = self.peers.get(end_id)
                 connected = end_id in self.conns
             if not ep or not ep.is_valid():
-                break  # 对端已移除/信息不全，退出
+                break  # 地址线索已移除/信息不全，退出
             if connected:
                 self._reconnect_wait.wait(1.0)
                 continue
             if self._dial(ep):
                 backoff = self.RECONNECT_BASE
                 self._reconnect_wait.wait(1.0)
-            else:
-                self._reconnect_wait.wait(backoff)
-                backoff = min(backoff * 2, self.RECONNECT_MAX)
+                continue
+            if backoff >= self.RECONNECT_MAX:
+                break  # 退避到上限仍连不上 → 停止重试（等其自报或被重新介绍）
+            self._reconnect_wait.wait(backoff)
+            backoff = min(backoff * 2, self.RECONNECT_MAX)
 
     def _dial(self, ep: Endpoint) -> bool:
         """主动拨号对端：TCP 建连（END_INFO 由连接处理线程统一发送）。成功返回 True。"""
@@ -252,21 +318,23 @@ class MeshManager(QObject):
     def _handle_mesh_conn(self, conn_socket, expected_end_id: Optional[str], role: str):
         """处理一条网状直连：握手（双向交换 END_INFO 识别对端）→ 注册去重 → 消息分发。
 
-        双方在建连后都立即发送自己的 END_INFO，故拨号方与接受方都能在对端
-        处理线程中识别彼此；END_INFO 与本连接后续所有发送共用同一把发送锁，
-        避免并发写交错。
+        双方在建连后都立即发送自己的 END_INFO（含房间号与准入凭据），故拨号方与
+        接受方都能在对端处理线程中识别彼此并校验准入；未通过者静默关闭。END_INFO
+        与本连接后续所有发送共用同一把发送锁，避免并发写交错。
         """
         send_guard = SendLock()
         receiver = MessageReceiver()
         pending = []
         peer_end_id = None
         peer_ep = None
+        rejected = False
         conn_socket.settimeout(1.0)
 
-        # ---- 握手阶段：发送自身 END_INFO，等待对端 END_INFO ----
+        # ---- 握手阶段：发送自身 END_INFO（带准入字段），等待对端 END_INFO ----
         try:
             send_guard.send(conn_socket, Protocol.create_end_info(
-                self.end_id, self.name, self.mesh_port))
+                self.end_id, self.name, self.mesh_port,
+                room_code=self.room_code, auth=self._mesh_auth))
             last_activity = time.time()
             while self.running:
                 try:
@@ -291,15 +359,19 @@ class MeshManager(QObject):
                             break  # 非法身份
                         if expected_end_id and peer_end_id != expected_end_id:
                             break  # 身份与拨号目标不符
+                        if not self._verify_peer(content):
+                            rejected = True
+                            break  # 房间/凭据不符 → 拒绝
                         peer_ep = Endpoint(
                             end_id=peer_end_id,
                             name=content.get('name', ''),
                             ip=conn_socket.getpeername()[0] if role == 'in' else self._sock_peer_ip(conn_socket),
                             mesh_port=int(content.get('mesh_port', 0) or 0),
+                            mgmt_port=int(content.get('mgmt_port', 0) or 0),
                         )
                         break
                     pending.append(message)
-                if peer_ep is not None:
+                if rejected or peer_ep is not None:
                     break
         except Exception:
             peer_ep = None
@@ -349,6 +421,16 @@ class MeshManager(QObject):
                 self._close_socket(conn_socket)
                 self.peer_disconnected.emit(peer_ep.end_id)
 
+    def _verify_peer(self, content: dict) -> bool:
+        """网状准入校验：房间号一致 + 准入凭据匹配，任一不符即拒。
+
+        不做旧端放行：版本不同者在认证面就被挡在房间之外，成不了本房间的成员。
+        未通过者由调用方静默关闭（端口公开，不刷日志、不发 peer_disconnected）。
+        """
+        if self.room_code and content.get('room_code') != self.room_code:
+            return False
+        return (content.get('auth') or '') == self._mesh_auth
+
     def _sock_peer_ip(self, conn_socket):
         try:
             return conn_socket.getpeername()[0]
@@ -372,12 +454,6 @@ class MeshManager(QObject):
             False = 本连接是输家，已被关闭（调用方应结束处理）。
         """
         survivor_role = 'out' if self.end_id < ep.end_id else 'in'
-        with self._lock:
-            if ep.end_id in self._removed_peers:
-                # 墓碑生效：该对端已被显式移除，拒绝其建连（含移除前在途的拨号），
-                # 防止移除后被在途拨号握手完成复活；重新加入须经 add_peer 清墓碑。
-                self._close_socket(conn_socket)
-                return False
         new_info = {
             'socket': conn_socket,
             'receiver': MessageReceiver(),
@@ -407,7 +483,14 @@ class MeshManager(QObject):
             self._close_socket(loser_sock)
         if adopted:
             self.peer_connected.emit(ep.end_id, ep.name)
+            self._announce_peers(ep.end_id)
         return adopted
+
+    def _announce_peers(self, end_id: str):
+        """向刚建连的对端互换地址线索（此刻直连快照 + 置顶主机条目）：主机不在场也能扩散。"""
+        peers = self.peer_list()
+        if peers:
+            self.send_to_peer(end_id, Protocol.create_mesh_peer_list(peers))
 
     # ---- 心跳（探测半开连接） ----
 
@@ -481,6 +564,11 @@ class MeshManager(QObject):
 
     def _dispatch(self, end_id: str, message):
         msg_type, filename, file_size, mtime, hide, content = message
+        if msg_type == MessageType.MESH_PEER_LIST:
+            # 地址线索互换：mesh 内部消化（并入拨号缓存 + 刷新主机置顶线索），不上抛业务层
+            if isinstance(content, dict):
+                self.merge_peers(content.get('peers'))
+            return
         if self._on_message is not None:
             try:
                 self._on_message(end_id, message)

@@ -32,7 +32,7 @@ from ui.about_dialog import AboutDialog
 from network.server import SyncServer
 from utils.clean_queue import get_clean_queue
 from network.client import SyncClient
-from network.discovery import RoomResponder
+from network.discovery import RoomResponder, MeshPeerDiscovery
 from utils.transfer_queue import TransferQueue
 from network.file_provider import FileProvider, pull_file
 
@@ -432,6 +432,7 @@ class SyncWindow(QMainWindow):
         self.server = None
         self.client = None
         self.responder = None
+        self._peer_discovery = None   # 运行期对端自发现（主机仅"介绍一次"，之后各端自发现）
 
         # 模式状态（"sync"同步 / "collect"收集；主机端=server.mode，连接端=client.mode）
         self._mode = "sync"
@@ -796,8 +797,12 @@ class SyncWindow(QMainWindow):
             self.server.sync_pull_progress.connect(self._on_sync_pull_progress)
             self.server.sync_pull_done.connect(self._on_sync_pull_done)
 
-            # 先启动房间响应服务（占用发现端口）
-            self.responder = RoomResponder(self)
+            # 先启动房间响应服务（占用发现端口）：应答携带本端端点与已知对端清单，
+            # 供探测端无需主机介绍即可直连本端（去中心化发现）
+            self.responder = RoomResponder(
+                self,
+                endpoint_provider=self._local_endpoint,
+                peers_provider=self._mesh_peer_list)
             if not self.responder.start(self.room_code):
                 self._add_record("启动发现服务失败", "错误", "")
                 return
@@ -813,6 +818,8 @@ class SyncWindow(QMainWindow):
                 # 房间就绪：开启局域网剪切板分发 + 启动本端目录服务（复制端 serve 用）
                 self._start_provider()
                 self._monitor.set_enabled(True)
+                # 房间就绪：启动对端自发现（周期广播 + 定向 TCP 查询）
+                self._start_peer_discovery()
             else:
                 self._add_record("启动失败", "错误", "")
                 self.responder.stop()
@@ -889,19 +896,18 @@ class SyncWindow(QMainWindow):
                                  Q_ARG(str, "网络"), Q_ARG(str, message))
 
     def _on_local_clipboard_committed(self, mime_type: str, data: bytes):
-        """本端系统剪贴板新增文本：按主机/连接端身份上报分发"""
+        """本端系统剪贴板新增文本：沿网状直连广播投递给各对端（去中心化）"""
         if mime_type != "text" or not data:
             return
         # 本端新复制内容：用户的下一次 Ctrl+V 应留给前台应用，释放全局劫持；
         # 旧"可用远程文件"意图被本次本机复制取代，一并清空避免后续重新劫持
         self._release_global_hotkey()
         self._remote_files = None
-        if self.is_host:
-            if self.server:
-                self.server.send_clipboard(mime_type, data)
-        else:
-            if self.client and self.client.authenticated:
-                self.client.send_clipboard(mime_type, data)
+        # 投递去中心化（纯 mesh）：文本沿网状直连广播给各对端（含主机），不经主机转发；
+        # mesh 未就绪（无直连对端）即失败记日志，不回退主机。
+        emitter = self.server if self.is_host else self.client
+        if emitter is None or not emitter.emit_clipboard_text(mime_type, data):
+            self.add_log("投递", I18n.tr('clipboard_mesh_unavailable'))
 
     def _apply_system_clipboard(self, mime_type: str, data: bytes) -> bool:
         """将接收到的剪切板文本写入本端系统剪贴板，并记录摘要以抑制回环。"""
@@ -979,12 +985,12 @@ class SyncWindow(QMainWindow):
         # 旧"可用远程文件"意图被本次本机复制取代，一并清空避免后续重新劫持
         self._release_global_hotkey()
         self._remote_files = None
-        # 网络未就绪时不投递
+        # 网络组件未就绪时不投递（纯 mesh：不依赖主机管理连接，mesh 就绪由广播处判定）
         if self.is_host:
             if self.server is None:
                 return
         else:
-            if self.client is None or not self.client.authenticated:
+            if self.client is None:
                 return
 
         files_map = {}
@@ -1053,14 +1059,11 @@ class SyncWindow(QMainWindow):
             'source_ip': self._provider.host,
             'source_port': self._provider.port,
         }
-        # 阶段 5：投递通知优先沿网状直连分发（不经主机转发）；分发链路未就绪
-        # （无直连对端）时回退旧路径经主机转发（迁移兜底，不丢通知）。
-        if self.is_host:
-            if self.server and not self.server.emit_files_notify(notify):
-                self.server.send_files_notify(notify)
-        else:
-            if self.client and not self.client.emit_files_notify(notify):
-                self.client.send_files_notify(notify)
+        # 投递去中心化（纯 mesh）：投递通知沿网状直连广播给各对端（含主机），不经
+        # 主机转发；mesh 未就绪（无直连对端）即失败记日志，不回退主机。
+        emitter = self.server if self.is_host else self.client
+        if emitter is None or not emitter.emit_files_notify(notify):
+            self.add_log("投递", I18n.tr('clipboard_mesh_unavailable'))
         self.add_log("投递", I18n.tr('clipboard_files_copied', count=len(files_meta)))
 
     def _record_own_copy(self, files_meta: list):
@@ -2321,11 +2324,15 @@ class SyncWindow(QMainWindow):
                 # END_INFO 在 join 之后才到达，故用 provider 每次应答现行取；主机离线静默
                 # 待机期间 _host_id 仍保留，回归判断不受影响。
                 self.responder = RoomResponder(
-                    self, host_id_provider=lambda: getattr(self.client, '_host_id', '') or '')
+                    self, host_id_provider=lambda: getattr(self.client, '_host_id', '') or '',
+                    endpoint_provider=self._local_endpoint,
+                    peers_provider=self._mesh_peer_list)
                 # 广播本端真实管理监听端口：reuse 下 9527 被占会顺延，写死 9527
                 # 会让本端虽存活却无法被新端发现（单点盲区）。mgmt_port() 取实际绑定值。
                 if self.responder.start(self.room_code, self.client.mgmt_port()):
                     self._add_record(f"发现服务 端口: {self.responder.discovery_port}", "启动", "")
+            # 房间就绪：启动对端自发现（主机仅"介绍一次"，之后各端自发现自扩散）
+            self._start_peer_discovery()
         
         # 房间就绪：启用顶部拖拽放置区（快捷添加文件到当前同步列表/根目录）
         self._init_drop_zone()
@@ -3318,6 +3325,59 @@ class SyncWindow(QMainWindow):
 
     # ---- 去中心化分发链路（阶段 1）----
 
+    # ---- 去中心化对端发现（主机仅"介绍一次"，之后各端自发现自扩散） ----
+
+    def _mesh_of(self):
+        """本端网状管理器（主机/连接端统一入口）。"""
+        if self.is_host:
+            return self.server.mesh if self.server else None
+        return self.client.mesh if self.client else None
+
+    def _local_endpoint(self) -> dict:
+        """本端端点（含管理端口），供发现应答与对端清单携带。"""
+        mesh = self._mesh_of()
+        if mesh is None or not mesh.mesh_port:
+            return {}
+        ep = mesh.endpoint.to_dict()
+        if self.is_host:
+            ep['mgmt_port'] = self.server.port if self.server else 0
+        else:
+            ep['mgmt_port'] = self.client.mgmt_port() if self.client else 0
+        return ep
+
+    def _mesh_peer_list(self) -> list:
+        """本端已知网状对端清单（发现应答附带下发，实现互介绍自扩散）。"""
+        mesh = self._mesh_of()
+        return mesh.peer_list() if mesh else []
+
+    def _tcp_discovery_targets(self) -> list:
+        """需 TCP 定向查询的 IP：主机地址 + 网状已知对端 IP（跨网段/UDP 不可达靠此换清单）。"""
+        ips = []
+        ha = getattr(self, 'host_address', '') or ''
+        if ha:
+            ips.append(ha)
+        mesh = self._mesh_of()
+        if mesh is not None:
+            for ep in mesh.peer_list():
+                if ep.get('ip'):
+                    ips.append(ep['ip'])
+        seen = set()
+        return [x for x in ips if x and not (x in seen or seen.add(x))]
+
+    def _start_peer_discovery(self):
+        """房间就绪：启动运行期对端自发现（周期广播 + 定向 TCP 查询）。"""
+        if self._peer_discovery is not None or self._mesh_of() is None:
+            return
+        self._peer_discovery = MeshPeerDiscovery(self)
+        self._peer_discovery.peers_found.connect(self._on_peers_discovered)
+        self._peer_discovery.start(self.room_code, self._tcp_discovery_targets)
+
+    def _on_peers_discovered(self, peers: list):
+        """自发现结果并入地址线索（带 is_host 者刷新主机置顶线索）。"""
+        mesh = self._mesh_of()
+        if mesh is not None and peers:
+            mesh.merge_peers(peers)
+
     def _mesh_sync_active(self) -> bool:
         """网状分发链路是否可用：同步模式 + 网状/分发引擎就绪。
 
@@ -3568,6 +3628,9 @@ class SyncWindow(QMainWindow):
             self.client.disconnect()
         if self.responder:
             self.responder.stop()
+        if self._peer_discovery is not None:
+            self._peer_discovery.stop()
+            self._peer_discovery = None
 
         # 关闭顶部快捷放置区，避免残留
         if self._drop_zone is not None:

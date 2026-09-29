@@ -45,16 +45,40 @@ class MessageType:
 
     # ---- 去中心化架构消息（content=JSON；0x20-0x27 均为网状/直连链路） ----
     DISTRIBUTE_SIGNAL = 0x20  # 分发信号（端→网状各直连对端）：{src_id, op_no, op, file, state, clock, ts, dst?}
-    FILE_STATE_REQ = 0x21     # 文件状态请求（端→对端）：{src_id}
-    FILE_STATE_RESP = 0x22    # 文件状态响应（对端→端）：{src_id, entries:[{name, op_no, state, exists, clock, ts}]}
+    FILE_STATE_REQ = 0x21     # 文件状态请求（端→对端）：{src_id, dirs?（26.9C2 可选，本端目录清单）}
+    FILE_STATE_RESP = 0x22    # 文件状态响应（对端→端）：{src_id, entries:[{name, op_no, state, exists, clock, ts}],
+                              #   dirs_missing?（26.9C2 可选，"我有你无"的目录差异集）}
     SYNC_PULL_REQ = 0x23      # 同步拉取请求（端→对端 FileProvider 会话）：{session_id, token, name}
     END_INFO = 0x24           # 端身份信息（握手后交换）：{end_id, name, mesh_port, mgmt_port}
-    MESH_PEER_LIST = 0x25     # 对端清单引导（主机→新加入端）：{peers:[{end_id, name, ip, mesh_port, mgmt_port}]}
+    MESH_PEER_LIST = 0x25     # 对端清单（主机→新加入端引导；mesh 建连后亦端间互换实现"互相介绍"自扩散）：
+                              #   {peers:[{end_id, name, ip, mesh_port, mgmt_port}]}
     MESH_PEER_JOIN = 0x26     # 新端加入通告（主机→各端）：{peer:{end_id, name, ip, mesh_port, mgmt_port}}
     MESH_PEER_LEAVE = 0x27    # 端离线通告（主机→各端）：{end_id}
     CLIPBOARD_NOTIFY_SIGNAL = 0x28  # 投递通知（端→网状各直连对端；阶段 5 替换主机转发）：content=JSON 会话元数据
     HOST_INFO = 0x29          # 主机信息指示（连接端"复用管理监听"→接入的新端）：{host_id, ip, port}，
                               # 告知真主机地址，令接入端把管理连接换接到真主机（H1：控制面只连主机）
+    ROOM_PROBE = 0x2A         # 房间探活请求（探测端→目标端点）：content="{sync_version}:{room_code}"，
+                              # 只回状态不注册客户端/不写日志（UDP 摸不到时的 TCP 定向探活）
+    ROOM_PROBE_RESP = 0x2B    # 房间探活响应（目标端点→探测端）：content=RoomProbeState 单字符状态码
+    CLIPBOARD_TEXT_SIGNAL = 0x2C  # 文本投递（端→网状各直连对端）：与 CLIPBOARD_DATA 同构但走网状直连
+                                  # （不经主机转发）；filename=mime_type、content=原始 utf-8 字节，不可加入 JSON 解析集
+    ROOM_PEER_QUERY = 0x2D    # 对端查询请求（探测端→房间任一存活端）：content="{sync_version}:{room_code}"，
+                              # 免认证、零日志；用于 UDP 摸不到的 TCP 定向取回对端清单
+    ROOM_PEER_LIST = 0x2E     # 对端清单（应答方→探测端）：{peers:[{end_id, name, ip, mesh_port, mgmt_port}]}，
+                              # 用于 ROOM_PEER_QUERY 应答与 ROOM_PROBE 顺带推送（mesh 建连后的互换走 0x25）
+
+
+class RoomProbeState:
+    """房间探活状态码（ROOM_PROBE_RESP 的 content 取值）
+
+    ONLINE/HOST_UNAVAILABLE 均表示"该房间有存活端点"（前者含真主机可用，后者为
+    连接端复用监听且主机暂不可用）；ROOM_MISMATCH/VERSION_MISMATCH 表示该端点
+    不是目标房间或版本不兼容，探测方据此回退广播发现。
+    """
+    ONLINE = '1'
+    HOST_UNAVAILABLE = '2'
+    ROOM_MISMATCH = '3'
+    VERSION_MISMATCH = '4'
 
 
 class Protocol:
@@ -394,21 +418,34 @@ class Protocol:
         return Protocol._pack_json(MessageType.DISTRIBUTE_SIGNAL, signal)
 
     @staticmethod
-    def create_file_state_req(src_id: str) -> bytes:
-        """创建文件状态请求消息（0x21，端→对端）"""
-        return Protocol._pack_json(MessageType.FILE_STATE_REQ, {'src_id': src_id})
+    def create_file_state_req(src_id: str, dirs: list = None) -> bytes:
+        """创建文件状态请求消息（0x21，端→对端）
+
+        dirs（可选，26.9C2）：本端存在的目录相对路径清单，供对端回「我有你无」
+        的差异集——空目录不进快照，仅靠 dir_create 信号会因丢失而永久分叉。
+        旧端忽略该字段，行为不变。
+        """
+        data = {'src_id': src_id}
+        if dirs is not None:
+            data['dirs'] = dirs  # 空清单也须显式带上：区分「本端无目录」与旧端（无此字段）
+        return Protocol._pack_json(MessageType.FILE_STATE_REQ, data)
 
     @staticmethod
-    def create_file_state_resp(src_id: str, entries: list, session: dict = None) -> bytes:
+    def create_file_state_resp(src_id: str, entries: list, session: dict = None,
+                              dirs_missing: list = None) -> bytes:
         """创建文件状态响应消息（0x22，对端→端）
 
         entries: [{name, op_no, state, exists, clock, ts}]（vv 由 src_id 隐式关联）
         session（可选）: {session_id, token, host, port} 自同步会话——拉取方据此
             直连本端 FileProvider 端到端拉取（阶段 2 自同步链路）。
+        dirs_missing（可选，26.9C2）：本端有而请求方清单无的目录名，由请求方本地
+            判定落地（删除优先在其本端生效，避免补发信号的新时间戳复活已删目录）。
         """
         data = {'src_id': src_id, 'entries': entries}
         if session:
             data['session'] = session
+        if dirs_missing:
+            data['dirs_missing'] = dirs_missing
         return Protocol._pack_json(MessageType.FILE_STATE_RESP, data)
 
     @staticmethod
@@ -426,17 +463,32 @@ class Protocol:
         )
 
     @staticmethod
+    def mesh_auth(room_code: str, password: str = '') -> str:
+        """网状握手准入凭据：sha256(房间号:sha256(密码))，与 AUTH_REQ 同口径。
+
+        无密码房间返回空串（准入退化为仅房间绑定）。静态凭据、明文上链，
+        强度与既有 AUTH_REQ 一致（局域网威胁模型不变）。
+        """
+        if not password:
+            return ''
+        import hashlib
+        pw = hashlib.sha256(password.encode()).hexdigest()
+        return hashlib.sha256(f"{room_code}:{pw}".encode()).hexdigest()
+
+    @staticmethod
     def create_end_info(end_id: str, name: str, mesh_port: int,
-                        mgmt_port: int = 0) -> bytes:
+                        mgmt_port: int = 0, room_code: str = '',
+                        auth: str = '') -> bytes:
         """创建端身份信息消息（0x24，握手后交换）
 
         mgmt_port: 本端管理监听端口（全网状管理平面：各端均监听管理端口，
         供管理连接故障时切换下一端点；旧版本缺省 0 = 不提供）
+        room_code/auth: 网状准入字段，仅网状握手携带（管理链路留空），加法字段
         """
         return Protocol._pack_json(
             MessageType.END_INFO,
             {'end_id': end_id, 'name': name, 'mesh_port': mesh_port,
-             'mgmt_port': mgmt_port},
+             'mgmt_port': mgmt_port, 'room_code': room_code, 'auth': auth},
             filename=end_id,
         )
 
@@ -483,6 +535,43 @@ class Protocol:
         """
         return Protocol._pack_json(MessageType.CLIPBOARD_NOTIFY_SIGNAL, notify_dict)
 
+    @staticmethod
+    def create_clipboard_text_signal(mime_type: str, data: bytes) -> bytes:
+        """创建文本投递消息（0x2C，端→网状各直连对端）
+
+        与 CLIPBOARD_DATA 同构（filename=mime_type、content=原始 utf-8 字节），
+        但走网状直连分发（不经主机转发）；content 为原始字节，不做 JSON 解析。
+        """
+        return Protocol.pack_message(
+            MessageType.CLIPBOARD_TEXT_SIGNAL,
+            filename=mime_type,
+            file_size=len(data),
+            content=data,
+        )
+
+    @staticmethod
+    def create_room_probe(sync_version: str, room_code: str) -> bytes:
+        """创建房间探活请求（0x2A）：content="{sync_version}:{room_code}" """
+        content = f"{sync_version}:{room_code}".encode('utf-8')
+        return Protocol.pack_message(MessageType.ROOM_PROBE, '', len(content), False, content)
+
+    @staticmethod
+    def create_room_probe_resp(state: str) -> bytes:
+        """创建房间探活响应（0x2B）：content=RoomProbeState 单字符状态码"""
+        content = str(state).encode('utf-8')
+        return Protocol.pack_message(MessageType.ROOM_PROBE_RESP, '', len(content), False, content)
+
+    @staticmethod
+    def create_room_peer_query(sync_version: str, room_code: str) -> bytes:
+        """创建对端查询请求（0x2D）：content="{sync_version}:{room_code}"（原始字节，非 JSON）"""
+        content = f"{sync_version}:{room_code}".encode('utf-8')
+        return Protocol.pack_message(MessageType.ROOM_PEER_QUERY, '', len(content), False, content)
+
+    @staticmethod
+    def create_room_peer_list(peers: list) -> bytes:
+        """创建对端清单（0x2E）：content=JSON {"peers":[{end_id,name,ip,mesh_port,mgmt_port}]}"""
+        return Protocol._pack_json(MessageType.ROOM_PEER_LIST, {'peers': peers or []})
+
     # 注：P2P_FILE_DATA(0x19) 为预留类型，投递已改走 FILE_BEGIN/FILE_DATA/FILE_END 端到端 TCP 流式传输，不再使用。
 
 
@@ -514,6 +603,7 @@ class MessageReceiver:
         MessageType.MESH_PEER_LEAVE,
         MessageType.CLIPBOARD_NOTIFY_SIGNAL,
         MessageType.HOST_INFO,
+        MessageType.ROOM_PEER_LIST,
     }
 
     def __init__(self):

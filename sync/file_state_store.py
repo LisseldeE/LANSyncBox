@@ -197,9 +197,33 @@ class FileStateStore(QObject):
             out.append(st.to_wire_dict())
         return out
 
+    def _local_dirs(self) -> list:
+        """本端存在的目录相对路径清单（空目录对账兜底的比对基准）。
+
+        只取状态表内条目：磁盘有目录但状态表无条目的情况已由 emit_local_missing
+        在建连时补扫，重复纳入只会让清单膨胀。
+        """
+        if self.distributor is None:
+            return []
+        out = []
+        seen = set()
+        for st in self.distributor.states().values():
+            if not st.exists:
+                continue
+            try:
+                if os.path.isdir(self._safe_join(st.name)):
+                    key = os.path.normcase(st.name)
+                    if key in seen:
+                        continue  # 大小写变体视为同一目录，只保留首个写法
+                    seen.add(key)
+                    out.append(st.name)
+            except ValueError:
+                continue
+        return out
+
     # ---- 收到 FILE_STATE_REQ：回 RESP ----
 
-    def handle_state_req(self, end_id: str):
+    def handle_state_req(self, end_id: str, content: dict = None):
         """收到对端文件状态请求：登记自同步会话并回 FILE_STATE_RESP。
 
         会话按请求方隔离（session_id=sync_{请求方}，token 固定），多端同时
@@ -250,10 +274,27 @@ class FileStateStore(QObject):
                 }
         try:
             self.mesh.send_to_peer(
-                end_id, Protocol.create_file_state_resp(self.end_id, self.snapshot(),
-                                                        session=session))
+                end_id, Protocol.create_file_state_resp(
+                    self.end_id, self.snapshot(), session=session,
+                    dirs_missing=self._missing_dirs_from(content)))
         except Exception as e:
             self.log_message.emit(f"文件状态响应失败: {e}")
+
+    def _missing_dirs_from(self, content) -> list:
+        """按请求方附来的目录清单算出「本端有而请求方无」的差异集。
+
+        比较按 os.path.normcase 归一：同一物理目录的大小写变体不视为缺失
+        （POSIX 下 normcase 为恒等，Linux 不受影响）。
+        请求方未附清单（旧端）→ 返回空，整段跳过（混版安全）。
+        """
+        if not isinstance(content, dict):
+            return []
+        raw = content.get('dirs')
+        if not isinstance(raw, list):
+            return []
+        theirs = {os.path.normcase(d) for d in raw if isinstance(d, str)}
+        return [d for d in self._local_dirs()
+                if os.path.normcase(d) not in theirs]
 
     # ---- 收到 FILE_STATE_RESP：对比 + 拉取队列 + 补收删除 + 清理 ----
 
@@ -341,7 +382,43 @@ class FileStateStore(QObject):
                         and local_st.state == STATE_CHANGE \
                         and remote.state == STATE_CHANGE:
                     self._cleanup_entry(name)
+        # 空目录对账兜底（26.9C2）：对端回「我有你无」的目录 → 本端补建并扩散。
+        # 判定全在本地（删除优先/祖先已删/同名文件），不用对端信号的时间戳，
+        # 避免复活本端已删目录。
+        if self._apply_missing_dirs(content.get('dirs_missing')):
+            has_diff = True
         self._finish_round(end_id, has_diff)
+
+    def _apply_missing_dirs(self, names) -> bool:
+        """补建对端报告的本端缺失目录（删除优先；只读端不动）。"""
+        if self._readonly or self.distributor is None or not isinstance(names, list):
+            return False
+        changed = False
+        for name in names:
+            if not isinstance(name, str) or not name:
+                continue
+            try:
+                path = self._safe_join(name)
+            except ValueError:
+                continue
+            if self.distributor.get_state(name) is not None:
+                continue  # 同名条目（含删除墓碑）→ 删除优先，不复活
+            if self._dir_case_equivalent(name):
+                continue  # 已有大小写等价的活目录 → 同一物理目录只注册一种写法
+            if self._ancestor_deleted(name):
+                continue
+            if os.path.isfile(path):
+                continue  # 同名文件已占位，不建同名目录
+            try:
+                os.makedirs(path, exist_ok=True)
+            except OSError as e:
+                self.log_message.emit(f"补建目录失败: {name}: {e}")
+                continue
+            self.distributor.emit('dir_create', name)
+            changed = True
+        if changed:
+            self.log_message.emit("对账补齐空目录并扩散")
+        return changed
 
     def _enqueue_pull(self, name: str, src_id: str, remote: FileState, session,
                       force: bool = False) -> bool:
@@ -534,9 +611,39 @@ class FileStateStore(QObject):
             st_end = max(st.vv, key=lambda k: st.vv[k])
         return compare_states(st, cand, st_end, cand_end) == 1
 
+    def _ancestor_deleted(self, name: str) -> bool:
+        """目标路径的任一祖先目录在本端已删除（墓碑）→ 不应再落盘。
+
+        目录删除后，其对端迟到的子文件拉取会 os.makedirs 重建已删目录（幽灵目录）。
+        此处拦截：父目录已是删除态即拒绝落盘，交由删除收敛。
+        """
+        if self.distributor is None or '/' not in name:
+            return False
+        parts = name.split('/')
+        for i in range(1, len(parts)):
+            st = self.distributor.get_state('/'.join(parts[:i]))
+            if st is not None and not st.exists and st.state == STATE_CHANGE:
+                return True
+        return False
+
+    def _dir_case_equivalent(self, name: str) -> bool:
+        """本端已有大小写等价的「存在」目录条目（Windows 下为同一物理目录）。
+
+        用于目录注册前查重：同一物理目录只允许一种写法落状态表，防止对端
+        dirs 清单里的另一种大小写变体再注册出一条重复条目。墓碑（exists=False）
+        不参与，删除判定仍按精确同名，避免复活已删目录。
+        """
+        if self.distributor is None:
+            return False
+        key = os.path.normcase(name)
+        for n, st in self.distributor.states().items():
+            if st.exists and os.path.normcase(n) == key:
+                return True
+        return False
+
     def emit_local_missing(self, exclude_dirs: Optional[set] = None) -> int:
         """本地补扫（建连时/切回同步时兜底）：扫描同步文件夹，对磁盘存在但
-        状态表缺失的文件 emit add 信号，纳入同步体系。
+        状态表缺失的文件 emit add、缺失的目录 emit dir_create，纳入同步体系。
 
         覆盖三类场景：① mesh 未就绪窗口内添加文件（信号未发出、状态未记录）
         ——建连后补扫兜底；② 启动前已放置于文件夹的文件（状态表无条目）；
@@ -564,6 +671,22 @@ class FileStateStore(QObject):
             for root, _dirs, files in os.walk(self.sync_folder):
                 _dirs[:] = [d for d in _dirs
                             if not d.startswith('.') and d not in exclude_dirs]
+                # 目录补扫：磁盘存在但状态表无条目的目录 emit dir_create，纳入同步。
+                # 只扫文件会漏掉新建/空目录（仅靠对账被动收敛），此处令目录结构也能
+                # 主动扩散；已有条目（含已删墓碑）跳过，不复活已删目录。
+                for dn in _dirs:
+                    rel_d = os.path.relpath(os.path.join(root, dn),
+                                            self.sync_folder).replace('\\', '/')
+                    try:
+                        self._safe_join(rel_d)
+                    except ValueError:
+                        continue
+                    if self.distributor.get_state(rel_d) is not None:
+                        continue  # 状态表已有条目（含已删墓碑）→ 不重复 emit
+                    if self._dir_case_equivalent(rel_d):
+                        continue  # 大小写变体已注册 → 同一物理目录只留一种写法
+                    self.distributor.emit('dir_create', rel_d)
+                    count += 1
                 for fn in files:
                     if self._is_transient_temp(fn):
                         continue  # 传输临时文件不入同步（见 _is_transient_temp）
@@ -580,7 +703,7 @@ class FileStateStore(QObject):
         except OSError:
             pass
         if count:
-            self.log_message.emit(f"本地补扫: 新发现 {count} 个文件入同步")
+            self.log_message.emit(f"本地补扫: 新发现 {count} 个条目入同步")
         return count
 
     # ---- 拉取执行（后台线程） ----
@@ -709,6 +832,19 @@ class FileStateStore(QObject):
                 or self._pull_stale_by_state(name, item):
             self.log_message.emit(f"拉取 {name} 已过时，抛弃该槽")
             return
+        # 删除优先（IO 前）：本端已记录删除该文件、或其祖先目录已删除 → 不落盘。
+        # 否则会在已删目录内写 .part（占用致后续删除 WinError 32、删除知识丢失），
+        # 并连带重建已删目录（幽灵目录/幽灵文件）。
+        cand = FileState(
+            name=name, op_no=int(item['op_no'] or 0), state=STATE_ADD,
+            exists=True, clock=int(item.get('clock', 0) or 0),
+            ts=float(item.get('ts', 0.0) or 0.0),
+            vv={item['end_id']: int(item['op_no'] or 0)})
+        if self._state_delete_wins(name, cand, item['end_id']) \
+                or self._ancestor_deleted(name):
+            self.log_message.emit(f"拉取 {name} 跳过: 本端已删除")
+            self.pull_done.emit(name, False)
+            return
         host = session.get('host', '')
         port = int(session.get('port', 0) or 0)
         session_id = session.get('session_id', '')
@@ -735,11 +871,6 @@ class FileStateStore(QObject):
         if ok:
             # 应用前裁决（IO 后）：状态表已删除且删除版本严格胜出 → 本份为
             # 过期 add 复活，移除字节不落应用、不 emit_pulled（防删除-拉取震荡）
-            cand = FileState(
-                name=name, op_no=int(item['op_no'] or 0), state=STATE_ADD,
-                exists=True, clock=int(item.get('clock', 0) or 0),
-                ts=float(item.get('ts', 0.0) or 0.0),
-                vv={item['end_id']: int(item['op_no'] or 0)})
             if self._state_delete_wins(name, cand, item['end_id']):
                 self.log_message.emit(
                     f"拉取 {name} 落盘，但本地已删除该文件，移除复活字节")
@@ -933,9 +1064,12 @@ class FileStateStore(QObject):
             gen = self._round_gen
             self._round_targets = set(targets)
             self._round_has_diff = False
+        # 目录清单每轮只算一次，供该轮所有对端复用（避免逐对端重复 isdir）
+        dirs = self._local_dirs()
         for eid in targets:
             try:
-                self.mesh.send_to_peer(eid, Protocol.create_file_state_req(self.end_id))
+                self.mesh.send_to_peer(
+                    eid, Protocol.create_file_state_req(self.end_id, dirs))
             except Exception:
                 with self._lock:
                     self._round_targets.discard(eid)

@@ -14,7 +14,7 @@ from PySide6.QtGui import QFont, QValidator, QKeyEvent, QShowEvent, QColor, QPal
 
 from i18n import I18n
 from config import Config, UserConfig
-from network.discovery import RoomDiscovery
+from network.discovery import RoomDiscovery, TcpRoomProbe
 from network.client import SyncClient
 from ui.widgets import AnimatedButton, SnapOutlineButton, BUTTON_STYLES, UnderlineEdit
 from ui.loading_animation import PageLoader, LoaderState
@@ -220,10 +220,11 @@ class RoomRowWidget(QWidget):
     COLOR_OFFLINE = "#ffd43b"   # 历史房间离线
 
     def __init__(self, room_code: str, count: int = 0, indicator_color: str = "",
-                 show_delete: bool = True, parent=None):
+                 show_delete: bool = True, ip: str = "", parent=None):
         super().__init__(parent)
         self.room_code = room_code
         self.count = count
+        self.ip = ip or ""
         self._fixed_color = indicator_color  # 固定色指示条（扫描行）；空则动态（历史行）
         self._init_ui(show_delete)
 
@@ -251,6 +252,13 @@ class RoomRowWidget(QWidget):
         self._label = QLabel(self._label_text())
         self._label.setStyleSheet("color: palette(text);")
         layout.addWidget(self._label, 1, Qt.AlignVCenter)
+
+        # 上次手动指定的主机 IP（小字灰显，仅手动输入过 IP 的历史房间有）
+        self._ip_label = QLabel(self.ip)
+        self._ip_label.setStyleSheet("color: #868e96; font-size: 11px;")
+        self._ip_label.setToolTip(self.ip)
+        self._ip_label.setVisible(bool(self.ip))
+        layout.addWidget(self._ip_label, 0, Qt.AlignVCenter)
 
         # 删除按钮『×』（仅历史行显示）
         self._del_btn = QPushButton("×")
@@ -369,6 +377,11 @@ class JoinRoomDialog(QDialog):
         #  'count': int, 'is_history': bool, 'widget': RoomRowWidget, 'item': QListWidgetItem}
         self._room_groups = {}
         self._manual_ip = ""
+        # IP 来源标记：'manual'=用户手输（连接成功才落历史线索），'auto'=列表填充/程序写入
+        self._ip_source = ""
+        self._setting_host = False  # 程序写入 host 栏时置位，避免被误判成手输
+        self._probe = None  # TCP 探活服务（列表扫描：历史房间带线索 IP 时用）
+        self._entry_probe = None  # TCP 探活服务（房间号输入路径的定向探活）
         self._first_show = True  # 是否首次显示
         self._loader = None  # 加载动画组件
         self.init_ui()
@@ -384,6 +397,15 @@ class JoinRoomDialog(QDialog):
                     probe.stop_discovery()
                 except Exception:
                     pass
+        # 停止 TCP 探活：置停后回调不再发射，在途探测靠 1s 超时自然收敛
+        for probe in (getattr(self, '_probe', None), getattr(self, '_entry_probe', None)):
+            if probe is not None:
+                try:
+                    probe.stop()
+                except Exception:
+                    pass
+        self._probe = None
+        self._entry_probe = None
 
     def accept(self):
         """连接成功：关闭前清理后台活动（扫描/房间探测）"""
@@ -651,6 +673,13 @@ class JoinRoomDialog(QDialog):
             except Exception:
                 pass
             self.discovery = None
+        ep = getattr(self, '_entry_probe', None)
+        if ep is not None:
+            try:
+                ep.stop()
+            except Exception:
+                pass
+            self._entry_probe = None
         self._is_checking = False
         self._pending_room_code = None
     
@@ -685,6 +714,8 @@ class JoinRoomDialog(QDialog):
         self._cancel_checking()
         self._room_checked = False
         host = text.strip()
+        # 标记 IP 来源：程序写入（列表填充/回退清空）记 'auto'，用户手输记 'manual'
+        self._ip_source = "" if not host else ("auto" if self._setting_host else "manual")
         if self.room_code_input.is_complete() and ('.' in host):
             # 手动指定了主机 IP：作为连接锚点，连接按钮立即可点（不做逐键探测）
             self.host_address = host
@@ -738,27 +769,25 @@ class JoinRoomDialog(QDialog):
             self._show_status(I18n.tr('ready_waiting'), color='#868e96')
             return
         
-        # 用户指定了主机地址：定向探测该 IP 上是否存在该房间号（真实验证，不盲信）
+        # 用户指定了主机地址：先用 TCP 定向探活（跨网段/防火墙/对端发现应答器未启动时
+        # UDP 全摸不到，只有 TCP 可靠），命中即判房间在线并跳过 UDP；未命中再回退
+        # UDP 定向 → 广播，兼容「房间换了设备/IP 线索过期」的情况
         host_address = self.host_edit.text().strip()
         if host_address:
             # 显示状态：正在搜索房间
             self._show_status(I18n.tr('searching_room'), color='#339af0')
 
-            # 创建房间发现服务，定向探测
-            self.discovery = RoomDiscovery(self)
-            self.discovery.room_found.connect(lambda ip, code, port, ver="", sv="", seq=seq: self.on_room_found(ip, code, port, ver, seq, sv))
-            self.discovery.discovery_finished.connect(lambda rooms, seq=seq: self.on_discovery_finished(rooms, seq))
-            self.discovery.error_occurred.connect(lambda err, seq=seq: self.on_discovery_error(err, seq))
-
-            # 保存房间号与目标 IP
+            # 保存房间号与目标 IP；定向探测标识 + 广播回退只做一次（防无限叠加）
             self._pending_room_code = room_code
             self._manual_ip = host_address
-            # 定向探测标识 + 广播回退只做一次（防定向→广播无限叠加）
             self._direct_probe = True
             self._fallback_broadcast_done = False
 
-            # 定向探测该 IP 上是否存在该房间号（1.5秒超时）
-            self.discovery.discover_room_at(host_address, room_code, timeout=1.5)
+            # TCP 定向探活（独立服务，与列表扫描的 self._probe 互不影响）
+            self._entry_probe = TcpRoomProbe(self)
+            self._entry_probe.probed.connect(
+                lambda rc, ip, online, seq=seq: self._on_entry_probe_result(rc, ip, online, seq))
+            self._entry_probe.probe(host_address, room_code, Config.DEFAULT_PORT)
             return
 
         self._direct_probe = False
@@ -779,6 +808,35 @@ class JoinRoomDialog(QDialog):
         # 开始发现（1.5秒超时）
         self.discovery.discover_room(room_code, timeout=1.5)
     
+    def _on_entry_probe_result(self, room_code: str, ip: str, online: bool, seq: int):
+        """房间号输入路径的 TCP 定向探活结果：命中即判已找到并跳过 UDP 回退"""
+        if seq is not None and seq != self._check_seq:
+            return  # 已被取消/替换的旧一代探测回调，丢弃
+        if self._pending_room_code is not None and room_code != self._pending_room_code:
+            return  # 残留的旧房间号结果，丢弃
+        if online:
+            self.room_code = room_code
+            self.host_address = ip
+            self.host_port = Config.DEFAULT_PORT
+            self.discovered_host = ip
+            self._show_status(I18n.tr('room_found', ip=ip), color='#51cf66')
+            self._room_checked = True
+            self._is_checking = False
+            self.connect_btn.setEnabled(True)
+            return
+        # TCP 未命中：房间可能换了设备或线索 IP 已过期，回退 UDP 定向（含广播兜底）
+        self._start_direct_udp_probe(ip, room_code, seq)
+
+    def _start_direct_udp_probe(self, host_address: str, room_code: str, seq: int):
+        """UDP 定向探测指定 IP 上是否存在该房间号（TCP 未命中时的回退路径）"""
+        self.discovery = RoomDiscovery(self)
+        self.discovery.room_found.connect(lambda ip, code, port, ver="", sv="", seq=seq: self.on_room_found(ip, code, port, ver, seq, sv))
+        self.discovery.discovery_finished.connect(lambda rooms, seq=seq: self.on_discovery_finished(rooms, seq))
+        self.discovery.error_occurred.connect(lambda err, seq=seq: self.on_discovery_error(err, seq))
+        self._direct_probe = True
+        self._fallback_broadcast_done = False
+        self.discovery.discover_room_at(host_address, room_code, timeout=1.5)
+
     def _show_status(self, text: str, color: str = '#868e96'):
         """显示状态标签"""
         self.status_label.setText(text)
@@ -848,6 +906,7 @@ class JoinRoomDialog(QDialog):
                 self.host_edit.blockSignals(False)
                 self.host_address = ""
                 self.discovered_host = ""
+                self._ip_source = ""  # 地址已清空，来源标记同步复位
                 self._check_room_exists()  # 空 host → 进入广播 discover_room
                 return
             # 广播（或已回退）仍未找到：判未找到并禁用按钮
@@ -999,8 +1058,8 @@ class JoinRoomDialog(QDialog):
                     pass
                 self._is_verifying = False
                 self._show_status(I18n.tr('room_found', ip=host), color='#51cf66')
-                # 记录历史：只记房间号，不再记 IP（加入不再依赖指定主机）
-                UserConfig.add_room_history(self.room_code)
+                # 记录历史：房间号始终记；仅"用户手输 IP"才落该 IP 作定向探活线索
+                UserConfig.add_room_history(self.room_code, self._manual_entry_ip())
                 return 'success', ''
 
             # 失败 / 超时 / 错误 / 取消：断开 client，恢复按钮，交还原对话框判断后续走向
@@ -1037,6 +1096,8 @@ class JoinRoomDialog(QDialog):
         if dlg.exec():
             self.password = dlg.get_password()
             self._verified_client = dlg.get_verified_client()
+            # 密码房此前从不写历史，导致手输 IP 的密码房永远进不了历史（线索丢失）
+            UserConfig.add_room_history(self.room_code, self._manual_entry_ip())
             self.accept()
 
     def get_verified_client(self):
@@ -1080,6 +1141,8 @@ class JoinRoomDialog(QDialog):
         for code, group in list(self._room_groups.items()):
             group['members'] = []
             group['count'] = 0
+            group['probe_online'] = False  # 本轮 TCP 探活是否命中
+            group['probe_ip'] = ""         # 命中时采用的 IP
             w = group.get('widget')
             if w is None:
                 continue
@@ -1105,21 +1168,38 @@ class JoinRoomDialog(QDialog):
         self._scan_discovery.discovery_finished.connect(self._on_scan_finished)
         self._scan_discovery.error_occurred.connect(self._on_scan_error)
 
-        # 扫描窗口（秒）；历史不再记 IP，故无可定向探测对象，全部交由广播发现聚合
+        # 扫描窗口（秒）：广播发现聚合所有房间（历史行是否在线亦由它兜底）
         self._scan_timeout = 2
         self._scan_discovery.discover_all_rooms(timeout=self._scan_timeout)
 
+        # 带线索 IP 的历史房间：并行做 TCP 定向探活（跨网段/防火墙/对端发现应答器未启动
+        # 时 UDP 全摸不到，只有 TCP 可靠）。广播为全房间单次扫描、无法按房间排除，故照常
+        # 执行；未命中的房间自然由广播结果兜底。
+        if self._probe is not None:  # 重扫：先停上一轮探活，避免残留回调
+            try:
+                self._probe.stop()
+            except Exception:
+                pass
+        self._probe = TcpRoomProbe(self)
+        self._probe.probed.connect(self._on_probe_result)
+        for code, group in list(self._room_groups.items()):
+            ip = group.get('ip') or ""
+            if group.get('is_history') and ip:
+                self._probe.probe(ip, code, Config.DEFAULT_PORT)
+
     # ---- 房间分组模型 ----
 
-    def _new_room_group(self, room_code: str, is_history: bool) -> dict:
+    def _new_room_group(self, room_code: str, is_history: bool, ip: str = "") -> dict:
         """新建一个房间分组并把对应行插入列表。历史行放顶部，扫描行放底部。"""
         group = {
             'room_code': room_code,
             'members': [], 'count': 0, 'is_history': is_history,
+            'ip': ip or '',                # 历史线索 IP（仅手动输入过 IP 的房间有）
+            'probe_online': False, 'probe_ip': "",
             'widget': None, 'item': None,
         }
         if is_history:
-            widget = RoomRowWidget(room_code, 0, show_delete=True)  # 动态指示条
+            widget = RoomRowWidget(room_code, 0, show_delete=True, ip=ip)  # 动态指示条
         else:
             widget = RoomRowWidget(room_code, 0, indicator_color=RoomRowWidget.COLOR_SCANNED, show_delete=False)
         item = QListWidgetItem()
@@ -1141,6 +1221,33 @@ class JoinRoomDialog(QDialog):
     def _live_room_count(self) -> int:
         """当前有在线成员的房间数（用于『发现 N 个房间』状态）"""
         return sum(1 for g in self._room_groups.values() if g['count'] > 0)
+
+    def _apply_group_online(self, group: dict):
+        """按成员数刷新该行『在线X』并在有成员时点亮绿；扫描行固定蓝不受影响"""
+        group['count'] = len(group['members'])
+        w = group.get('widget')
+        if w is None:
+            return
+        w.set_count(group['count'])
+        if group.get('is_history') and group['count'] > 0:
+            w.set_status(True)
+        self.scan_status_label.setText(I18n.tr('rooms_found_count', count=self._live_room_count()))
+        self.scan_status_label.setStyleSheet("color: #51cf66; font-size: 12px;")
+
+    def _on_probe_result(self, room_code: str, ip: str, online: bool):
+        """TCP 探活回调：命中即按 IP 并入成员并点亮；未命中交由广播发现兜底"""
+        group = self._room_groups.get(room_code)
+        if group is None or not group.get('is_history') or not online:
+            return
+        group['probe_online'] = True
+        group['probe_ip'] = ip
+        # 按 IP 去重并入成员：广播若也命中同 IP 不重复计数
+        if all(m.get('ip') != ip for m in group['members']):
+            group['members'].append({
+                'ip': ip, 'port': Config.DEFAULT_PORT,
+                'version': '', 'sync_version': Config.SYNC_LOGIC_VERSION,
+            })
+        self._apply_group_online(group)
 
     def _on_scan_room_found(self, host_ip: str, room_code: str, port: int, version: str = "", sync_version: str = ""):
         """扫描发现单个成员：按房间号聚合进分组，更新『在线X』。
@@ -1171,15 +1278,7 @@ class JoinRoomDialog(QDialog):
                 'version': version, 'sync_version': sync_version,
             })
 
-        group['count'] = len(group['members'])
-        group['widget'].set_count(group['count'])
-        # 历史行点亮绿（动态指示条）；扫描行固定主题蓝，不受影响
-        if group.get('is_history'):
-            group['widget'].set_status(True)
-
-        found = self._live_room_count()
-        self.scan_status_label.setText(I18n.tr('rooms_found_count', count=found))
-        self.scan_status_label.setStyleSheet("color: #51cf66; font-size: 12px;")
+        self._apply_group_online(group)
 
     def _on_scan_finished(self, rooms: list):
         """扫描完成"""
@@ -1220,6 +1319,19 @@ class JoinRoomDialog(QDialog):
         """列表项点击：所有行均为 RoomRowWidget，填充已由其 clicked 信号处理，此处无需动作"""
         pass
 
+    def _set_host_text(self, text: str):
+        """程序写入 host 栏：置位来源标记，避免被 _on_host_edit_text_changed 当成手输"""
+        self._setting_host = True
+        self.host_edit.setText(text)
+        self._setting_host = False
+
+    def _manual_entry_ip(self) -> str:
+        """用户手输模式下当前连接的主机 IP；非手输返回空串（不落历史线索）"""
+        if self._ip_source != 'manual':
+            return ""
+        host = (self.host_address or "").strip()
+        return host if '.' in host else ""
+
     def _fill_from_room(self, group: dict):
         """根据房间分组填充输入框；有兼容成员则取首个成员为默认入口并定向探测。
 
@@ -1235,20 +1347,30 @@ class JoinRoomDialog(QDialog):
         # 填充房间号到输入框（不触发检测，避免重复刷新）
         self.room_code_input.set_room_code(room_code, trigger_check=False)
 
-        members = group.get('members') or []
-        if members:
-            m = members[0]  # 首个兼容成员作为默认入口
-            self.discovered_host = m['ip']
-            self.host_port = m['port']
-            self.host_address = m['ip']  # 同时设置 host_address，确保连接时使用正确地址
-            # 将成员 IP 填入地址框，使后续探测走定向探测（确认该 IP 上房间仍在线）
-            self.host_edit.setText(m['ip'])
+        # 入口优先用 TCP 探活命中的 IP（跨网段下的可靠锚点），其次广播成员
+        entry_ip = group.get('probe_ip') if group.get('probe_online') else ""
+        entry_port = 0
+        if not entry_ip:
+            for m in group.get('members') or []:
+                if m.get('ip'):
+                    entry_ip, entry_port = m['ip'], (m.get('port') or Config.DEFAULT_PORT)
+                    break
+        if not entry_ip and group.get('is_history'):
+            # 线索 IP：本轮 TCP 探活尚未回结果时也先试，交由定向探活确认/回退
+            entry_ip = (group.get('ip') or "").strip()
+            entry_port = Config.DEFAULT_PORT
+        if entry_ip:
+            self.discovered_host = entry_ip
+            self.host_port = entry_port or Config.DEFAULT_PORT
+            self.host_address = entry_ip  # 同时设置 host_address，确保连接时使用正确地址
+            # 填入地址框使后续探测走定向探测（程序写入，不记作手输线索）
+            self._set_host_text(entry_ip)
         else:
             # 无在线成员：清空主机栏，交由广播/手动 IP 兜底
             self.discovered_host = ""
             self.host_address = ""
             self.host_port = Config.DEFAULT_PORT
-            self.host_edit.clear()
+            self._set_host_text("")
         # 显式中断旧扫描并按『当前房间号 + 地址框(可能为空)』重新探测
         # ——同房间号切换时 host 文本不变，textChanged 不会触发，必须显式重扫
         self._schedule_host_probe()
@@ -1261,15 +1383,16 @@ class JoinRoomDialog(QDialog):
             if widget is not None:
                 widget.set_matched(widget.room_code == current_code)
 
-    # ========== 最近连接历史（只记房间号，不再记 IP） ==========
+    # ========== 最近连接历史（房间号 + 可选的手输 IP 线索） ==========
 
     def _load_history(self):
-        """加载历史房间到列表顶部（默认黄，扫描到后由 _set_group_online 点亮绿）"""
+        """加载历史房间到列表顶部（默认黄；广播或 TCP 探活命中后点亮绿）"""
         self._clear_history_rows()
-        for code in UserConfig.get_room_history():
+        for entry in UserConfig.get_room_history_entries():
+            code = entry.get('room_code')
             if not code:
                 continue
-            self._new_room_group(code, is_history=True)
+            self._new_room_group(code, is_history=True, ip=entry.get('ip') or "")
 
     def _clear_history_rows(self):
         """移除全部历史分组行（含列表项）与缓存"""
