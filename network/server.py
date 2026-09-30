@@ -480,7 +480,11 @@ class SyncServer(QObject):
             except ValueError as e:
                 self.log_message.emit(f"拒绝非法路径: {e}")
                 return
-            temp_file_path = file_path + '.tmp'  # 临时文件
+            # 临时文件统一命名 .tcp_<名>.part：与 FileProvider 一致，使自同步链路
+            # _is_transient_temp 能识别过滤，避免半成品被补扫当正式文件广播。
+            temp_file_path = os.path.join(
+                os.path.dirname(file_path),
+                '.tcp_' + os.path.basename(file_path) + '.part')
 
             os.makedirs(os.path.dirname(file_path), exist_ok=True)
 
@@ -739,6 +743,7 @@ class SyncServer(QObject):
             sync_version = data[0] if len(data) > 0 else ''
             room_code = data[1] if len(data) > 1 else ''
 
+            host_id = ''  # 宿主 end_id（仅 ONLINE 时回带，见各分支）
             if sync_version != Config.SYNC_LOGIC_VERSION:
                 state = RoomProbeState.VERSION_MISMATCH
             elif room_code != self.room_code:
@@ -746,17 +751,22 @@ class SyncServer(QObject):
             elif self._reuse:
                 # 连接端复用管理监听：真主机已知才算可加入，否则端点存活但主机暂不可用
                 host = self._host_provider() if self._host_provider else None
-                state = RoomProbeState.ONLINE if (
+                online = bool(
                     host and host.get('ip')
                     and int(host.get('mgmt_port', 0) or 0) > 0
                     and (host.get('end_id') or '')
-                ) else RoomProbeState.HOST_UNAVAILABLE
+                )
+                state = RoomProbeState.ONLINE if online else RoomProbeState.HOST_UNAVAILABLE
+                # 宿主 end_id 随响应回带：探测端据此判定"宿主即本机"（防主机自连）
+                host_id = (host.get('end_id') or '') if online else ''
             else:
                 state = RoomProbeState.ONLINE
+                host_id = UserConfig.get_end_id()
 
             client_info = self.clients.get(client_id)
             if client_info:
-                self._socket_send(client_info, Protocol.create_room_probe_resp(state))
+                self._socket_send(client_info,
+                                  Protocol.create_room_probe_resp(state, host_id))
                 # 顺带推送对端清单：探测端据此直接建 mesh 直连，无需主机介绍
                 if state in (RoomProbeState.ONLINE, RoomProbeState.HOST_UNAVAILABLE) \
                         and self.mesh and self.mesh.mesh_port:
@@ -852,8 +862,10 @@ class SyncServer(QObject):
                         f"客户端 {client_id} 接入，转发至真主机 {host.get('ip')}:{host.get('mgmt_port')}")
                     self._remove_client(client_id)
                 else:
+                    # 主机暂不在属瞬时态：回瞬时码（`2`），避免客户端当成永久拒绝停重连
                     self._socket_send(self.clients[client_id],
-                                      Protocol.create_auth_response(False, "主机暂不可用，请稍后加入"))
+                                      Protocol.create_auth_response(
+                                          False, "主机暂不可用，请稍后加入", transient=True))
                     self.log_message.emit(f"客户端 {client_id} 接入但主机不可用，拒绝承担管理宿主")
                     self._remove_client(client_id)
                 return

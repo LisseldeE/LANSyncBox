@@ -12,6 +12,7 @@
 </p>
 
 ---
+
 本页包含两个版本的下载入口，请根据实际需求选择：
 
 - **LANSyncBox 标准版**：稳定成熟的常规版本，面向多数日常同步场景。
@@ -60,8 +61,6 @@
 | Linux | x64 | Gitee（推荐国内用户） | [**下载**](https://gitee.com/Lisselde_E/LANSyncBox/releases/download/R7.1.5.0/lansyncbox_amd64.deb) |
 | Linux | x64 | GitHub | [**下载**](https://github.com/LisseldeE/LANSyncBox/releases/download/R7.1.5.0/lansyncbox_amd64.deb) |
 
----
-
 ### [R7.1.4.0](https://github.com/LisseldeE/LANSyncBox/releases/tag/R7.1.4.0)
 
 | 支持系统 | 支持架构 | 获取方式 | 链接 |
@@ -69,16 +68,12 @@
 | Windows | x64 | Gitee（推荐国内用户） | [**下载**](https://gitee.com/Lisselde_E/LANSyncBox/releases/download/R7.1.4.0/LANSyncBox.exe) |
 | Windows | x64 | GitHub | [**下载**](https://github.com/LisseldeE/LANSyncBox/releases/download/R7.1.4.0/LANSyncBox.exe) |
 
----
-
 ### [R7.1.2.0](https://github.com/LisseldeE/LANSyncBox/releases/tag/R7.1.2.0)
 
 | 支持系统 | 支持架构 | 获取方式 | 链接 |
 |:---|:---|:---|:---|
 | Windows | x64 | Gitee（推荐国内用户） | [**下载**](https://gitee.com/Lisselde_E/LANSyncBox/releases/download/R7.1.2.0/LANSyncBox.exe) |
 | Windows | x64 | GitHub | [**下载**](https://github.com/LisseldeE/LANSyncBox/releases/download/R7.1.2.0/LANSyncBox.exe) |
-
----
 
 ### [R7.1.1.0](https://github.com/LisseldeE/LANSyncBox/releases/tag/R7.1.1.0)
 
@@ -89,13 +84,15 @@
 
 </details>
 
+---
+
 ## LANSyncBox Pro
 
 <p align="center">
   <img src="https://lisseldee.github.io/assets/images/webp/1-c1.webp" width="100%" alt="LANSyncBox">
 </p>
 
-### [R1.1.0.0](https://github.com/LisseldeE/LANSyncBox/releases/tag/pro-R1.1.0.0)
+### [R1.1.1.0](https://github.com/LisseldeE/LANSyncBox/releases/tag/pro-R1.1.1.0)
 
 > 最新构建
 
@@ -103,5 +100,17 @@
 
 | 支持系统 | 支持架构 | 获取方式 | 链接 |
 |:---|:---|:---|:---|
+| Windows | x64 | GitHub | [**下载**](https://github.com/LisseldeE/LANSyncBox/releases/download/pro-R1.1.1.0/LANSyncBoxPro_Setup.exe) |
+| Linux | x64 | GitHub | [**下载**](https://github.com/LisseldeE/LANSyncBox/releases/download/pro-R1.1.1.0/lansyncboxpro_amd64.deb) |
+
+<details>
+<summary>历史版本（点击展开）</summary>
+
+### [R1.1.0.0](https://github.com/LisseldeE/LANSyncBox/releases/tag/pro-R1.1.0.0)
+
+| 支持系统 | 支持架构 | 获取方式 | 链接 |
+|:---|:---|:---|:---|
 | Windows | x64 | GitHub | [**下载**](https://github.com/LisseldeE/LANSyncBox/releases/download/pro-R1.1.0.0/LANSyncBoxPro_Setup.exe) |
 | Linux | x64 | GitHub | [**下载**](https://github.com/LisseldeE/LANSyncBox/releases/download/pro-R1.1.0.0/lansyncboxpro_amd64.deb) |
+
+</details>

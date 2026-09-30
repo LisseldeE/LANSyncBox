@@ -380,6 +380,44 @@ class UserConfig:
         data["room_perm"] = perms
         cls.save()
 
+    # 房间密码属性：仅内存持有（房间会话属性，随进程存亡），只存 SHA256 摘要不存明文、
+    # 不写 config.json。键存在于缓存即"本进程已知该房间密码"；无密码房以空串占位。
+    _room_password_cache = {}
+
+    @classmethod
+    def has_room_password_record(cls, room_code: str) -> bool:
+        """本进程是否已知该房间密码属性（创建或加入成功时记录，重启后即失忆）"""
+        return bool(room_code) and room_code in cls._room_password_cache
+
+    @classmethod
+    def get_room_password_hash(cls, room_code: str) -> str:
+        """取房间密码 SHA256 摘要；无密码房为空串，未知房间同样空串（须先查 has_room_password_record）"""
+        return cls._room_password_cache.get(room_code, "") or ""
+
+    @classmethod
+    def set_room_password(cls, room_code: str, password: str):
+        """记录房间密码属性（仅内存、仅 SHA256 摘要，不存明文、不落盘）。
+
+        密码属房间属性、与主机无关：创建与加入成功均记录，主机回归据此校验，
+        其他连接端加入仍由服务端比对摘要；空密码记为空串（无密码房，仍算"已知"）。
+        """
+        if not room_code:
+            return
+        import hashlib
+        cls._room_password_cache[room_code] = (
+            hashlib.sha256(password.encode()).hexdigest() if password else "")
+
+    @classmethod
+    def verify_room_password(cls, room_code: str, password: str) -> bool:
+        """校验密码是否与内存摘要一致；未知房间一律不通过（调用方须先查 has_room_password_record）"""
+        if not cls.has_room_password_record(room_code):
+            return False
+        stored = cls.get_room_password_hash(room_code)
+        if not stored:
+            return password == ""  # 已知的无密码房：仅空密码通过
+        import hashlib
+        return hashlib.sha256(password.encode()).hexdigest() == stored
+
     @classmethod
     def get_end_id(cls) -> str:
         """获取本端唯一标识（uuid4，首次访问时生成并持久化到 config.json）

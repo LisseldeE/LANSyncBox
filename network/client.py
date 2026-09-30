@@ -52,6 +52,7 @@ class SyncClient(QObject):
     file_state_added = Signal(str)     # 自同步拉取完成落盘（相对路径），UI 刷新文件列表
     sync_pull_progress = Signal(str, 'qlonglong', 'qlonglong')  # 自同步拉取进度（相对路径, 已收字节, 总字节）
     sync_pull_done = Signal(str, bool)  # 自同步拉取结束（相对路径, 成功?）
+    mesh_start_failed = Signal()       # 网状数据面启动失败（端口段全被占用），UI 提示数据面不可用
     
     # 数据块大小（64KB）
     CHUNK_SIZE = 64 * 1024
@@ -440,6 +441,18 @@ class SyncClient(QObject):
         host_id = info.get('host_id', '') or ''
         if not host_ip or host_port <= 0:
             return
+        # 自指兜底：对端回带的主机就是本端 → 本端即该房间主机，绝不自我换接/自我拨号
+        # （否则会把自己钉成唯一连接候选，形成热循环）。去重提示一次后停重连，
+        # 交用户以主机身份回归。
+        if host_id and host_id == UserConfig.get_end_id():
+            self.log_message.emit("对端回带主机即本端，本端即该房间主机，请以主机身份回归")
+            if not self._perm_auth_denied:
+                self._perm_auth_denied = True
+                self._reconnect_stop.set()
+                self._reconnect_active = False
+                self.auth_failed.emit("本端即该房间主机，请以主机身份回归")
+            self._close_mgmt_socket()
+            return
         with self._ep_lock:
             self._endpoint_list = [{
                 'end_id': host_id,
@@ -765,7 +778,11 @@ class SyncClient(QObject):
             except ValueError as e:
                 self.log_message.emit(f"拒绝非法路径: {e}")
                 return
-            temp_file_path = file_path + '.tmp'  # 临时文件
+            # 临时文件统一命名 .tcp_<名>.part：与 FileProvider 一致，使自同步链路
+            # _is_transient_temp 能识别过滤，避免半成品被补扫当正式文件广播。
+            temp_file_path = os.path.join(
+                os.path.dirname(file_path),
+                '.tcp_' + os.path.basename(file_path) + '.part')
 
             os.makedirs(os.path.dirname(file_path), exist_ok=True)
 
@@ -1062,7 +1079,10 @@ class SyncClient(QObject):
             # 由本端自持引用装卸载（disconnect 显式 stop），避免跨线程挂父导致告警。
             self.mesh = MeshManager(room_code=self.room_code, password=self.password)
             self.mesh.log_message.connect(self.log_message)
-            self.mesh.start()
+            # 数据面启动失败（网状端口段全被占用）不重试，仅回投 UI 一次性提示：
+            # 否则端"进了房间却无数据面"，同步与投递静默失效且无告警
+            if not self.mesh.start():
+                self.mesh_start_failed.emit()
             # 分发链路引擎：本地操作 → 网状直连传播；收到信号去重/应用/转发
             self.distributor = Distributor(
                 UserConfig.get_end_id(), self.sync_folder,
@@ -1093,7 +1113,7 @@ class SyncClient(QObject):
             self.distributor.clipboard_text_received.connect(self.clipboard_received)
             self.mesh.peer_connected.connect(self._on_mesh_peer_connected)
         elif not self.mesh.running:
-            self.mesh.start()
+            self.mesh.start()  # 已告警过，此处重试不再重复提示，避免刷屏
 
     def _is_host_pushing_file(self, name: str) -> bool:
         """探测某文件是否正被主机直推通道(A)接收（FILE_BEGIN 已到、FILE_END/CANCEL 未到）。
@@ -1342,8 +1362,22 @@ class SyncClient(QObject):
         """处理验证响应"""
         try:
             data = content.decode('utf-8').split(':', 1)
-            success = data[0] == '1'
+            state = data[0] if data else ''
+            success = state == '1'
             message = data[1] if len(data) > 1 else ''
+
+            if state == '2':
+                # 暂时不可用（复用监听：主机暂不在）属瞬时态：不得当成永久拒绝，
+                # 也不 latch/停重连，交重连循环稍后重试；重连期静默（待机已有提示）
+                with self._auth_wait:
+                    self._auth_result = False
+                    self._auth_wait.notify_all()
+                if self._reconnect_active:
+                    return
+                self.log_message.emit(f"主机暂不可用: {message}")
+                self.auth_failed.emit(message)
+                self.disconnect()
+                return
             
             if success:
                 self.authenticated = True

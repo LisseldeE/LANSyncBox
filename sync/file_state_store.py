@@ -85,6 +85,11 @@ class FileStateStore(QObject):
         self._round_targets = None
         self._round_has_diff = False
         self._round_gen = 0  # 轮次代数：新 request_all 递增；旧轮超时据此自证过期，不误杀新轮
+        # 在线闸门（删除收敛）：本轮任一响应端声明「该路径存在」的名字集合 +
+        # 本轮已应答的直连端集合。墓碑仅在「全员应答且无人声明存在且本端磁盘
+        # 已删」时才移除，缺席端回归前一律保留墓碑压制其陈旧 add。
+        self._round_exists_claim = set()
+        self._round_responded = set()
         # 普通回调通道（与 Distributor 同款）：GUI 用 Qt 信号；无事件循环场景
         # （后台/单测）经此同步回调——Qt 信号跨线程 emit 到 Python 槽在无事件
         # 循环时会排队丢失，回调通道保证可靠投递。
@@ -98,6 +103,10 @@ class FileStateStore(QObject):
         # 由宿主（client.py）在 FILE_BEGIN..FILE_END 窗口内置真；抑制只发生在窗口内，
         # 结束后对账轮可照常补拉，不永久丢弃真实文件。
         self._host_push_guard = None  # callable(relpath)->bool；True=主机直推正在投递
+
+        # 启动清扫：进程重启后同步目录内遗留的传输临时文件（.tcp_*.part）已无
+        # 对应传输，清除以防占盘/被误当正式文件。仅清 .tcp_*.part，不碰用户 .tmp。
+        self.sweep_transient_temp()
 
         # 拉取 worker 池（PULL_CONCURRENCY 个）：每轮入队的多个差异文件并发拉取，
         # _pulls 槽在 _cond 锁内弹出，多 worker 并发取件/拉取互不干扰
@@ -171,6 +180,31 @@ class FileStateStore(QObject):
         故两个入口均需过滤。"""
         b = os.path.basename(rel)
         return b.startswith('.tcp_') and b.endswith('.part')
+
+    def sweep_transient_temp(self) -> int:
+        """清扫同步目录内遗留的传输临时文件（.tcp_*.part）。
+
+        传输中途崩溃/断电会在目标目录留下半成品；进程启动时已无对应传输，
+        必须清除。仅清 .tcp_*.part（FileProvider 与主机直推统一命名），不碰
+        用户自己的 .tmp 等其它文件。Returns: 删除个数。
+        """
+        removed = 0
+        try:
+            for root, dirs, files in os.walk(self.sync_folder):
+                dirs[:] = [d for d in dirs if not d.startswith('.')]
+                for fn in files:
+                    if not self._is_transient_temp(fn):
+                        continue
+                    try:
+                        os.remove(os.path.join(root, fn))
+                        removed += 1
+                    except OSError:
+                        pass
+        except OSError:
+            pass
+        if removed:
+            self.log_message.emit(f"清理遗留传输临时文件: {removed} 个")
+        return removed
 
     def snapshot(self) -> list:
         """本端文件状态（wire 格式）。
@@ -300,6 +334,9 @@ class FileStateStore(QObject):
 
     def handle_state_resp(self, end_id: str, content: dict):
         """收到对端文件状态响应：对比本端列表并补齐差异。"""
+        with self._lock:
+            if self._round_targets is not None:
+                self._round_responded.add(end_id)
         if not isinstance(content, dict) or self.distributor is None:
             self._finish_round(end_id, False)
             return
@@ -307,6 +344,7 @@ class FileStateStore(QObject):
         src_id = content.get('src_id') or end_id
         session = content.get('session')
         has_diff = False
+        exists_claim = set()  # 本响应端声明「存在」的路径（在线闸门判据）
         for d in entries:
             if not isinstance(d, dict):
                 continue
@@ -332,6 +370,7 @@ class FileStateStore(QObject):
                     if self._enqueue_pull(name, src_id, remote, session, force=True):
                         has_diff = True
             if remote.exists:
+                exists_claim.add(name)  # 对端仍持有该路径 → 保留本端墓碑（在线闸门）
                 # 对端有该文件：本端缺失 → 入拉取队列（同文件排队去重）
                 if not local_exists:
                     # 状态表已删除且删除版本严格胜出 → 该候选是过期 add，
@@ -374,14 +413,12 @@ class FileStateStore(QObject):
                 if local_exists and remote.state == STATE_CHANGE:
                     self._apply_remote_delete(name, src_id, remote)
                     has_diff = True
-                # 清理收敛：本地与对端均为「变更」且已不存在 → 删除条目
-                # （防列表无限变长）。同样排除待命态：对端 ADD + exists=False
-                # 时保留本端删除知识，避免误清理后把已删文件反向拉回。
-                local_st = self.distributor.get_state(name)
-                if local_st is not None and not local_st.exists \
-                        and local_st.state == STATE_CHANGE \
-                        and remote.state == STATE_CHANGE:
-                    self._cleanup_entry(name)
+                # 收敛清理改由本轮收口统一执行（_cleanup_converged）：须等本轮
+                # 所有直连端应答且无人再声明该路径存在，避免单端报墓碑即清理
+                # 导致离线端回归时陈旧 add 复活已删内容。
+        with self._lock:
+            if self._round_targets is not None:
+                self._round_exists_claim |= exists_claim
         # 空目录对账兜底（26.9C2）：对端回「我有你无」的目录 → 本端补建并扩散。
         # 判定全在本地（删除优先/祖先已删/同名文件），不用对端信号的时间戳，
         # 避免复活本端已删目录。
@@ -394,6 +431,7 @@ class FileStateStore(QObject):
         if self._readonly or self.distributor is None or not isinstance(names, list):
             return False
         changed = False
+        last = None
         for name in names:
             if not isinstance(name, str) or not name:
                 continue
@@ -416,8 +454,12 @@ class FileStateStore(QObject):
                 continue
             self.distributor.emit('dir_create', name)
             changed = True
+            last = name
         if changed:
             self.log_message.emit("对账补齐空目录并扩散")
+            # 本地 emit 不回投 UI（_on_distributor_applied 过滤本端信号），
+            # 补建的空目录须显式刷新文件列表，否则落盘了却看不到。
+            self._notify_file_added(last)
         return changed
 
     def _enqueue_pull(self, name: str, src_id: str, remote: FileState, session,
@@ -1034,6 +1076,12 @@ class FileStateStore(QObject):
                 self._sweep_pending_conflicts()
             except Exception:
                 pass
+            # 补删磁盘残留：墓碑已记但磁盘删除曾失败（在途句柄占用），每拍重试
+            try:
+                if self.distributor is not None:
+                    self.distributor.retry_pending_deletes()
+            except Exception:
+                pass
             # 只读端同样周期对账（单向下拉补齐本端缺失文件；不供他端拉取由
             # handle_state_req 回空 entries 保证）
             if self.mesh is None:
@@ -1064,6 +1112,8 @@ class FileStateStore(QObject):
             gen = self._round_gen
             self._round_targets = set(targets)
             self._round_has_diff = False
+            self._round_exists_claim = set()
+            self._round_responded = set()
         # 目录清单每轮只算一次，供该轮所有对端复用（避免逐对端重复 isdir）
         dirs = self._local_dirs()
         for eid in targets:
@@ -1087,6 +1137,8 @@ class FileStateStore(QObject):
             had = self._round_has_diff
             self._round_targets = None
             self._round_has_diff = False
+            self._round_exists_claim = set()
+            self._round_responded = set()
         self._notify_sync_done(had)
 
     def _finish_round(self, end_id: str, has_diff: bool):
@@ -1104,7 +1156,45 @@ class FileStateStore(QObject):
                     self._round_has_diff = False
                     notify = True
         if notify:
+            # 本轮已收口（所有直连端应答）→ 执行在线闸门删除收敛
+            try:
+                self._cleanup_converged()
+            except Exception:
+                pass
             self._notify_sync_done(had)
+
+    def _cleanup_converged(self):
+        """在线闸门：本轮所有直连端均已应答、无人声明该路径存在、本端磁盘已删
+        → 移除墓碑条目（防列表无限变长）。
+
+        缺席端（未直连/未应答）回归前一律保留墓碑，使其陈旧 add 继续被删除
+        版本压制而不复活已删内容；未确认时本轮跳过、下轮重试。
+        """
+        if self.distributor is None:
+            return
+        with self._lock:
+            claim = set(self._round_exists_claim)
+            responded = set(self._round_responded)
+            self._round_exists_claim = set()
+            self._round_responded = set()
+        if self.mesh is not None:
+            try:
+                live = set(self.mesh.connected_end_ids())
+            except Exception:
+                live = set()
+            if not live.issubset(responded):
+                return  # 有直连端未应答（含本轮中途新连入）→ 本轮不清理
+        for name, st in self.distributor.states().items():
+            if st.exists or st.state != STATE_CHANGE:
+                continue
+            if name in claim:
+                continue
+            try:
+                if os.path.exists(self._safe_join(name)):
+                    continue  # 磁盘仍残留 → 交 Distributor.retry_pending_deletes
+            except ValueError:
+                continue
+            self._cleanup_entry(name)
 
     # ---- 工具 ----
 

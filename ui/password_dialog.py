@@ -24,11 +24,14 @@ class PasswordDialog(QDialog):
     - 成功后回传验证通过的 Client 实例与密码（供 SyncWindow 复用，避免重复连接）
     """
 
-    def __init__(self, room_code: str, host: str, port: int, parent=None):
+    def __init__(self, room_code: str, host: str, port: int, parent=None,
+                 expected_hash: str = ""):
         super().__init__(parent)
         self.room_code = room_code
         self.host = host or "127.0.0.1"
         self.port = port or Config.DEFAULT_PORT
+        # 本地校验模式（主机回归用）：只比对房间密码摘要，不连主机
+        self._expected_hash = expected_hash or ""
 
         self.password = ""
         self._is_verifying = False
@@ -136,7 +139,11 @@ class PasswordDialog(QDialog):
     # ---------------------------------------------------------------- 验证
 
     def _verify(self):
-        """预验证密码：后台连接主机 + 认证，成功后 accept 并保留 Client"""
+        """验证密码：本地校验模式比对摘要；常规模式连主机 + 认证"""
+        if self._expected_hash:
+            self._verify_local()
+            return
+
         self._set_verifying(True)
 
         client = SyncClient(self.room_code, self.password)
@@ -222,6 +229,17 @@ class PasswordDialog(QDialog):
             self._show_status(result['message'] or I18n.tr('connection_failed'), error=True)
 
         # 失败后聚焦密码框，便于直接修改重试
+        self.password_edit.setFocus()
+        self.password_edit.selectAll()
+
+    def _verify_local(self):
+        """本地校验模式：只比对房间密码 SHA256 摘要，不连主机（主机回归场景）"""
+        import hashlib
+        if hashlib.sha256(self.password.encode()).hexdigest() == self._expected_hash:
+            self._verified_client = None
+            self.accept()
+            return
+        self._show_status(I18n.tr('incorrect_password'), error=True)
         self.password_edit.setFocus()
         self.password_edit.selectAll()
 

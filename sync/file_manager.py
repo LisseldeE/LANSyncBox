@@ -80,8 +80,10 @@ class FileManager:
         
         for item in self.folder_path.rglob('*'):
             if item.is_file():
-                # 跳过临时文件（以 .tmp 结尾）
-                if item.name.endswith('.tmp'):
+                # 跳过传输临时文件（.tmp 旧命名 / .tcp_*.part 统一命名）
+                if item.name.endswith('.tmp') \
+                        or (item.name.startswith('.tcp_')
+                            and item.name.endswith('.part')):
                     continue
                 
                 file_info = {

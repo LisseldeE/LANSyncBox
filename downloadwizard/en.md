@@ -20,6 +20,7 @@ This page lists download entries for two editions. Choose based on your needs:
 For a detailed feature comparison, please refer to each edition's project page. Once you have decided, fetch the corresponding installer from the section below.
 
 ---
+
 ## LANSyncBox Standard
 
 <p align="center">
@@ -38,8 +39,6 @@ For a detailed feature comparison, please refer to each edition's project page. 
 | Windows | x64 | GitHub | [**Download**](https://github.com/LisseldeE/LANSyncBox/releases/download/R7.1.7.0/LANSyncBox_Setup.exe) |
 | Linux | x64 | Gitee (recommended in CN) | [**Download**](https://gitee.com/Lisselde_E/LANSyncBox/releases/download/R7.1.7.0/lansyncbox_amd64.deb) |
 | Linux | x64 | GitHub | [**Download**](https://github.com/LisseldeE/LANSyncBox/releases/download/R7.1.7.0/lansyncbox_amd64.deb) |
-
----
 
 <details>
 <summary>Older releases (click to expand)</summary>
@@ -62,8 +61,6 @@ For a detailed feature comparison, please refer to each edition's project page. 
 | Linux | x64 | Gitee (recommended in CN) | [**Download**](https://gitee.com/Lisselde_E/LANSyncBox/releases/download/R7.1.5.0/lansyncbox_amd64.deb) |
 | Linux | x64 | GitHub | [**Download**](https://github.com/LisseldeE/LANSyncBox/releases/download/R7.1.5.0/lansyncbox_amd64.deb) |
 
----
-
 ### [R7.1.4.0](https://github.com/LisseldeE/LANSyncBox/releases/tag/R7.1.4.0)
 
 | OS | Architecture | Mirror | Link |
@@ -71,16 +68,12 @@ For a detailed feature comparison, please refer to each edition's project page. 
 | Windows | x64 | Gitee (recommended in CN) | [**Download**](https://gitee.com/Lisselde_E/LANSyncBox/releases/download/R7.1.4.0/LANSyncBox.exe) |
 | Windows | x64 | GitHub | [**Download**](https://github.com/LisseldeE/LANSyncBox/releases/download/R7.1.4.0/LANSyncBox.exe) |
 
----
-
 ### [R7.1.2.0](https://github.com/LisseldeE/LANSyncBox/releases/tag/R7.1.2.0)
 
 | OS | Architecture | Mirror | Link |
 |:---|:---|:---|:---|
 | Windows | x64 | Gitee (recommended in CN) | [**Download**](https://gitee.com/Lisselde_E/LANSyncBox/releases/download/R7.1.2.0/LANSyncBox.exe) |
 | Windows | x64 | GitHub | [**Download**](https://github.com/LisseldeE/LANSyncBox/releases/download/R7.1.2.0/LANSyncBox.exe) |
-
----
 
 ### [R7.1.1.0](https://github.com/LisseldeE/LANSyncBox/releases/tag/R7.1.1.0)
 
@@ -91,13 +84,15 @@ For a detailed feature comparison, please refer to each edition's project page. 
 
 </details>
 
+---
+
 ## LANSyncBox Pro
 
 <p align="center">
   <img src="https://lisseldee.github.io/assets/images/webp/1-e1.webp" width="100%" alt="LANSyncBox">
 </p>
 
-### [R1.1.0.0](https://github.com/LisseldeE/LANSyncBox/releases/tag/pro-R1.1.0.0)
+### [R1.1.1.0](https://github.com/LisseldeE/LANSyncBox/releases/tag/pro-R1.1.1.0)
 
 > Latest build
 
@@ -105,5 +100,17 @@ For a detailed feature comparison, please refer to each edition's project page. 
 
 | OS | Architecture | Mirror | Link |
 |:---|:---|:---|:---|
+| Windows | x64 | GitHub | [**Download**](https://github.com/LisseldeE/LANSyncBox/releases/download/pro-R1.1.1.0/LANSyncBoxPro_Setup.exe) |
+| Linux | x64 | GitHub | [**Download**](https://github.com/LisseldeE/LANSyncBox/releases/download/pro-R1.1.1.0/lansyncboxpro_amd64.deb) |
+
+<details>
+<summary>Older releases (click to expand)</summary>
+
+### [R1.1.0.0](https://github.com/LisseldeE/LANSyncBox/releases/tag/pro-R1.1.0.0)
+
+| OS | Architecture | Mirror | Link |
+|:---|:---|:---|:---|
 | Windows | x64 | GitHub | [**Download**](https://github.com/LisseldeE/LANSyncBox/releases/download/pro-R1.1.0.0/LANSyncBoxPro_Setup.exe) |
 | Linux | x64 | GitHub | [**Download**](https://github.com/LisseldeE/LANSyncBox/releases/download/pro-R1.1.0.0/lansyncboxpro_amd64.deb) |
+
+</details>

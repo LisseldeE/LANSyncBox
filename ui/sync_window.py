@@ -843,6 +843,8 @@ class SyncWindow(QMainWindow):
             self.client.file_deleted.connect(self.on_remote_file_deleted)
             self.client.file_renamed.connect(self.on_remote_file_renamed)
             self.client.dir_created.connect(self.on_remote_dir_created)
+            # 网状数据面启动失败：回投一条可见告警，避免"离线"被误读为对端不在线
+            self.client.mesh_start_failed.connect(self._on_mesh_start_failed)
             self.client.log_message.connect(self.add_log_from_network)
             # 客户端发送文件的进度信号
             self.client.file_send_progress.connect(self.on_file_send_progress)
@@ -894,6 +896,10 @@ class SyncWindow(QMainWindow):
         # 使用 QMetaObject.invokeMethod 确保在主线程执行
         QMetaObject.invokeMethod(self, "add_log", Qt.QueuedConnection,
                                  Q_ARG(str, "网络"), Q_ARG(str, message))
+
+    def _on_mesh_start_failed(self):
+        """网状数据面启动失败：记一条可见告警，避免"离线"被误读为对端不在线"""
+        self.add_log("错误", I18n.tr('mesh_listen_start_fail'))
 
     def _on_local_clipboard_committed(self, mime_type: str, data: bytes):
         """本端系统剪贴板新增文本：沿网状直连广播投递给各对端（去中心化）"""

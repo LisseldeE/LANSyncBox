@@ -59,7 +59,8 @@ class MessageType:
                               # 告知真主机地址，令接入端把管理连接换接到真主机（H1：控制面只连主机）
     ROOM_PROBE = 0x2A         # 房间探活请求（探测端→目标端点）：content="{sync_version}:{room_code}"，
                               # 只回状态不注册客户端/不写日志（UDP 摸不到时的 TCP 定向探活）
-    ROOM_PROBE_RESP = 0x2B    # 房间探活响应（目标端点→探测端）：content=RoomProbeState 单字符状态码
+    ROOM_PROBE_RESP = 0x2B    # 房间探活响应（目标端点→探测端）：content=RoomProbeState 单字符状态码；
+                              #   filename=宿主 end_id（探测端据此判定"宿主即本机"）
     CLIPBOARD_TEXT_SIGNAL = 0x2C  # 文本投递（端→网状各直连对端）：与 CLIPBOARD_DATA 同构但走网状直连
                                   # （不经主机转发）；filename=mime_type、content=原始 utf-8 字节，不可加入 JSON 解析集
     ROOM_PEER_QUERY = 0x2D    # 对端查询请求（探测端→房间任一存活端）：content="{sync_version}:{room_code}"，
@@ -175,9 +176,15 @@ class Protocol:
         return Protocol.pack_message(MessageType.AUTH_REQ, '', len(content), False, content)
     
     @staticmethod
-    def create_auth_response(success: bool, message: str = '') -> bytes:
-        """创建验证响应"""
-        content = f"{'1' if success else '0'}:{message}".encode('utf-8')
+    def create_auth_response(success: bool, message: str = '',
+                             transient: bool = False) -> bytes:
+        """创建验证响应（0x04）：content="{状态}:{消息}"。
+
+        状态三态：`1`=成功、`2`=暂时不可用（瞬时，客户端不得视为永久拒绝）、
+        `0`=永久失败。旧端只判首字符是否 `1`，`2` 落到失败分支，混版安全。
+        """
+        state = '2' if transient else ('1' if success else '0')
+        content = f"{state}:{message}".encode('utf-8')
         return Protocol.pack_message(MessageType.AUTH_RESP, '', len(content), False, content)
     
     @staticmethod
@@ -556,10 +563,15 @@ class Protocol:
         return Protocol.pack_message(MessageType.ROOM_PROBE, '', len(content), False, content)
 
     @staticmethod
-    def create_room_probe_resp(state: str) -> bytes:
-        """创建房间探活响应（0x2B）：content=RoomProbeState 单字符状态码"""
+    def create_room_probe_resp(state: str, host_id: str = '') -> bytes:
+        """创建房间探活响应（0x2B）：content=RoomProbeState 单字符状态码。
+
+        宿主 end_id 走 filename 字段（旧端只读 content，混版安全）：探测端据此在
+        连接前判定"宿主即本机"，避免主机以连接端身份连接自己。
+        """
         content = str(state).encode('utf-8')
-        return Protocol.pack_message(MessageType.ROOM_PROBE_RESP, '', len(content), False, content)
+        return Protocol.pack_message(MessageType.ROOM_PROBE_RESP, host_id or '',
+                                     len(content), False, content)
 
     @staticmethod
     def create_room_peer_query(sync_version: str, room_code: str) -> bytes:

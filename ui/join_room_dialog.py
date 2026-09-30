@@ -384,6 +384,10 @@ class JoinRoomDialog(QDialog):
         self._entry_probe = None  # TCP 探活服务（房间号输入路径的定向探活）
         self._first_show = True  # 是否首次显示
         self._loader = None  # 加载动画组件
+        self._regress_as_host = False  # 本端即该房间主机，连接按钮已切换为"回归"
+        # 手输本机 IP 的自连自检：先 TCP 探活取宿主 id 判定，随后自动续走连接流程
+        self._manual_self_checked = False
+        self._pending_autoconnect_seq = None  # 待自动续接连接的探测代号（None=无）
         self.init_ui()
         # 开启对话框级鼠标追踪：用于图例浮层在空白区域的移出隐藏
         self.setMouseTracking(True)
@@ -712,7 +716,9 @@ class JoinRoomDialog(QDialog):
         """
         self._cancel_verifying()
         self._cancel_checking()
+        self._reset_regress_state()
         self._room_checked = False
+        self._manual_self_checked = False  # IP 变更：自连自检结论作废，需按新 IP 重判
         host = text.strip()
         # 标记 IP 来源：程序写入（列表填充/回退清空）记 'auto'，用户手输记 'manual'
         self._ip_source = "" if not host else ("auto" if self._setting_host else "manual")
@@ -743,7 +749,9 @@ class JoinRoomDialog(QDialog):
         """房间号输入变化时更新连接按钮状态，并清除"已找到"等历史状态"""
         # 用户正在改房间号：若此刻有进行中的连接验证，取消它解堵 UI
         self._cancel_verifying()
+        self._manual_self_checked = False  # 房间号变更：自连自检结论作废
         if not self.room_code_input.is_complete():
+            self._reset_regress_state()
             self.connect_btn.setEnabled(False)
             # 房间号不完整：立即取消正在进行的探测（stop + 使旧回调失效），
             # 后台扫描逻辑到此停止，等待用户输满新房间号
@@ -754,6 +762,8 @@ class JoinRoomDialog(QDialog):
 
     def _check_room_exists(self):
         """检测房间是否存在"""
+        # 新一轮探测：先复位上一轮的"回归为主机"结论，避免旧房间号的结论残留
+        self._reset_regress_state()
         # 若已有探测在途（如 300ms 调度叠加/重复触发），先取消旧的，保证只保留最新一次探测
         if self._is_checking:
             self._cancel_checking()
@@ -786,7 +796,7 @@ class JoinRoomDialog(QDialog):
             # TCP 定向探活（独立服务，与列表扫描的 self._probe 互不影响）
             self._entry_probe = TcpRoomProbe(self)
             self._entry_probe.probed.connect(
-                lambda rc, ip, online, seq=seq: self._on_entry_probe_result(rc, ip, online, seq))
+                lambda rc, ip, online, hz, seq=seq: self._on_entry_probe_result(rc, ip, online, seq, hz))
             self._entry_probe.probe(host_address, room_code, Config.DEFAULT_PORT)
             return
 
@@ -808,7 +818,7 @@ class JoinRoomDialog(QDialog):
         # 开始发现（1.5秒超时）
         self.discovery.discover_room(room_code, timeout=1.5)
     
-    def _on_entry_probe_result(self, room_code: str, ip: str, online: bool, seq: int):
+    def _on_entry_probe_result(self, room_code: str, ip: str, online: bool, seq: int, host_id: str = ""):
         """房间号输入路径的 TCP 定向探活结果：命中即判已找到并跳过 UDP 回退"""
         if seq is not None and seq != self._check_seq:
             return  # 已被取消/替换的旧一代探测回调，丢弃
@@ -819,10 +829,25 @@ class JoinRoomDialog(QDialog):
             self.host_address = ip
             self.host_port = Config.DEFAULT_PORT
             self.discovered_host = ip
-            self._show_status(I18n.tr('room_found', ip=ip), color='#51cf66')
             self._room_checked = True
             self._is_checking = False
+            # 宿主即本端（该房间由本机创建）→ 切换为"回归为主机"，不再以连接端身份连接
+            if self._offer_regress_if_host(host_id, ip):
+                self._pending_autoconnect_seq = None
+                return
+            self._show_status(I18n.tr('room_found', ip=ip), color='#51cf66')
             self.connect_btn.setEnabled(True)
+            # 手输本机 IP 的自检流程：探明宿主非本端，续走原连接流程（不再重复自检）
+            if self._pending_autoconnect_seq is not None:
+                if self._pending_autoconnect_seq == seq:
+                    self._pending_autoconnect_seq = None
+                    QTimer.singleShot(0, self.on_connect)
+            return
+        # 手输本机 IP 的自检流程：探活未答（可能为旧端）不阻断，放行原直连兜底
+        if self._pending_autoconnect_seq is not None:
+            if self._pending_autoconnect_seq == seq:
+                self._pending_autoconnect_seq = None
+                QTimer.singleShot(0, self.on_connect)
             return
         # TCP 未命中：房间可能换了设备或线索 IP 已过期，回退 UDP 定向（含广播兜底）
         self._start_direct_udp_probe(ip, room_code, seq)
@@ -841,6 +866,55 @@ class JoinRoomDialog(QDialog):
         """显示状态标签"""
         self.status_label.setText(text)
         self.status_label.setStyleSheet(f"color: {color}; font-size: 12px;")
+
+    def _reset_regress_state(self):
+        """复位"回归为主机"标记与按钮文案（房间号/IP 变更或重新探测时调用）"""
+        if not self._regress_as_host:
+            return
+        self._regress_as_host = False
+        self.connect_btn.setText(I18n.tr('connect'))
+
+    def _offer_regress_if_host(self, host_id: str, host_ip: str = "") -> bool:
+        """本端即该房间主机 → 连接按钮切换为"回归"，点击以主机身份重新入房。
+
+        复用创建房间界面的回归判据（宿主 end_id == 本机持久 end_id）。命中后不再
+        以连接端身份入房，从根本上杜绝主机端被对端"复用管理监听"/陈旧 host_id 钉成
+        主机候选而产生的热循环与其他端"验证失败"。
+        host_ip 为该宿主线索地址：本进程无房间密码记录时，回归须落回常规连接端
+        验证去连它核对密码，故此处一并记为连接锚点。
+        """
+        if not host_id or host_id != UserConfig.get_end_id():
+            return False
+        self._regress_as_host = True
+        self._room_checked = True
+        self._is_checking = False
+        if host_ip:
+            self.host_address = host_ip
+            self.discovered_host = host_ip
+            self.host_port = self.host_port or Config.DEFAULT_PORT
+        self.connect_btn.setText(I18n.tr('return_as_host'))
+        self.connect_btn.setEnabled(True)
+        self._show_status(I18n.tr('room_own_regress'), color='#51cf66')
+        return True
+
+    def _start_regress(self):
+        """以主机身份回归（仅在本进程已知该房间密码时调用）：本地比对内存摘要取明文。
+
+        无密码房（摘要空串）无需弹框；有密码房弹本地校验框（不连主机）验证后取明文。
+        密码属房间属性、非主机可控，故此校验不可跳过。
+        """
+        room_code = self.room_code_input.get_room_code() or self.room_code
+        expected = UserConfig.get_room_password_hash(room_code)
+        if expected:
+            from ui.password_dialog import PasswordDialog
+            dlg = PasswordDialog(room_code, "", 0, self, expected_hash=expected)
+            if not dlg.exec():
+                return  # 取消回归：保持加入界面，可改输密码后重试
+            self.password = dlg.get_password()
+        else:
+            self.password = ""
+        self.room_code = room_code
+        self.accept()
     
     def on_room_found(self, host_ip: str, room_code: str, port: int, version: str = "", seq: int = None, sync_version: str = ""):
         """发现房间
@@ -865,6 +939,12 @@ class JoinRoomDialog(QDialog):
         self.host_address = host_ip
         self.host_port = port
         self.discovered_host = host_ip
+
+        # 占用者即本端（该房间由本机创建）→ 切换为"回归为主机"，不再以连接端身份入房
+        discovery = getattr(self, 'discovery', None)
+        if discovery is not None and self._offer_regress_if_host(
+                discovery.get_host_id(room_code), host_ip):
+            return
         
         # 同步逻辑版本号核对（一致性校验只比此号；对端未上报 sync_version
         # 视为不可验证——旧端同步逻辑未知，同样拒绝，避免混跑分叉）
@@ -892,6 +972,18 @@ class JoinRoomDialog(QDialog):
         if seq is not None and seq != self._check_seq:
             return
         self._is_checking = False
+        # 聚合本轮全部应答：宿主 end_id 即本端 → 该房间由本机创建，切换为"回归为主机"
+        # （按当前房间号过滤：本机若正主持其它房间，其应答不得误判到本次房间号上）
+        my_id = UserConfig.get_end_id()
+        cur_code = self._pending_room_code or self.room_code_input.get_room_code()
+        mine = next(
+            (r for r in rooms or []
+             if isinstance(r, dict) and (r.get('host_id') or '') == my_id
+             and r.get('room_code') == cur_code),
+            None)
+        if mine is not None:
+            if self._offer_regress_if_host(my_id, (mine.get('ip') or '').strip()):
+                return
         if not rooms:
             # 定向探测未命中且未做过广播回退：历史/发现者 IP 可能已过期（房间换了
             # IP）或定向一次性 UDP 丢包。清掉手动 IP 回退广播重扫一次，按房间号重定位
@@ -936,12 +1028,29 @@ class JoinRoomDialog(QDialog):
             QMessageBox.warning(self, I18n.tr('join_room_title'), I18n.tr('invalid_room_code'))
             return
 
+        # 回归态：本端即该房间主机，以主机身份重新入房，不走"被钉成候选"的连接端路径。
+        # 已知该房间密码（含无密码房）→ 本地校验后直接开主机窗；
+        # 未知（重启/同机双开失忆）→ 不静默放行，落回下面常规连接端验证连存活主机
+        # 服务核对密码，通过后 _regress_as_host 仍为真，main_window 自会以主机身份开窗。
+        if self._regress_as_host:
+            if UserConfig.has_room_password_record(room_code):
+                self._start_regress()
+                return
+            self._manual_self_checked = True  # 已判定宿主即本端，无需再做本机 IP 自检
+
         # 锚未建立时需先探测确认房间存在再连，避免用旧锚点连错 IP 卡在验证中。
         # 例外：用户已手动填写完整 IP（方案 1：直连入口）——视为有效锚点，直接尝试连接，
         # 连不上由 _attempt_connect 的验证超时兜底，不再强行走定向探测
         # （跨网段/防火墙下 UDP 探测本就摸不到，反而会禁用按钮导致连不上）。
         manual_host = self.host_edit.text().strip()
         is_manual = self.room_code_input.is_complete() and ('.' in manual_host)
+        # 手输地址即本机地址：先 TCP 探活取宿主 id 判定（自连会令主机退化成连接端），
+        # 探明宿主非本端或探活未答则自动续走直连；远程 IP 不受影响，仍走原直连快路径
+        if is_manual and not self._manual_self_checked and RoomDiscovery.is_local_ip(manual_host):
+            self._manual_self_checked = True
+            self._check_room_exists()
+            self._pending_autoconnect_seq = self._check_seq  # 本次探测代号（回调凭此续接）
+            return
         if not is_manual and not self._room_checked:
             self._check_room_exists()
             return
@@ -961,6 +1070,8 @@ class JoinRoomDialog(QDialog):
         if status == 'success':
             # 无密码房间：无需密码对话框，直接进入同步界面
             self.password = ""
+            # 记录房间密码属性（内存摘要，空串=已知的无密码房，供本机回归据此校验）
+            UserConfig.set_room_password(self.room_code, "")
             self.accept()
         elif status == 'failed':
             # 空密码被拒：该房间需要密码，弹出密码对话框由它负责输入与验证
@@ -1096,6 +1207,8 @@ class JoinRoomDialog(QDialog):
         if dlg.exec():
             self.password = dlg.get_password()
             self._verified_client = dlg.get_verified_client()
+            # 记录房间密码属性（SHA256 摘要，非明文；加入端同样持房间属性）
+            UserConfig.set_room_password(self.room_code, self.password)
             # 密码房此前从不写历史，导致手输 IP 的密码房永远进不了历史（线索丢失）
             UserConfig.add_room_history(self.room_code, self._manual_entry_ip())
             self.accept()
@@ -1126,6 +1239,10 @@ class JoinRoomDialog(QDialog):
         """获取发现的主机地址"""
         return self.discovered_host
 
+    def is_regress_as_host(self) -> bool:
+        """是否以"回归为主机"方式进入（该房间由本机创建）"""
+        return self._regress_as_host
+
     # ========== 发现房间板块相关方法 ==========
 
     def _start_scan_all_rooms(self):
@@ -1143,6 +1260,7 @@ class JoinRoomDialog(QDialog):
             group['count'] = 0
             group['probe_online'] = False  # 本轮 TCP 探活是否命中
             group['probe_ip'] = ""         # 命中时采用的 IP
+            group['host_id'] = ""          # 本轮宿主 end_id（重新聚合）
             w = group.get('widget')
             if w is None:
                 continue
@@ -1196,6 +1314,7 @@ class JoinRoomDialog(QDialog):
             'members': [], 'count': 0, 'is_history': is_history,
             'ip': ip or '',                # 历史线索 IP（仅手动输入过 IP 的房间有）
             'probe_online': False, 'probe_ip': "",
+            'host_id': '',                 # 扫描聚合到的宿主 end_id（用于"回归为主机"判定）
             'widget': None, 'item': None,
         }
         if is_history:
@@ -1234,13 +1353,16 @@ class JoinRoomDialog(QDialog):
         self.scan_status_label.setText(I18n.tr('rooms_found_count', count=self._live_room_count()))
         self.scan_status_label.setStyleSheet("color: #51cf66; font-size: 12px;")
 
-    def _on_probe_result(self, room_code: str, ip: str, online: bool):
+    def _on_probe_result(self, room_code: str, ip: str, online: bool, host_id: str = ""):
         """TCP 探活回调：命中即按 IP 并入成员并点亮；未命中交由广播发现兜底"""
         group = self._room_groups.get(room_code)
         if group is None or not group.get('is_history') or not online:
             return
         group['probe_online'] = True
         group['probe_ip'] = ip
+        # 记录宿主 end_id：点击该行填充时据此判定"回归为主机"（防主机以连接端身份加入）
+        if host_id:
+            group['host_id'] = host_id
         # 按 IP 去重并入成员：广播若也命中同 IP 不重复计数
         if all(m.get('ip') != ip for m in group['members']):
             group['members'].append({
@@ -1284,6 +1406,18 @@ class JoinRoomDialog(QDialog):
         """扫描完成"""
         self._is_scanning = False
         self.scan_btn.setEnabled(True)
+
+        # 把本轮各房宿主的 end_id 落进分组：列表点击行时据此判定"回归为主机"
+        # （点击行走 TCP 定向探活，只回在线状态、拿不到 host_id，故须在扫描收尾先存下）
+        for r in rooms or []:
+            if not isinstance(r, dict):
+                continue
+            group = self._room_groups.get(r.get('room_code'))
+            if group is None:
+                continue
+            hid = (r.get('host_id') or '').strip()
+            if hid:
+                group['host_id'] = hid
 
         # 隐藏加载动画
         if self._loader:
@@ -1371,6 +1505,12 @@ class JoinRoomDialog(QDialog):
             self.host_address = ""
             self.host_port = Config.DEFAULT_PORT
             self._set_host_text("")
+
+        # 该房间由本机创建 → 直接切换为"回归为主机"，跳过探测与连接端路径
+        # （地址已先行落定：本进程无密码记录时，回归须落回常规连接端验证去连它核对密码）
+        if self._offer_regress_if_host((group.get('host_id') or '').strip(), entry_ip):
+            return
+
         # 显式中断旧扫描并按『当前房间号 + 地址框(可能为空)』重新探测
         # ——同房间号切换时 host 文本不变，textChanged 不会触发，必须显式重扫
         self._schedule_host_probe()

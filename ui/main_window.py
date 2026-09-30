@@ -405,6 +405,19 @@ class MainWindow(QMainWindow):
             # 获取房间信息
             room_code = dialog.get_room_code()
             password = dialog.get_password()
+
+            # 该房间由本机创建（回归态）：以主机身份回归，而非连接端身份加入
+            if dialog.is_regress_as_host():
+                # 回归不需要连接端实例（其连的是本机自己的服务），显式断开避免幽灵成员
+                regress_client = dialog.get_verified_client()
+                if regress_client is not None:
+                    try:
+                        regress_client.disconnect()
+                    except Exception:
+                        pass
+                self.open_sync_window(is_host=True, room_code=room_code, password=password)
+                return
+
             host_address = dialog.get_host_address()
             host_port = dialog.get_host_port()
             # 获取预验证成功的 Client 实例（避免 SyncWindow 重复连接）

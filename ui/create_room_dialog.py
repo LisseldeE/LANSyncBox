@@ -124,8 +124,10 @@ class CreateRoomDialog(QDialog):
         self.fixed_room_code_checkbox.stateChanged.connect(self.on_fixed_room_code_toggled)
         fixed_layout.addWidget(self.fixed_room_code_checkbox)
 
-        # 先生成随机房间号（默认状态，避免阻塞渲染）
-        self.generate_room_code()
+        # 先生成随机房间号（默认状态，避免阻塞渲染）；此处不落盘，
+        # 由 _load_config 决定沿用历史房间号还是新建（随机/固定共用同一键值）
+        self.room_code_display.set_room_code(
+            str(random.randint(Config.ROOM_CODE_MIN, Config.ROOM_CODE_MAX)))
 
         # 重新生成按钮（固定状态时切换为"自定义"）
         fixed_layout.addStretch()
@@ -137,10 +139,10 @@ class CreateRoomDialog(QDialog):
 
         layout.addLayout(room_code_layout)
         
-        # 密码输入
+        # 密码输入（回归态复用为"原房间密码"，标签与占位由 _apply_regress_password_ui 切换）
         password_layout = QVBoxLayout()
-        password_label = QLabel(I18n.tr('password'))
-        password_layout.addWidget(password_label)
+        self.password_label = QLabel(I18n.tr('password'))
+        password_layout.addWidget(self.password_label)
         
         self.password_edit = UnderlineEdit()
         self.password_edit.setPlaceholderText(I18n.tr('password_hint'))
@@ -204,11 +206,31 @@ class CreateRoomDialog(QDialog):
         layout.addLayout(button_layout)
     
     def generate_room_code(self):
-        """生成随机房间号并开始可用性检测"""
+        """生成随机房间号、落盘并开始可用性检测。
+
+        随机/固定共用同一房间号键值：生成即持久，主机退房后再次打开本对话框
+        仍能带出原房间号，从而走"回归为主机"路径。
+        """
         room_code = str(random.randint(Config.ROOM_CODE_MIN, Config.ROOM_CODE_MAX))
         self.room_code_display.set_room_code(room_code)
+        self._persist_room_code()
         # 开始检测可用性
         self._start_availability_check()
+
+    def _persist_room_code(self):
+        """落盘当前房间号（随机/固定共用 fixed_room_code 键值）。
+
+        仅在数据目录已存在时写入，避免仅打开对话框就创建目录；首次创建房间
+        由 on_create 兜底落盘。
+        """
+        try:
+            if not Config.get_data_dir_path_only().exists():
+                return
+            code = self.room_code_display.get_room_code()
+            if code and code.isdigit() and len(code) == 6:
+                UserConfig.set_fixed_room_code(code)
+        except Exception:
+            pass
     
     def on_fixed_room_code_toggled(self, state: int):
         """固定房间号勾选框状态变化"""
@@ -217,10 +239,11 @@ class CreateRoomDialog(QDialog):
         UserConfig.set_fixed_room_code_enabled(enabled)
 
         if enabled:
-            # 启用固定：保存当前房间号作为固定房间号
-            current_code = self.room_code_display.get_room_code()
-            if current_code and current_code.isdigit() and len(current_code) == 6:
-                UserConfig.set_fixed_room_code(current_code)
+            # 启用固定：当前房间号转为固定值（随后"自定义"可覆盖）
+            self._persist_room_code()
+        else:
+            # 自定义 → 随机：刷新一个新值并覆盖旧值
+            self.generate_room_code()
         # 切换按钮状态和文本
         self._apply_fixed_state(enabled)
 
@@ -258,6 +281,13 @@ class CreateRoomDialog(QDialog):
                 # 已经连接到生成随机，不需要断开
                 pass
 
+    def _apply_regress_password_ui(self, regress: bool):
+        """回归态下密码框语义切换：填的是"原房间密码"而非新房间密码，文案须跟着变"""
+        self.password_label.setText(
+            I18n.tr('password_regress_label' if regress else 'password'))
+        self.password_edit.setPlaceholderText(
+            I18n.tr('password_regress_hint' if regress else 'password_hint'))
+
     def show_customize_dialog(self):
         """显示自定义房间号对话框"""
         dialog = CustomizeRoomCodeDialog(self)
@@ -294,20 +324,12 @@ class CreateRoomDialog(QDialog):
         self.fixed_room_code_checkbox.setChecked(fixed_enabled)
         self.fixed_room_code_checkbox.blockSignals(False)
 
-        # 根据配置更新房间号
-        if fixed_enabled:
-            saved_code = UserConfig.get_fixed_room_code()
-            if saved_code and saved_code.isdigit() and len(saved_code) == 6:
-                self.room_code_display.set_room_code(saved_code)
-            else:
-                # 没有有效的保存值，生成一个并保存（仅当文件夹已存在时）
-                self.generate_room_code()
-                # 检查数据目录是否存在，避免触发文件夹创建
-                # 使用 Config.get_data_dir_path_only() 确保路径逻辑一致性
-                data_dir_path = Config.get_data_dir_path_only()
-                # 只有在文件夹已存在时才保存配置
-                if data_dir_path.exists():
-                    UserConfig.set_fixed_room_code(self.room_code_display.get_room_code())
+        # 随机/固定共用同一房间号键值：有历史值则沿用（主机据此回归），无值才新建
+        saved_code = UserConfig.get_fixed_room_code()
+        if saved_code and saved_code.isdigit() and len(saved_code) == 6:
+            self.room_code_display.set_room_code(saved_code)
+        else:
+            self.generate_room_code()
 
         # 更新重新生成按钮状态
         self._apply_fixed_state(fixed_enabled)
@@ -317,11 +339,28 @@ class CreateRoomDialog(QDialog):
         # 保存信息
         self.room_code = self.room_code_display.get_room_code()
         self.password = self.password_edit.text()
-        
-        # 若启用固定房间号，持久化当前房间号
-        if self.fixed_room_code_checkbox.isChecked():
+
+        # 回归为主机：必须先校验房间密码（密码属房间属性、不由主机控制），
+        # 校验通过才允许以主机身份重新入房，避免把密码房带成无密码房
+        if self._regress_as_host:
+            if not UserConfig.has_room_password_record(self.room_code):
+                # 本进程不知该房间密码：无法本地校验，绝不静默放行（否则会把密码房降级成
+                # 无密码房）。拒绝即护栏：此情形只出现在端标识被复制到另一台设备时，
+                # 放行会令该设备抢当主机，同房间出现两个主机
+                self.status_label.setText(I18n.tr('room_regress_no_pwd_record'))
+                self.status_label.setStyleSheet("color: #ff6b6b; font-size: 12px;")
+                return
+            if not UserConfig.verify_room_password(self.room_code, self.password):
+                self.status_label.setText(I18n.tr('incorrect_password'))
+                self.status_label.setStyleSheet("color: #ff6b6b; font-size: 12px;")
+                return
+
+        # 随机/固定共用同一键值：落盘本次房间号，便于下次直接带出以回归主机
+        if self.room_code and self.room_code.isdigit() and len(self.room_code) == 6:
             UserConfig.set_fixed_room_code(self.room_code)
-        
+            # 记录房间密码属性（SHA256 摘要，非明文；空密码记为无密码房间）
+            UserConfig.set_room_password(self.room_code, self.password)
+
         # 接受对话框
         self.accept()
 
@@ -345,6 +384,7 @@ class CreateRoomDialog(QDialog):
 
         self._is_checking = True
         self._regress_as_host = False
+        self._apply_regress_password_ui(False)
         self.create_btn.setText(I18n.tr('create'))
         self.create_btn.setEnabled(False)  # 检测期间禁用创建按钮
         self.status_label.setText(I18n.tr('checking_availability'))
@@ -394,6 +434,7 @@ class CreateRoomDialog(QDialog):
         my_id = UserConfig.get_end_id()
         if host_id and host_id == my_id:
             self._regress_as_host = True
+            self._apply_regress_password_ui(True)
             # 正向结论可定案：停止探测（同时取消超时定时器，防止 finish 重复处理）
             if self._discovery:
                 try:
@@ -443,6 +484,7 @@ class CreateRoomDialog(QDialog):
                 for r in rooms if isinstance(r, dict)
             ):
                 self._regress_as_host = True
+                self._apply_regress_password_ui(True)
                 self.create_btn.setText(I18n.tr('return_as_host'))
                 self.create_btn.setEnabled(True)
                 self.status_label.setText(I18n.tr('room_own_regress'))

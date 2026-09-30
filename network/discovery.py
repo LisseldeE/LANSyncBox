@@ -167,7 +167,8 @@ class RoomDiscovery(QObject):
             self.error_occurred.emit(f"启动定向探测失败: {e}")
             return False
 
-    def _get_local_ip(self) -> str:
+    @staticmethod
+    def _get_local_ip() -> str:
         """获取本机IP地址"""
         try:
             s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
@@ -178,7 +179,8 @@ class RoomDiscovery(QObject):
         except Exception:
             return "127.0.0.1"
 
-    def _get_all_local_v4(self) -> set:
+    @staticmethod
+    def _get_all_local_v4() -> set:
         """枚举本机全部非回环 IPv4 地址（多网卡/桥接场景逐接口广播用）。
 
         stdlib 无平台无关的 net_if_addrs，这里用 getaddrinfo(gethostname) 尽量收全
@@ -194,10 +196,18 @@ class RoomDiscovery(QObject):
                     addrs.add(ip)
         except Exception:
             pass
-        lip = self._get_local_ip()
+        lip = RoomDiscovery._get_local_ip()
         if lip and lip != '127.0.0.1':
             addrs.add(lip)
         return addrs
+
+    @staticmethod
+    def is_local_ip(ip: str) -> bool:
+        """判断 IP 是否为本机非回环地址（用于"手输本机 IP"自连防护判定）"""
+        ip = (ip or "").strip()
+        if not ip:
+            return False
+        return ip in RoomDiscovery._get_all_local_v4()
     
     def stop_discovery(self):
         """停止发现
@@ -604,7 +614,7 @@ class TcpRoomProbe(QObject):
     发一帧 ROOM_PROBE 即得状态，对端不注册客户端、不写日志、不下发权限。
     """
 
-    probed = Signal(str, str, bool)  # (room_code, ip, online)
+    probed = Signal(str, str, bool, str)  # (room_code, ip, online, host_id)
 
     PROBE_TIMEOUT = 1.0  # 连接与收包超时（秒），遵循"所有 socket 传输超时 1s"
 
@@ -629,6 +639,7 @@ class TcpRoomProbe(QObject):
     def _probe_task(self, ip: str, room_code: str, port: int):
         """探活线程：连接 → 发请求 → 收状态码；任何异常一律视为未探到"""
         online = False
+        host_id = ''
         sock = None
         try:
             sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
@@ -648,6 +659,8 @@ class TcpRoomProbe(QObject):
                     message = receiver.get_message()
                     if message and message[0] == MessageType.ROOM_PROBE_RESP:
                         state = (message[5] or b'').decode('utf-8', 'ignore')
+                        # filename 承载宿主 end_id（旧端为空）
+                        host_id = (message[1] or b'').decode('utf-8', 'ignore')
                         break
                 if state is not None:
                     break
@@ -656,6 +669,7 @@ class TcpRoomProbe(QObject):
             online = state in (RoomProbeState.ONLINE, RoomProbeState.HOST_UNAVAILABLE)
         except Exception:
             online = False
+            host_id = ''
         finally:
             if sock is not None:
                 try:
@@ -666,7 +680,7 @@ class TcpRoomProbe(QObject):
         if self._stopped:
             return
         try:
-            self.probed.emit(room_code, ip, online)
+            self.probed.emit(room_code, ip, online, host_id if online else '')
         except RuntimeError:
             pass
 

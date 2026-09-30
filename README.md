@@ -9,7 +9,7 @@
 </div>
 
 <p align="center">
-  <a href="https://github.com/LisseldeE/LANSyncBox/releases/tag/pro-R1.1.0.0"><img src="https://img.shields.io/badge/releases-R1.1.0.0-3b82f6" alt="releases R1.1.0.0"></a>
+  <a href="https://github.com/LisseldeE/LANSyncBox/releases/tag/pro-R1.1.1.0"><img src="https://img.shields.io/badge/releases-R1.1.1.0-3b82f6" alt="releases R1.1.1.0"></a>
   <a href="LICENSE"><img src="https://img.shields.io/github/license/LisseldeE/LANSyncBox" alt="开源协议"></a>
   <img src="https://img.shields.io/badge/platform-Windows-blue?logo=windows" alt="支持平台">
   <img src="https://img.shields.io/badge/platform-Linux-orange?logo=linux" alt="支持平台">

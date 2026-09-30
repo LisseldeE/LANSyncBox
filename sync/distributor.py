@@ -183,6 +183,38 @@ class Distributor(QObject):
         with self._lock:
             self._states.pop(file, None)
 
+    def retry_pending_deletes(self, limit: int = 1) -> int:
+        """补删磁盘残留：墓碑（变更 + 不存在）但磁盘仍在的路径重试删除。
+
+        删除时目录内文件被在途传输句柄占用（Windows WinError 32）会失败，此时
+        墓碑与删除知识已记录，但磁盘残留需重试清理，否则半删状态长期存在。每拍
+        至多处理 limit 个（限速，防长阻塞/日志刷屏）。Returns: 成功删除数。
+        """
+        done = 0
+        for file, st in self.states().items():
+            if done >= limit:
+                break
+            if st.exists or st.state != STATE_CHANGE:
+                continue
+            with self._lock:
+                if file in self._protected_dirs or file in self._transferring:
+                    continue  # 受保护目录 / 传输中：本轮不碰
+            try:
+                path = self._safe_join(file)
+            except ValueError:
+                continue
+            if not os.path.exists(path):
+                continue
+            try:
+                self._delete_local(file)
+            except OSError:
+                continue
+            if os.path.exists(path):
+                continue  # 仍失败（句柄未释放）→ 下一拍再试
+            done += 1
+            self._notify_log(f"补删磁盘残留: {file}")
+        return done
+
     def emit_pulled(self, file: str, remote_src_id: str, remote_op_no: int,
                     remote_clock: int = 0, remote_ts: float = 0.0,
                     content_fresh: bool = True,
