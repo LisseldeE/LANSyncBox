@@ -52,6 +52,16 @@ LANSyncBox Pro 是一款跨平台、专注局域网多人协作的文件实时�
 | :---: | :---: |
 | ![主界面](https://lisseldee.github.io/assets/images/webp/1p-1.webp) | ![同步界面](https://lisseldee.github.io/assets/images/webp/1p-2.webp) |
 
+## 功能演示
+
+| 文件快捷顶部添加 | 列表快捷操作栏 |
+| :---: | :---: |
+| ![文件快捷顶部添加](https://lisseldee.github.io/assets/images/gif/1p-1.gif) | ![列表快捷操作栏](https://lisseldee.github.io/assets/images/gif/1p-2.gif) |
+
+| 文本内容投递 | 文件内容投递 |
+| :---: | :---: |
+| ![文本内容投递](https://lisseldee.github.io/assets/images/gif/1p-3.gif) | ![文件内容投递](https://lisseldee.github.io/assets/images/gif/1p-4.gif) |
+
 ## 项目信息
 
 - **项目名称**: LANSyncBox Pro

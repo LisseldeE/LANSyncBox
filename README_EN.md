@@ -52,6 +52,16 @@ LANSyncBox Pro is a cross-platform, LAN-focused real-time file synchronization t
 | :---: | :---: |
 | ![Main Interface](https://lisseldee.github.io/assets/images/webp/1p-3.webp) | ![Sync Interface](https://lisseldee.github.io/assets/images/webp/1p-4.webp) |
 
+## Feature Demos
+
+| File Quick Top-Add | List Quick Action Bar |
+| :---: | :---: |
+| ![File Quick Top-Add](https://lisseldee.github.io/assets/images/gif/1p-1.gif) | ![List Quick Action Bar](https://lisseldee.github.io/assets/images/gif/1p-2.gif) |
+
+| Text Content Delivery | File Content Delivery |
+| :---: | :---: |
+| ![Text Content Delivery](https://lisseldee.github.io/assets/images/gif/1p-3.gif) | ![File Content Delivery](https://lisseldee.github.io/assets/images/gif/1p-4.gif) |
+
 ## Project Information
 
 - **Project Name**: LANSyncBox Pro
