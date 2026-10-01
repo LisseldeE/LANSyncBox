@@ -12,7 +12,7 @@ from typing import Optional
 from PySide6.QtCore import QObject, Signal
 
 from network.protocol import Protocol, MessageType
-from network.file_provider import pull_file
+from network.file_provider import pull_file, PULL_STALE_DISCARD_MSG
 from sync.vector import (FileState, STATE_ADD, STATE_CHANGE, compare_states,
                          vv_covers)
 
@@ -67,6 +67,11 @@ class FileStateStore(QObject):
         # 置入在途集合后对账轮 `_enqueue_pull` 命中即跳过，根除重复接收；拉取结束
         # （成败皆然）即移除，后续轮次可再按需补拉。__cond__ 保护。
         self._in_flight = set()
+        # 在途期间被缓冲的候选槽（name -> slot）：在途窗口内到达的候选不能丢弃——
+        # 丢弃即遗忘，只能等下一拍对账（上限 RECONCILE_INTERVAL）才补发，收敛延迟
+        # 被对账周期支配。worker 收尾（_in_flight.discard 之后）立即并入 _pulls 重判。
+        # __cond__ 保护。
+        self._pull_deferred = {}
         # 冲突覆盖拉取（阶段 3）：name -> src_id（等待该对端 RESP 会话后入队）
         self._pending_conflicts = {}
         # 拉取冷却表（阶段 5，防反复回环）：name -> {src_id: {fails, cooldown_until,
@@ -462,16 +467,60 @@ class FileStateStore(QObject):
             self._notify_file_added(last)
         return changed
 
+    def _slot_from_remote(self, name: str, src_id: str, remote: FileState,
+                          session) -> dict:
+        """由远端状态构造拉取槽（含源端磁盘字节指纹与自同步会话）。"""
+        return {
+            'name': name,
+            'end_id': src_id,
+            'op_no': remote.op_no,
+            'clock': remote.clock,
+            'ts': remote.ts,
+            'bytes_clock': remote.bytes_clock,
+            'bytes_ts': remote.bytes_ts,
+            'session': dict(session) if isinstance(session, dict) else None,
+        }
+
+    @staticmethod
+    def _slot_as_state(slot: dict) -> FileState:
+        """拉取槽 → 比较用 FileState（单源 vv = {槽端: op_no}）。"""
+        return FileState(
+            name=slot['name'], op_no=int(slot['op_no'] or 0),
+            state=STATE_ADD, exists=True,
+            clock=int(slot.get('clock', 0) or 0),
+            ts=float(slot.get('ts', 0.0) or 0.0),
+            vv={slot['end_id']: int(slot['op_no'] or 0)})
+
+    def _merge_slot_locked(self, cand: dict) -> bool:
+        """候选槽并入拉取队列（调用方须持 _cond）：每文件仅一个槽，候选严格
+        胜出才覆盖，否则抛弃。Returns: True=槽被新建或升级。"""
+        name = cand['name']
+        prev = self._pulls.get(name)
+        if prev is not None:
+            # compare_states(prev, cand)：1=现有槽胜 / -1=候选胜 / 0=收敛
+            # force 亦同：候选胜才覆盖——防「迟到败者版本顶掉已入队的胜者
+            # 版本」的覆盖拉取通道竞态（本环境 45s 超时复现过）
+            if compare_states(self._slot_as_state(prev),
+                              self._slot_as_state(cand),
+                              prev['end_id'], cand['end_id']) >= 0:
+                return False  # 现有槽不旧于新候选 → 抛弃新候选
+        self._pulls[name] = cand
+        # notify_all：一轮对比可能一次入队多个文件，多个等待 worker 可同时取件
+        self._cond.notify_all()
+        return True
+
     def _enqueue_pull(self, name: str, src_id: str, remote: FileState, session,
                       force: bool = False) -> bool:
         """拉取排队（版本感知槽）：每文件只保留一个当前仲裁胜者版本槽。
 
         - 无槽 → 建槽。
-        - 有槽 → 用三层裁决比较现有槽 vs 新候选：新版本胜则就地覆盖槽
+        - 有槽 → 用三层裁决比较现有槽 vs 新候选：新版本胜则覆盖槽
           （保留更高版本，旧字节不入队、不占带宽）；现有槽不旧于新候选则
           抛弃新候选（当前槽已是更优版本）。force 亦同：候选胜才覆盖——
           冲突覆盖（仲裁已判 src_id 胜）的迟到败者版本不允许顶掉已入队的
           胜者版本（防覆盖拉取通道竞态）。
+        - 在途（worker 正拉取该文件）→ 候选记入 _pull_deferred 待办，
+          worker 收尾时并入队列重判（不遗忘）。
 
         Returns:
             True = 槽被新建或升级（调用方据此累计 has_diff）；False = 抛弃。
@@ -498,50 +547,20 @@ class FileStateStore(QObject):
             return False
         with self._cond:
             if name in self._in_flight:
-                # 该文件正被某 worker 拉取中（槽已弹出但在在途集合）：不再建第二个槽、
-                # 不再开第二条并发接收（避免同一文件两份临时文件同时写盘、字节翻倍
-                # 撑爆磁盘）。在途拉取落盘前自带新鲜度裁决，若期间出现更高版本，
-                # 其落盘后 _pull_stale_by_state / backfill 仍会触发补拉收敛。
+                # 该文件正被某 worker 拉取中：不能建第二个槽、不能开第二条并发接收
+                # （避免同一文件两份临时文件同时写盘、字节翻倍撑爆磁盘），但候选也
+                # 不能丢弃——丢弃即遗忘，只能等下一拍对账才补发（上限
+                # RECONCILE_INTERVAL），收敛延迟被对账周期支配。改为记入待办，
+                # worker 收尾时立即并入队列重判。多个候选只保留更优者。
+                cand = self._slot_from_remote(name, src_id, remote, session)
+                held = self._pull_deferred.get(name)
+                if held is None or compare_states(
+                        self._slot_as_state(cand), self._slot_as_state(held),
+                        cand['end_id'], held['end_id']) == 1:
+                    self._pull_deferred[name] = cand  # 候选严格胜出 → 替换待办
                 return False
-            prev = self._pulls.get(name)
-            if prev is not None:
-                prev_st = FileState(
-                    name=name, op_no=int(prev['op_no'] or 0),
-                    state=STATE_ADD, exists=True,
-                    clock=int(prev.get('clock', 0) or 0),
-                    ts=float(prev.get('ts', 0.0) or 0.0),
-                    vv={prev['end_id']: int(prev['op_no'] or 0)})
-                # compare_states(prev, cand)：1=现有槽胜 / -1=候选胜 / 0=收敛
-                # force 亦同：候选胜才覆盖——防「迟到败者版本顶掉已入队的胜者
-                # 版本」的覆盖拉取通道竞态（本环境 45s 超时复现过）
-                if compare_states(prev_st, remote, prev['end_id'],
-                                  src_id) >= 0:
-                    return False  # 现有槽不旧于新候选 → 抛弃新候选
-                prev['end_id'] = src_id
-                prev['op_no'] = remote.op_no
-                prev['clock'] = remote.clock
-                prev['ts'] = remote.ts
-                # 槽升级同步记录源端磁盘字节指纹（落盘内容版本）：_do_pull
-                # 落盘后据此判别实际内容是否即仲裁胜者
-                prev['bytes_clock'] = remote.bytes_clock
-                prev['bytes_ts'] = remote.bytes_ts
-                prev['session'] = dict(session) if isinstance(session,
-                                                               dict) else None
-                self._cond.notify_all()
-                return True  # 槽被覆盖升级
-            self._pulls[name] = {
-                'name': name,
-                'end_id': src_id,
-                'op_no': remote.op_no,
-                'clock': remote.clock,
-                'ts': remote.ts,
-                'bytes_clock': remote.bytes_clock,
-                'bytes_ts': remote.bytes_ts,
-                'session': dict(session) if isinstance(session, dict) else None,
-            }
-            # notify_all：一轮对比可能一次入队多个文件，多个等待 worker 可同时取件
-            self._cond.notify_all()
-        return True
+            return self._merge_slot_locked(
+                self._slot_from_remote(name, src_id, remote, session))
 
     def _apply_remote_delete(self, name: str, src_id: str, remote: FileState):
         """补收删除：构造 delete 信号走分发链路应用（含防回声转发与状态合并）。"""
@@ -783,6 +802,11 @@ class FileStateStore(QObject):
                 # 未进入循环（_stop 置位）时保持 False，finally 不重复释放锁。
                 with self._cond:
                     self._in_flight.discard(item['name'])
+                    # 在途期间被缓冲的候选立即并入队列重判：不等下一拍对账，
+                    # 收敛延迟不再被对账周期支配（并入不成立即抛弃，语义同前）。
+                    deferred = self._pull_deferred.pop(item['name'], None)
+                    if deferred is not None:
+                        self._merge_slot_locked(deferred)
                 if acquired:
                     try:
                         lk.release()
@@ -903,6 +927,9 @@ class FileStateStore(QObject):
         ok, _received, err = pull_file(
             host, port, session_id, token, name, dest,
             msg_type=MessageType.SYNC_PULL_REQ,
+            # 落盘前复核「本份是否已过时」：拉取在途期间本端若写入了更新版本，此刻
+            # 落盘会覆盖刚写的胜者字节（不可逆）。判过时则放弃落盘，保住本端字节。
+            pre_replace=lambda: self._pull_stale_by_state(name, item),
             # 把本 store 的停止事件透传给拉取：退出房间/整体停止时设置 _stop，
             # pull_file 会在下一次 recv 超时(≤1s) 感知并取消，释放 .part 句柄并删除
             # 临时文件——否则工作线程会一直占着句柄（直到整体超时或对端关连接），
@@ -964,6 +991,11 @@ class FileStateStore(QObject):
             self.log_message.emit(f"自同步拉取完成: {name}")
         else:
             self.pull_done.emit(name, False)
+            # 落盘前已判过时 → 本份未触碰目标文件，胜者字节完好，属正常放弃而非失败：
+            # 不计冷却、不刷失败日志；胜者版本字节由既有冲突拉取链路与常态对账负责。
+            if err == PULL_STALE_DISCARD_MSG:
+                self.log_message.emit(f"拉取 {name} 落盘前已过时，放弃覆盖")
+                return
             # 阶段 5：源端明确「没有此文件」→ 记录冷却（连续多次后对账轮暂停重复拉取）
             if self._source_lacks_file(err):
                 self._record_pull_cooldown(name, item['end_id'], item['op_no'])

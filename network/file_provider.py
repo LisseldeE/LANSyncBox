@@ -580,9 +580,14 @@ def _connect_provider(host: str, port: int, stop_event):
     return None
 
 
+# pull_file 落盘前回调判定「本份已过时」时的固定返回文案：调用方据此与真失败区分
+PULL_STALE_DISCARD_MSG = "落盘前已过时，未覆盖目标文件"
+
+
 def pull_file(host: str, port: int, session_id: str, token: str, name: str, dest_path: str,
               progress_cb=None, stop_event=None, msg_type: int = None,
-              overall_timeout: float = None, max_resume: int = None):
+              overall_timeout: float = None, max_resume: int = None,
+              pre_replace=None):
     """接收端单文件拉取：直连复制端目录端口，以 FILE_BEGIN/FILE_DATA/FILE_END 流式收文件。
 
     与同步接收同一套逻辑：FILE_BEGIN 携带真实大小作为进度分母（恒定），分块顺序写入，
@@ -607,6 +612,10 @@ def pull_file(host: str, port: int, session_id: str, token: str, name: str, dest
             传入则超时中止拉取并清理临时文件。None 保持"静默无限等待"语义
             （投递路径沿用，发送端打开/读取慢时继续等待）。
         max_resume: 断点续传重连次数上限（None=用 FileProvider.MAX_RESUME_ATTEMPTS）
+        pre_replace: 可选，无参回调，在 os.replace 落盘前调用。返回 True 表示本份
+            已过时（拉取在途期间本端已写入更新版本），直接丢弃临时文件、不触碰
+            目标文件——把「过时槽覆盖胜者字节」的窗口从整个传输时长压到微秒级。
+            回调抛异常视为放行（不因校验故障阻断正常收敛）。
 
     Returns:
         (成功?, 实际接收字节数, 错误消息)
@@ -739,6 +748,17 @@ def pull_file(host: str, port: int, session_id: str, token: str, name: str, dest
 
     # 收尾（成功路径复用原原子替换 + mtime 恢复；任何失败清理临时文件）
     if ok and got_end:
+        # 落盘前最后一道闸（三端并发竞态根因）：拉取在途期间本端可能已写入更新版本，
+        # 此时落盘会把本端刚写的胜者字节覆盖成败者字节——os.replace 不可逆，落盘后
+        # 再判过时为时已晚。回调判过时即丢弃本份，目标文件保持原样。
+        if pre_replace is not None:
+            try:
+                stale = bool(pre_replace())
+            except Exception:
+                stale = False
+            if stale:
+                _safe_remove(tmp_path)
+                return False, written, PULL_STALE_DISCARD_MSG
         # Windows 独占锁：本端 FileProvider 正对外服务同一文件（open 'rb' 共享读/写
         # 但不共享删除）时，os.replace 需对目标取得删除权而撞 WinError 5（访问/共享
         # 冲突）——短退避重试数轮等服务线程释放句柄后再改，避免拉取整轮失败、字节
