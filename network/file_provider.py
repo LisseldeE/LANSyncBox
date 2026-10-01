@@ -66,7 +66,11 @@ class FileProvider(QObject):
         self.port = None
         self.host = None            # 本机局域网 IP（通知给接收端用）
         self.server_socket = None
-        self.sessions = {}          # session_id -> FileSession
+        self.sessions = {}          # session_id -> FileSession（剪贴板/自同步命名空间）
+        # 私信待接收会话（独立命名空间）：不走剪贴板 replace_all 覆盖语义，避免用户
+        # 复制一次文件就把尚未被对方接收的私信会话冲掉；由发送端生命周期/会话失效
+        # 显式移除，不参与缓存超限清理。
+        self.chat_sessions = {}     # session_id -> FileSession
         self._lock = threading.Lock()
         self._conns = {}            # conn_id -> {socket, receiver, send_guard}
         # 出站并发上限信号量：_stream_file 进入流式发送前获取、结束（含异常/提前返回）
@@ -122,6 +126,28 @@ class FileProvider(QObject):
         with self._lock:
             self.sessions.pop(session_id, None)
 
+    # ---- 私信会话命名空间（独立于剪贴板，豁免 replace_all 与缓存清理） ----
+
+    def register_chat_session(self, session_id: str, token: str, files: dict) -> FileSession:
+        """登记私信待接收会话（独立命名空间）：重复登记同 id 直接覆盖。
+
+        与剪贴板会话互不影响——用户复制文件触发 replace_all 时不会清空本表。
+        """
+        session = FileSession(session_id, token, files)
+        with self._lock:
+            self.chat_sessions[session_id] = session
+        return session
+
+    def remove_chat_session(self, session_id: str):
+        """移除私信会话（发送端撤销/退出/会话过期时调用）。"""
+        with self._lock:
+            self.chat_sessions.pop(session_id, None)
+
+    def clear_chat_sessions(self):
+        """清空全部私信会话（退出房间时调用）。"""
+        with self._lock:
+            self.chat_sessions.clear()
+
     def get_session(self, session_id: str):
         """取最新登记的同 id 会话（剪贴板单会话/自同步链取链尾）。"""
         with self._lock:
@@ -141,7 +167,12 @@ class FileProvider(QObject):
         with self._lock:
             entry = self.sessions.get(session_id)
             if entry is None:
-                return None
+                # 私信独立命名空间兜底：session_id 前缀约定 chat_*，与剪贴板/自同步
+                # （sync_*）互不冲突，此处直接按 id+token 命中。
+                chat = self.chat_sessions.get(session_id)
+                if chat is None:
+                    return None
+                return chat if chat.token == token else None
             if isinstance(entry, FileSession):
                 return entry if entry.token == token else None
             for s in reversed(entry):
@@ -188,6 +219,7 @@ class FileProvider(QObject):
             conns = list(self._conns.values())
             self._conns.clear()
             self.sessions.clear()
+            self.chat_sessions.clear()
         for info in conns:
             try:
                 info['socket'].close()

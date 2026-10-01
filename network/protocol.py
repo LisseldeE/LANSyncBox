@@ -68,6 +68,15 @@ class MessageType:
     ROOM_PEER_LIST = 0x2E     # 对端清单（应答方→探测端）：{peers:[{end_id, name, ip, mesh_port, mgmt_port}]}，
                               # 用于 ROOM_PEER_QUERY 应答与 ROOM_PROBE 顺带推送（mesh 建连后的互换走 0x25）
 
+    # ---- 私信（房间内端到端私发；全部走网状直连，不经主机中继） ----
+    # 版本兼容：三型均为加法，旧端 MessageReceiver 正常分帧后由 mesh._dispatch 上抛
+    # 业务层，无对应分支即静默忽略，不影响既有功能（SYNC_LOGIC_VERSION 不提升）。
+    CHAT_TEXT = 0x2F          # 私信文本（端→端）：content=JSON {from_id, msg_id, ts, text}
+    CHAT_FILE_OFFER = 0x30    # 私信文件会话通知（端→端）：content=JSON
+                              #   {from_id, msg_id, session_id, token, files:[{name,size}], ts, ttl}
+                              #   文件字节仍由接收端直连发送端 FileProvider 拉取（复用 0x23 通道）
+    CHAT_SESSION_CLOSE = 0x31 # 私信文件会话失效（端→端）：content=JSON {from_id, session_id, reason}
+
 
 class RoomProbeState:
     """房间探活状态码（ROOM_PROBE_RESP 的 content 取值）
@@ -584,6 +593,49 @@ class Protocol:
         """创建对端清单（0x2E）：content=JSON {"peers":[{end_id,name,ip,mesh_port,mgmt_port}]}"""
         return Protocol._pack_json(MessageType.ROOM_PEER_LIST, {'peers': peers or []})
 
+    # ---- 私信（0x2F-0x31，content=JSON，走网状直连） ----
+
+    @staticmethod
+    def create_chat_text(from_id: str, msg_id: str, text: str, ts: float = 0.0) -> bytes:
+        """创建私信文本消息（0x2F，端→端 mesh 直连）：content=JSON。
+
+        文本按明文传输（局域网可信网络）；msg_id 供接收端去重与 UI 定位气泡。
+        """
+        import time as _t
+        return Protocol._pack_json(MessageType.CHAT_TEXT, {
+            'from_id': from_id, 'msg_id': msg_id, 'ts': float(ts or _t.time()),
+            'text': text or '',
+        })
+
+    @staticmethod
+    def create_chat_file_offer(from_id: str, msg_id: str, session_id: str,
+                              token: str, files: list, host: str = '',
+                              port: int = 0, ts: float = 0.0,
+                              ttl: int = 0) -> bytes:
+        """创建私信文件会话通知（0x30，端→端 mesh 直连）：content=JSON。
+
+        files: [{name, size}]；文件字节不进本帧，由接收端点击"接收"后直连发送端
+        FileProvider（host/port，0x23 通道）按 session_id/token 拉取。
+        ttl 为会话有效期（秒）。
+        """
+        import time as _t
+        return Protocol._pack_json(MessageType.CHAT_FILE_OFFER, {
+            'from_id': from_id, 'msg_id': msg_id, 'session_id': session_id,
+            'token': token, 'files': files or [], 'host': host or '',
+            'port': int(port or 0), 'ts': float(ts or _t.time()),
+            'ttl': int(ttl or 0),
+        })
+
+    @staticmethod
+    def create_chat_session_close(from_id: str, session_id: str, reason: str = 'closed') -> bytes:
+        """创建私信文件会话失效通知（0x31，端→端 mesh 直连）：content=JSON。
+
+        发送端退出房间/主动撤销会话时下发，令接收端对应条目灰显"已过期"。
+        """
+        return Protocol._pack_json(MessageType.CHAT_SESSION_CLOSE, {
+            'from_id': from_id, 'session_id': session_id, 'reason': reason or 'closed',
+        })
+
     # 注：P2P_FILE_DATA(0x19) 为预留类型，投递已改走 FILE_BEGIN/FILE_DATA/FILE_END 端到端 TCP 流式传输，不再使用。
 
 
@@ -616,6 +668,9 @@ class MessageReceiver:
         MessageType.CLIPBOARD_NOTIFY_SIGNAL,
         MessageType.HOST_INFO,
         MessageType.ROOM_PEER_LIST,
+        MessageType.CHAT_TEXT,
+        MessageType.CHAT_FILE_OFFER,
+        MessageType.CHAT_SESSION_CLOSE,
     }
 
     def __init__(self):

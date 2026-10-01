@@ -26,6 +26,7 @@ from pathlib import Path
 from i18n import I18n
 from config import Config, UserConfig
 from ui.file_list_widget import FileListWidget
+from ui.chat_panel import ChatPanel
 from ui.capsule_notification import _RoundedProgressBar
 from ui.widgets import AnimatedButton, BUTTON_STYLES, ToggleSwitch
 from ui.about_dialog import AboutDialog
@@ -498,6 +499,7 @@ class SyncWindow(QMainWindow):
         self._tcp_error_names = {}     # session_key -> 该会话首个"远程文件不可用"的文件名（供错误胶囊）
         self._tcp_error_msgs = {}      # session_key -> 该会话首个非"文件不可用"类错误消息（连接失败/中断）
         self._send_rows = {}           # "session_id:name" -> 本机发送进度行信息（复制端）
+        self._chat_recv_rows = {}      # 私信接收进度行：log_key -> {row, total}（与投递接收同款淡蓝进度条）
         self._pending_transfers = []   # [(session_id, 首文件名, 总字节), ...]：传输中又收到新粘贴时排队，
                                        # 等当前会话完成后按序接管胶囊进度（避免进度被重置回 0%）
         self._cancelled_recv_sessions = set()  # 已取消的接收会话 id（其残留 tcp_file_done 不再参与结算）
@@ -759,7 +761,22 @@ class SyncWindow(QMainWindow):
         bottom_layout.addWidget(self.clean_cache_switch)
 
         main_layout.addWidget(bottom_frame)
-    
+
+        # 私信浮层（悬浮于同步界面之上，不进入布局、不挤压底层内容）
+        self.chat_panel = ChatPanel(self, parent=central_widget)
+        # 拖至同步列表右侧 1/3 松手 → 私信投递
+        self.file_list.chat_files_dropped.connect(self.chat_panel.handle_drop_files)
+        self.chat_panel.relayout()
+
+    def resizeEvent(self, event):
+        """窗口尺寸变化：同步重定位私信浮层与手柄。"""
+        super().resizeEvent(event)
+        panel = getattr(self, 'chat_panel', None)
+        if panel is not None:
+            panel.relayout()
+            # central widget 布局可能在本次 resize 后才落定，延迟再定位一次
+            QTimer.singleShot(0, panel.relayout)
+
     def init_network(self):
         """初始化网络"""
         if self.is_host:
@@ -796,6 +813,8 @@ class SyncWindow(QMainWindow):
             self.server.file_state_added.connect(self.on_file_state_added)
             self.server.sync_pull_progress.connect(self._on_sync_pull_progress)
             self.server.sync_pull_done.connect(self._on_sync_pull_done)
+            # 私信帧（端到端 mesh 直连）→ 私信面板
+            self.server.chat_message.connect(self.chat_panel.on_chat_message)
 
             # 先启动房间响应服务（占用发现端口）：应答携带本端端点与已知对端清单，
             # 供探测端无需主机介绍即可直连本端（去中心化发现）
@@ -820,6 +839,8 @@ class SyncWindow(QMainWindow):
                 self._monitor.set_enabled(True)
                 # 房间就绪：启动对端自发现（周期广播 + 定向 TCP 查询）
                 self._start_peer_discovery()
+                # 房间就绪：mesh 已建，接私信上下线信号
+                self._ensure_chat_wired()
             else:
                 self._add_record("启动失败", "错误", "")
                 self.responder.stop()
@@ -867,6 +888,8 @@ class SyncWindow(QMainWindow):
             self.client.file_state_added.connect(self.on_file_state_added)
             self.client.sync_pull_progress.connect(self._on_sync_pull_progress)
             self.client.sync_pull_done.connect(self._on_sync_pull_done)
+            # 私信帧（端到端 mesh 直连）→ 私信面板
+            self.client.chat_message.connect(self.chat_panel.on_chat_message)
 
             # 连接到服务器（复用模式下 client 已验证通过，直接记录日志）
             host = self.host_address or "127.0.0.1"
@@ -1003,11 +1026,13 @@ class SyncWindow(QMainWindow):
         files_meta = []
         new_temp = []  # 本次复制涉及的临时图片
         occupied = set()  # 已生成条目名（原始名与派生名都算）：不同目录同名文件生成
+        skipped = 0  # 文件夹等非文件条目：投递是单文件流，不支持，仅跳过并提示
         # 唯一条目名（1.txt / 1 (1).txt / 1 (2).txt ...），派生名若也撞上原始名
         # （如同时复制 "1 (1).txt"）则继续递增，保证会话内条目名唯一
         for ent in entries:
             path = ent['path']
             if not os.path.isfile(path):
+                skipped += 1
                 continue
             size = self._safe_size(path)
             if size < 0:
@@ -1025,6 +1050,8 @@ class SyncWindow(QMainWindow):
             # 追踪本端生成的临时图片，下次复制/关闭时清理
             if 'ClipboardImages' in path:
                 new_temp.append(path)
+        if skipped:
+            self.add_log("投递", I18n.tr('clipboard_folder_unsupported'))
         if not files_map:
             return
 
@@ -2058,6 +2085,69 @@ class SyncWindow(QMainWindow):
         self.records_table.scrollToBottom()
         self._trim_history()
 
+    # ---- 私信文件接收进度（接收端；与投递接收同款淡蓝进度条，主线程调用） ----
+
+    def chat_recv_progress(self, log_key: str, name: str, received: int, total: int):
+        """私信文件接收进度：首次到达建行，其后就地更新（分母恒为 FILE_BEGIN 真实大小）。"""
+        info = self._chat_recv_rows.get(log_key)
+        if info is None:
+            row_count = self.records_table.rowCount()
+            self.records_table.insertRow(row_count)
+            action_item = QTableWidgetItem(I18n.tr('clipboard_deliver'))
+            action_item.setTextAlignment(Qt.AlignCenter)
+            self.records_table.setItem(row_count, 0, action_item)
+            bar = QProgressBar()
+            bar.setRange(0, 100)
+            bar.setValue(0)
+            bar.setTextVisible(True)
+            bar.setAlignment(Qt.AlignLeft | Qt.AlignVCenter)
+            bar.setStyleSheet("""
+                QProgressBar { border: none; text-align: left; background-color: transparent; }
+                QProgressBar::chunk { background-color: #74c0fc; }
+            """)
+            self.records_table.setCellWidget(row_count, 1, bar)
+            self.records_table.setRowHeight(row_count, 25)
+            self._chat_recv_rows[log_key] = {'row': row_count, 'total': int(total)}
+            self.records_table.scrollToBottom()
+            self._trim_history()
+            info = self._chat_recv_rows[log_key]
+        bar = self.records_table.cellWidget(info['row'], 1)
+        if not bar or not isinstance(bar, QProgressBar):
+            return
+        total_locked = info['total'] or int(total)
+        shown = min(int(received), total_locked) if total_locked > 0 else int(received)
+        percent = max(0, min(100, int(shown / total_locked * 100))) if total_locked > 0 else 0
+        bar.setValue(percent)
+        display = os.path.basename(name)
+        if len(display) > 25:
+            display = display[:22] + "..."
+        bar.setFormat(f"{I18n.tr('chat_title')} {display} - {percent}% "
+                      f"({shown / 1024 / 1024:.1f}/{total_locked / 1024 / 1024:.1f}M)")
+
+    def chat_recv_finished(self, log_key: str, name: str, ok: bool):
+        """私信文件接收结束：进度行移出钉住区，转为历史记录（完成/失败）。"""
+        info = self._chat_recv_rows.pop(log_key, None)
+        if not info:
+            return
+        self.records_table.removeRow(info['row'])
+        pinned = self._pinned_count()
+        insert_row = max(0, self.records_table.rowCount() - pinned)
+        self.records_table.insertRow(insert_row)
+        action_item = QTableWidgetItem(I18n.tr('clipboard_deliver'))
+        action_item.setTextAlignment(Qt.AlignCenter)
+        self.records_table.setItem(insert_row, 0, action_item)
+        display = os.path.basename(name)
+        if len(display) > 25:
+            display = display[:22] + "..."
+        suffix = I18n.tr('chat_file_done') if ok else I18n.tr('chat_file_failed')
+        status_item = QTableWidgetItem(f"{display} - {suffix}")
+        status_item.setToolTip(f"{name} - {suffix}")
+        # 完成用投递同款淡蓝（绿色是同步专用色，私信接收属投递语义）
+        status_item.setForeground(QColor("#74c0fc") if ok else QColor("#ff922b"))
+        self.records_table.setItem(insert_row, 1, status_item)
+        self.records_table.scrollToBottom()
+        self._trim_history()
+
     def _update_tcp_progress(self, session_key: str, received: int, total: int):
         """主线程更新淡蓝进度条（来自工作线程的排队信号）。
 
@@ -2308,6 +2398,19 @@ class SyncWindow(QMainWindow):
         mesh.peer_disconnected.connect(self._refresh_client_online)
         self._mesh_status_wired = True
 
+    def _ensure_chat_wired(self):
+        """mesh 上下线信号 → 私信面板（在线状态点 / 断线过期）。
+
+        mesh 在认证成功后才创建，故在房间就绪点懒接线，用 _chat_wired 防重复。
+        """
+        mesh = self._mesh_of()
+        if mesh is None or getattr(self, '_chat_wired', False):
+            return
+        mesh.peer_connected.connect(self.chat_panel.on_peer_connected)
+        mesh.peer_disconnected.connect(self.chat_panel.on_peer_disconnected)
+        self._chat_wired = True
+        self.chat_panel._sync_peers()
+
     def on_connected(self):
         """连接成功"""
         if self.is_host:
@@ -2340,6 +2443,8 @@ class SyncWindow(QMainWindow):
             # 房间就绪：启动对端自发现（主机仅"介绍一次"，之后各端自发现自扩散）
             self._start_peer_discovery()
         
+        # 房间就绪：mesh 已建，接私信上下线信号
+        self._ensure_chat_wired()
         # 房间就绪：启用顶部拖拽放置区（快捷添加文件到当前同步列表/根目录）
         self._init_drop_zone()
 
@@ -3212,15 +3317,17 @@ class SyncWindow(QMainWindow):
         """返回当前钉在表格底部的活动进度行数量。
 
         所有 _transfer_rows / _sync_pull_rows / _clipboard_rows / _send_rows
-        中的条目都是活动进度行（完成/取消即 del），恒位于表格底部，故以其
-        条目总数作为钉住区行数。
+        / _chat_recv_rows 中的条目都是活动进度行（完成/取消即 del），恒位于表格
+        底部，故以其条目总数作为钉住区行数。
         """
         return (len(self._transfer_rows) + len(self._sync_pull_rows)
-                + len(self._clipboard_rows) + len(self._send_rows))
+                + len(self._clipboard_rows) + len(self._send_rows)
+                + len(self._chat_recv_rows))
 
     def _delivery_count(self):
-        """投递进度行数（接收 + 发送），恒位于同步进度行下方的最底部区。"""
-        return len(self._clipboard_rows) + len(self._send_rows)
+        """投递进度行数（接收 + 发送 + 私信接收），恒位于同步进度行下方的最底部区。"""
+        return (len(self._clipboard_rows) + len(self._send_rows)
+                + len(self._chat_recv_rows))
 
     def _reindex_block(self):
         """将钉住区所有行号校正为与表格实际位置精确对齐。
@@ -3230,18 +3337,22 @@ class SyncWindow(QMainWindow):
         控制维持"活动进度行恒在底部、控件永不复用"的安全不变量。
         """
         rc = self.records_table.rowCount()
-        n_del = len(self._clipboard_rows) + len(self._send_rows)
+        n_del = (len(self._clipboard_rows) + len(self._send_rows)
+                 + len(self._chat_recv_rows))
         base_del = rc - n_del
         base_sync = base_del - len(self._transfer_rows) - len(self._sync_pull_rows)
-        # 投递区（最底部）：接收行与发送行混合，按当前物理顺序统一映射
+        # 投递区（最底部）：剪贴板接收行、发送行、私信接收行混合，按当前物理顺序统一映射
         ordered = sorted(
             [(info['row'], 'c', key) for key, info in self._clipboard_rows.items()]
-            + [(info['row'], 's', key) for key, info in self._send_rows.items()])
+            + [(info['row'], 's', key) for key, info in self._send_rows.items()]
+            + [(info['row'], 'r', key) for key, info in self._chat_recv_rows.items()])
         for i, (_, kind, key) in enumerate(ordered):
             if kind == 'c':
                 self._clipboard_rows[key]['row'] = base_del + i
-            else:
+            elif kind == 's':
                 self._send_rows[key]['row'] = base_del + i
+            else:
+                self._chat_recv_rows[key]['row'] = base_del + i
         # 同步区：位于投递区之上（同步发送行与自同步接收行混合，按物理顺序统一映射）
         sync_ordered = sorted(
             [(info['row'], 't', key) for key, info in self._transfer_rows.items()]
@@ -3614,6 +3725,13 @@ class SyncWindow(QMainWindow):
         self._pull_remaining = 0
         self._remote_files = None
         self._pending_confirm = None   # 作废未决的冲突询问（避免窗口关闭后按钮回调触发下载）
+        # 私信收尾：向对端发会话失效、清本端会话与内容（须在停 mesh 之前）
+        panel = getattr(self, 'chat_panel', None)
+        if panel is not None:
+            try:
+                panel.shutdown()
+            except Exception:
+                pass
         self._stop_provider()
         self._remove_temp_self_images()
         

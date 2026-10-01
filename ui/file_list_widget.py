@@ -78,6 +78,7 @@ class DragableTableWidget(QTableWidget):
 
     files_dragged = Signal(list, str, bool)  # 文件拖拽信号（文件列表，目标路径，是否内部拖拽）
     empty_area_double_clicked = Signal()  # 空白区域双击信号（用于触发添加文件）
+    chat_drop = Signal(list)  # 私信投递：拖至列表右侧 1/3 区域松手时发出（文件列表）
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -133,6 +134,11 @@ class DragableTableWidget(QTableWidget):
 
         # 当前拖拽悬停的目标行（-1 表示不落在文件夹行上）
         self._drop_target_row = -1
+
+        # 私信投递分区：拖拽落到列表右侧 1/3 区域时，视为"私信至目标"
+        # （左侧 2/3 仍为正常加入同步列表），按 viewport 宽度比例判定
+        self._chat_zone = False
+        self._chat_zone_ratio = 2.0 / 3.0
     
     def mousePressEvent(self, event):
         """鼠标按下事件"""
@@ -353,12 +359,19 @@ class DragableTableWidget(QTableWidget):
     def dropEvent(self, event):
         """拖拽放下事件"""
         if event.mimeData().hasUrls():
+            # 私信分区：右侧 1/3 松手 → 交私信面板处理（不加入同步列表）
+            in_chat = self._chat_zone
             # 先清理指示，再执行放下逻辑
             self._clear_drop_indicator()
             # 获取拖拽的文件
             urls = event.mimeData().urls()
             files = [url.toLocalFile() for url in urls]
-            
+
+            if in_chat:
+                self.chat_drop.emit(files)
+                event.acceptProposedAction()
+                return
+
             # 获取目标位置
             target_path = self._get_drop_target(event.pos())
             
@@ -377,6 +390,20 @@ class DragableTableWidget(QTableWidget):
         悬停文件夹行 -> 高亮该行并提示放入该文件夹；否则提示放入当前目录（不高亮行，
         因为内部拖拽是"移动进文件夹"，而非重排顺序，插入线会误导）。
         """
+        # 私信分区：右侧 1/3 → 提示"松手以私信至目标"，不高亮任何行
+        if pos.x() >= self.viewport().width() * self._chat_zone_ratio:
+            self._chat_zone = True
+            self._drop_highlight.hide()
+            self._drop_target_row = -1
+            self._drop_hint.setText(I18n.tr('chat_drop_hint'))
+            self._drop_hint.adjustSize()
+            self._drop_hint.move(12, 0)
+            self._drop_hint.show()
+            self._drop_hint.raise_()
+            return
+
+        self._chat_zone = False
+
         item = self.itemAt(pos)
         target_row = -1
         hint_text = ""
@@ -427,6 +454,7 @@ class DragableTableWidget(QTableWidget):
         self._drop_highlight.hide()
         self._drop_hint.hide()
         self._drop_target_row = -1
+        self._chat_zone = False
     
     def _get_drop_target(self, pos):
         """获取拖拽目标路径"""
@@ -580,6 +608,7 @@ class FileListWidget(QWidget):
     file_deleted = Signal(str)  # 文件删除信号（本地操作触发）
     file_renamed = Signal(str, str)  # 文件重命名信号（旧名，新名）
     dir_created = Signal(str)  # 目录创建信号（本地操作触发）
+    chat_files_dropped = Signal(list)  # 私信投递：拖至列表右侧 1/3 松手（文件列表）
 
     def __init__(self, folder_path: Path, parent=None):
         super().__init__(parent)
@@ -815,6 +844,8 @@ class FileListWidget(QWidget):
         
         # 连接拖拽信号
         self.table.files_dragged.connect(self._handle_files_dragged)
+        # 私信分区拖放：右侧 1/3 松手 → 转发给同步窗口转交私信面板
+        self.table.chat_drop.connect(self._on_chat_drop)
 
         # 双击事件
         self.table.cellDoubleClicked.connect(self.on_double_click)
@@ -1993,7 +2024,16 @@ class FileListWidget(QWidget):
         dialog.close()
     
     # ========== 拖拽功能 ==========
-    
+
+    def _on_chat_drop(self, files: list):
+        """私信分区（右侧 1/3）松手：纯文件夹就地提示、不展开私信面板；
+        混合放入只保留文件，交给私信面板进入投递态。"""
+        paths = [f for f in files if f]
+        if any(os.path.isfile(p) for p in paths):
+            self.chat_files_dropped.emit(paths)
+        elif any(os.path.isdir(p) for p in paths):
+            self.show_global_notification(I18n.tr('chat_folder_unsupported'))
+
     def _handle_files_dragged(self, files: List[str], target_path: str, is_internal: bool):
         """处理拖拽的文件"""
         if is_internal:

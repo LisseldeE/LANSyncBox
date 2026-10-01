@@ -923,6 +923,18 @@ class FileStateStore(QObject):
         except ValueError as e:
             self.log_message.emit(f"拒绝非法路径: {e}")
             return
+        # 去重（IO 前）：本端字节已覆盖该候选版本 → 不再拉取。覆盖两类重复入队：
+        # ① 加入时「模式下发 + 直连建立」两次 request_all 各回一份 RESP，第二份在
+        # 第一份拉取在途期间被记入 _pull_deferred、收尾并入队列后又被拉一次；
+        # ② 大文件在途跨过对账拍，同一缺失被再次判定入队。仅认字节指纹覆盖
+        # （bytes_vv），知识覆盖但字节未到位（backfill 待补）不在此列照常拉取；
+        # 文件被删时 os.path.exists 兜底放行，不影响正常补拉。
+        st = self.distributor.get_state(name) if self.distributor else None
+        if (st is not None and st.exists
+                and vv_covers(st.bytes_vv, cand.vv)
+                and os.path.exists(dest)):
+            self.log_message.emit(f"拉取 {name} 跳过: 本端已持有该版本字节")
+            return
         os.makedirs(os.path.dirname(dest) or '.', exist_ok=True)
         ok, _received, err = pull_file(
             host, port, session_id, token, name, dest,

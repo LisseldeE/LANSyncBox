@@ -53,6 +53,8 @@ class SyncClient(QObject):
     sync_pull_progress = Signal(str, 'qlonglong', 'qlonglong')  # 自同步拉取进度（相对路径, 已收字节, 总字节）
     sync_pull_done = Signal(str, bool)  # 自同步拉取结束（相对路径, 成功?）
     mesh_start_failed = Signal()       # 网状数据面启动失败（端口段全被占用），UI 提示数据面不可用
+    # 私信（0x2F/0x30/0x31，网状直连到达）：(from_id, msg_type, content dict) → UI 聊天面板
+    chat_message = Signal(str, int, object)
     
     # 数据块大小（64KB）
     CHUNK_SIZE = 64 * 1024
@@ -1207,6 +1209,11 @@ class SyncClient(QObject):
             # 投递去中心化：文本内容沿网状直连到达（不经主机转发）→ 交 UI 写系统剪贴板
             if self.distributor:
                 self.distributor.on_clipboard_text(_filename, content)
+        elif msg_type in (MessageType.CHAT_TEXT, MessageType.CHAT_FILE_OFFER,
+                          MessageType.CHAT_SESSION_CLOSE):
+            # 私信：端到端私发帧沿网状直连到达 → 原样上抛 UI 聊天面板处理
+            if isinstance(content, dict):
+                self.chat_message.emit(end_id, msg_type, content)
 
     def _on_mesh_peer_connected(self, end_id: str, name: str):
         """网状直连建立：同步模式自动发起一轮状态对比（断线重连自动补齐，阶段 2）。
