@@ -25,9 +25,8 @@ def fetch_latest_version():
         成功时: ("R7.1.1.0", None)
         失败时: (None, "错误描述")
     """
+    # 默认上下文即开启证书校验；证书异常由下方 except 转为返回错误，调用方静默降级
     ssl_context = ssl.create_default_context()
-    ssl_context.check_hostname = False
-    ssl_context.verify_mode = ssl.CERT_NONE
 
     req = urllib.request.Request(Config.UPDATE_URL)
     req.add_header('User-Agent', Config.APP_NAME)

@@ -452,11 +452,15 @@ class FileProvider(QObject):
         # 在新连接到来后被关停，只有新连接继续按 offset 续传，无第二条同文件发送）。
         # 键 (session_id, name) 不依赖 client_ip：自同步会话 sync_{end_id} 每接收端
         # 唯一，重连换 IP 也能命中同一键正确接管旧连接。
+        # 接管仅对接收端唯一的自同步会话生效：剪贴板广播会话的 session_id 被多个
+        # 接收端共享，若也接管则后到端会作废先到端的在途发送，多端并发拉同一文件
+        # 反复互掐直至全部失败；广播拉取相互独立，不需要接管。
         key = (session_id, name)
         with self._lock:
             prev = self._active_streams.get(key)
             self._active_streams[key] = conn_id
-        if prev is not None and prev != conn_id:
+        if (prev is not None and prev != conn_id
+                and session_id.startswith('sync_')):
             self._supersede_takeover(key, prev)
         # 跨通道互斥（阶段 6）：自同步拉取会话 sync_{end_id} 服务开始前，在主机端共享
         # 登记表登记 'B'——主机直推(A)与同端同文件竞争时据此让位，避免两通道重复投递；

@@ -124,14 +124,17 @@ class CleanQueue:
     
     def wait_completion(self, timeout: float = 10.0):
         """等待所有清理任务完成
-        
+
         Args:
-            timeout: 超时时间（秒）
+            timeout: 最长等待秒数；超时仍未清空则直接返回，避免调用方
+                     （如退出前清理）被卡住的清理任务永久阻塞。
         """
-        try:
-            self.queue.join()
-        except Exception:
-            pass
+        deadline = time.time() + timeout
+        while self.queue.unfinished_tasks > 0:
+            remaining = deadline - time.time()
+            if remaining <= 0:
+                return
+            time.sleep(min(0.05, remaining))
     
     def get_queue_size(self) -> int:
         """获取队列中待处理的任务数量"""

@@ -295,8 +295,9 @@ class SyncServer(QObject):
         file_path = os.path.normpath(os.path.join(self.sync_folder, filename))
         sync_abs = os.path.abspath(self.sync_folder)
         file_abs = os.path.abspath(file_path)
-        # 确保结果路径在同步文件夹内
-        if file_abs != sync_abs and not file_abs.startswith(sync_abs + os.sep):
+        # 确保结果路径在同步文件夹内；等于同步根（"."/"x/.." 归一化后）同样拒绝，
+        # 否则删除/重命名类请求可清空整个同步根
+        if file_abs == sync_abs or not file_abs.startswith(sync_abs + os.sep):
             raise ValueError(f"非法路径: {filename}")
         return file_path
     
@@ -484,9 +485,12 @@ class SyncServer(QObject):
                 return
             # 临时文件统一命名 .tcp_<名>.part：与 FileProvider 一致，使自同步链路
             # _is_transient_temp 能识别过滤，避免半成品被补扫当正式文件广播。
+            # 并入 client_id（'ip:port'，':' 不能用于 Windows 文件名故替换）：两端
+            # 并发上传同名文件时各自临时文件隔离，避免互相覆盖写坏字节。
+            safe_cid = client_id.replace(':', '_')
             temp_file_path = os.path.join(
                 os.path.dirname(file_path),
-                '.tcp_' + os.path.basename(file_path) + '.part')
+                '.tcp_' + safe_cid + '_' + os.path.basename(file_path) + '.part')
 
             os.makedirs(os.path.dirname(file_path), exist_ok=True)
 
@@ -1117,6 +1121,9 @@ class SyncServer(QObject):
             ip = self.clients.get(client_id, {}).get('ip', '')
             if ip:
                 target = f"{ip}/{filename}"
+        # 先归一化再判定：'ip/.'、'ip/..' 等形态归一化后才暴露真实目标，
+        # 否则可绕过下方的受保护目录判定
+        target = os.path.normpath(target).replace('\\', '/')
         try:
             file_path = self._safe_join(target)
         except ValueError as e:

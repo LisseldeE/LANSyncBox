@@ -55,16 +55,21 @@ class FileManager:
             return files
         
         for item in self.folder_path.rglob('*'):
-            if item.is_file():
-                file_info = {
-                    'path': str(item.relative_to(self.folder_path)),
-                    'name': item.name,
-                    'size': item.stat().st_size,
-                    'mtime': item.stat().st_mtime,
-                    'hash': self.calculate_file_hash(item)
-                }
-                files.append(file_info)
-        
+            try:
+                if item.is_file():
+                    file_info = {
+                        'path': str(item.relative_to(self.folder_path)),
+                        'name': item.name,
+                        'size': item.stat().st_size,
+                        'mtime': item.stat().st_mtime,
+                        'hash': self.calculate_file_hash(item)
+                    }
+                    files.append(file_info)
+            except OSError:
+                # 条目在列出与 stat 之间被删除/改名（同步进行中的常态）：跳过该条，
+                # 不让单条竞态中断整轮文件列表
+                continue
+
         return files
     
     def get_file_list_for_sync(self) -> List[Dict]:
@@ -79,20 +84,25 @@ class FileManager:
             return files
         
         for item in self.folder_path.rglob('*'):
-            if item.is_file():
-                # 跳过传输临时文件（.tmp 旧命名 / .tcp_*.part 统一命名）
-                if item.name.endswith('.tmp') \
-                        or (item.name.startswith('.tcp_')
-                            and item.name.endswith('.part')):
-                    continue
-                
-                file_info = {
-                    'filename': str(item.relative_to(self.folder_path)).replace('\\', '/'),
-                    'size': item.stat().st_size,
-                    'mtime': item.stat().st_mtime
-                }
-                files.append(file_info)
-        
+            try:
+                if item.is_file():
+                    # 跳过传输临时文件（.tmp 旧命名 / .tcp_*.part 统一命名）
+                    if item.name.endswith('.tmp') \
+                            or (item.name.startswith('.tcp_')
+                                and item.name.endswith('.part')):
+                        continue
+
+                    file_info = {
+                        'filename': str(item.relative_to(self.folder_path)).replace('\\', '/'),
+                        'size': item.stat().st_size,
+                        'mtime': item.stat().st_mtime
+                    }
+                    files.append(file_info)
+            except OSError:
+                # 条目在列出与 stat 之间被删除/改名（同步进行中的常态）：跳过该条，
+                # 不让单条竞态中断整轮文件列表
+                continue
+
         return files
     
     def get_directory_list(self) -> List[str]:
@@ -122,9 +132,14 @@ class FileManager:
             return empty_dirs
         
         for item in self.folder_path.rglob('*'):
-            if item.is_dir() and not any(item.iterdir()):
-                dirname = str(item.relative_to(self.folder_path)).replace('\\', '/')
-                empty_dirs.append(dirname)
+            try:
+                if item.is_dir() and not any(item.iterdir()):
+                    dirname = str(item.relative_to(self.folder_path)).replace('\\', '/')
+                    empty_dirs.append(dirname)
+            except OSError:
+                # 条目在列出与 iterdir 之间被删除/改名（同步进行中的常态）：跳过该条，
+                # 不让单条竞态中断整轮空目录列表
+                continue
         return empty_dirs
     
     def calculate_file_hash(self, file_path: Path) -> str:

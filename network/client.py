@@ -154,7 +154,8 @@ class SyncClient(QObject):
         file_path = os.path.normpath(os.path.join(self.sync_folder, filename))
         sync_abs = os.path.abspath(self.sync_folder)
         file_abs = os.path.abspath(file_path)
-        if file_abs != sync_abs and not file_abs.startswith(sync_abs + os.sep):
+        # 等于同步根（"."/"x/.." 归一化后）同样拒绝，防止删除类指令清空整个同步根
+        if file_abs == sync_abs or not file_abs.startswith(sync_abs + os.sep):
             raise ValueError(f"非法路径: {filename}")
         return file_path
     
@@ -1448,9 +1449,11 @@ class SyncClient(QObject):
     def _handle_delete(self, filename: str):
         """处理删除指令
 
-        空文件名（主机端删除对应 IP 文件夹）时清空本端根目录全部内容。
+        目标归一化后为同步根（主机端删除对应 IP 文件夹时下发，'' 或 "."）时，
+        清空本端根目录全部内容。
         """
-        if not filename:
+        rel = (filename or '').replace('\\', '/')
+        if os.path.normpath(rel) == '.':
             # 主机端删除 IP 文件夹：连接端清空根目录
             try:
                 from sync.file_manager import safe_rmtree

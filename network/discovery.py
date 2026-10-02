@@ -52,6 +52,9 @@ class RoomDiscovery(QObject):
         """
         try:
             timeout = timeout or self.DISCOVERY_TIMEOUT
+            # 先收尾上一次探测：残留旧 Timer 到点会触发 _finish_discovery 关掉本次
+            # 新 socket，旧接收线程/ socket 也会泄漏。刷新房间列表类连续探测必现。
+            self.stop_discovery()
             self.discovered_rooms.clear()
             self.discovered_peers.clear()
 
@@ -81,11 +84,17 @@ class RoomDiscovery(QObject):
             # VM、或双网卡中的 172 段）都能收到发现请求。
             local_ips = self._get_all_local_v4()
             for port in range(self.DISCOVERY_PORT_START, self.DISCOVERY_PORT_END + 1):
-                # 发送到广播地址
-                self.socket.sendto(discovery_msg, ('<broadcast>', port))
+                # 发送到广播地址（无广播路由/网卡异常时跳过，不拖垮其余通道探测）
+                try:
+                    self.socket.sendto(discovery_msg, ('<broadcast>', port))
+                except Exception:
+                    pass
 
                 # 发送到本机地址（支持同一台机器双开）
-                self.socket.sendto(discovery_msg, ('127.0.0.1', port))
+                try:
+                    self.socket.sendto(discovery_msg, ('127.0.0.1', port))
+                except Exception:
+                    pass
 
                 # 逐接口发送：子网定向广播 + 该接口自身 IP（单播到本机口）
                 for ip in local_ips:
