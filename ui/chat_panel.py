@@ -1,4 +1,4 @@
-﻿"""
+"""
 私信面板（房间内端到端私发：文本 + 文件）
 Copyright (c) 2026 Lisselde_E <Lisselde.E@outlook.com>.
 Licensed under the GNU General Public License v3.0.
@@ -25,6 +25,7 @@ from i18n import I18n
 from config import Config
 from network.protocol import Protocol, MessageType
 from network.file_provider import pull_file
+from utils.nickname import nickname
 from ui.widgets import AnimatedButton, BUTTON_STYLES
 
 
@@ -217,10 +218,10 @@ class _ElideLabel(QLabel):
 
 
 class _PeerRow(QFrame):
-    """左栏单个端条目：状态点 + IP + 未读徽标（选择模式下带勾选框）。"""
+    """左栏单个端条目：状态点 + 昵称/IP + 未读徽标（选择模式下带勾选框）。"""
     clicked = Signal(str)
 
-    def __init__(self, end_id: str, ip: str, parent=None):
+    def __init__(self, end_id: str, nick: str, ip: str, parent=None):
         super().__init__(parent)
         self.end_id = end_id
         self._selected = False
@@ -238,8 +239,16 @@ class _PeerRow(QFrame):
         lay.addWidget(self._check, 0, Qt.AlignVCenter)
         self._dot = _StatusDot(True)
         lay.addWidget(self._dot)
+        # 文本列：昵称做主位、IP 作灰色小字副标（端身份靠昵称辨识）
+        text_col = QVBoxLayout()
+        text_col.setContentsMargins(0, 0, 0, 0)
+        text_col.setSpacing(0)
+        self._nick_label = _ElideLabel(nick or '')
+        text_col.addWidget(self._nick_label)
         self._ip_label = _ElideLabel(ip or '')
-        lay.addWidget(self._ip_label, 1)
+        self._ip_label.setStyleSheet("font-size:10px; color:#8a8a8a;")
+        text_col.addWidget(self._ip_label)
+        lay.addLayout(text_col, 1)
         self._unread = QLabel()
         self._unread.setFixedHeight(18)
         self._unread.setMinimumWidth(18)
@@ -250,6 +259,9 @@ class _PeerRow(QFrame):
         self._unread.hide()
         lay.addWidget(self._unread, 0, Qt.AlignVCenter)
         self._apply_style()
+
+    def set_nick(self, nick: str):
+        self._nick_label.setText(nick or '')
 
     def set_ip(self, ip: str):
         self._ip_label.setText(ip or '')
@@ -312,6 +324,7 @@ class ChatHandle(QWidget):
         super().__init__(parent)
         self._unread = 0
         self._expanded = False
+        self._hover = False
         self._anim = None
         self.setFixedHeight(96)
         self.setMinimumWidth(self.IDLE_W)
@@ -337,12 +350,21 @@ class ChatHandle(QWidget):
                          width, self.height())
 
     def enterEvent(self, event):
+        self._hover = True
         self._set_expanded(True)
         super().enterEvent(event)
 
     def leaveEvent(self, event):
+        self._hover = False
         self._set_expanded(False)
         super().leaveEvent(event)
+
+    def set_auto_expanded(self, val: bool):
+        """外部（如拖拽悬停私信分区）驱动的预展开：仅视觉展宽，不打开面板。
+
+        保留真实悬停态：鼠标本就悬停手柄时不被外部的收起请求夺走展开态。
+        """
+        self._set_expanded(self._hover or val)
 
     def _set_expanded(self, val: bool):
         """悬浮切换：宽度与 x 同步左移/右移，箭头与角标随宽度重绘。"""
@@ -852,6 +874,15 @@ class ChatPanel(QWidget):
         self.handle.raise_()
         self.relayout()
 
+    def auto_expand_handle(self, on: bool):
+        """拖拽悬停右侧私信分区时预展开手柄（仅视觉展宽，不打开面板）。
+
+        面板已展开时手柄本就不可见，无需处理。
+        """
+        if self._expanded:
+            return
+        self.handle.set_auto_expanded(on)
+
     def _install_outside_filter(self):
         """展开期间挂应用级过滤器：点击面板之外即收起。"""
         if self._outside_filter:
@@ -950,12 +981,14 @@ class ChatPanel(QWidget):
         # 新增/更新行
         for end_id, entry in self._peers.items():
             row = self._rows.get(end_id)
+            nick = nickname(end_id)
             if row is None:
-                row = _PeerRow(end_id, entry['ip'])
+                row = _PeerRow(end_id, nick, entry['ip'])
                 row.clicked.connect(self._on_peer_row_clicked)
                 self._rows[end_id] = row
                 self._peer_list.insertWidget(0, row)
             else:
+                row.set_nick(nick)
                 row.set_ip(entry['ip'])
             row.set_online(entry['online'])
             row.set_selected(end_id == self._current)
@@ -990,7 +1023,9 @@ class ChatPanel(QWidget):
             return
         self._current = end_id
         self._peers[end_id]['unread'] = 0
-        self._chat_title.setText(self._peers[end_id]['ip'])
+        nick = nickname(end_id)
+        ip = self._peers[end_id]['ip']
+        self._chat_title.setText(f"{nick}  {ip}" if nick else ip)
         self._refresh_peer_rows()
         self._render_history(end_id)
         self._update_view_state()

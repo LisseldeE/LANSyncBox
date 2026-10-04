@@ -79,6 +79,7 @@ class DragableTableWidget(QTableWidget):
     files_dragged = Signal(list, str, bool)  # 文件拖拽信号（文件列表，目标路径，是否内部拖拽）
     empty_area_double_clicked = Signal()  # 空白区域双击信号（用于触发添加文件）
     chat_drop = Signal(list)  # 私信投递：拖至列表右侧 1/3 区域松手时发出（文件列表）
+    chat_zone_hover = Signal(bool)  # 拖拽是否悬停在私信分区（右 1/3）：联动私信手柄预展开
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -139,6 +140,12 @@ class DragableTableWidget(QTableWidget):
         # （左侧 2/3 仍为正常加入同步列表），按 viewport 宽度比例判定
         self._chat_zone = False
         self._chat_zone_ratio = 2.0 / 3.0
+
+    def _set_chat_zone(self, val: bool):
+        """置位私信分区态；变化时发信号（联动私信手柄预展开/收起）。"""
+        if self._chat_zone != val:
+            self._chat_zone = val
+            self.chat_zone_hover.emit(val)
     
     def mousePressEvent(self, event):
         """鼠标按下事件"""
@@ -392,7 +399,7 @@ class DragableTableWidget(QTableWidget):
         """
         # 私信分区：右侧 1/3 → 提示"松手以私信至目标"，不高亮任何行
         if pos.x() >= self.viewport().width() * self._chat_zone_ratio:
-            self._chat_zone = True
+            self._set_chat_zone(True)
             self._drop_highlight.hide()
             self._drop_target_row = -1
             self._drop_hint.setText(I18n.tr('chat_drop_hint'))
@@ -402,7 +409,7 @@ class DragableTableWidget(QTableWidget):
             self._drop_hint.raise_()
             return
 
-        self._chat_zone = False
+        self._set_chat_zone(False)
 
         item = self.itemAt(pos)
         target_row = -1
@@ -454,7 +461,7 @@ class DragableTableWidget(QTableWidget):
         self._drop_highlight.hide()
         self._drop_hint.hide()
         self._drop_target_row = -1
-        self._chat_zone = False
+        self._set_chat_zone(False)
     
     def _get_drop_target(self, pos):
         """获取拖拽目标路径"""
@@ -609,6 +616,7 @@ class FileListWidget(QWidget):
     file_renamed = Signal(str, str)  # 文件重命名信号（旧名，新名）
     dir_created = Signal(str)  # 目录创建信号（本地操作触发）
     chat_files_dropped = Signal(list)  # 私信投递：拖至列表右侧 1/3 松手（文件列表）
+    chat_zone_hover = Signal(bool)  # 拖拽是否悬停私信分区（转发自表格，联动私信手柄）
 
     def __init__(self, folder_path: Path, parent=None):
         super().__init__(parent)
@@ -846,6 +854,8 @@ class FileListWidget(QWidget):
         self.table.files_dragged.connect(self._handle_files_dragged)
         # 私信分区拖放：右侧 1/3 松手 → 转发给同步窗口转交私信面板
         self.table.chat_drop.connect(self._on_chat_drop)
+        # 拖拽悬停私信分区 → 转发给同步窗口联动私信手柄预展开
+        self.table.chat_zone_hover.connect(self.chat_zone_hover.emit)
 
         # 双击事件
         self.table.cellDoubleClicked.connect(self.on_double_click)

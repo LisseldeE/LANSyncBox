@@ -35,6 +35,7 @@ from utils.clean_queue import get_clean_queue
 from network.client import SyncClient
 from network.discovery import RoomResponder, MeshPeerDiscovery
 from utils.transfer_queue import TransferQueue
+from utils.nickname import nickname
 from network.file_provider import FileProvider, pull_file
 
 
@@ -766,6 +767,8 @@ class SyncWindow(QMainWindow):
         self.chat_panel = ChatPanel(self, parent=central_widget)
         # 拖至同步列表右侧 1/3 松手 → 私信投递
         self.file_list.chat_files_dropped.connect(self.chat_panel.handle_drop_files)
+        # 拖拽悬停私信分区（右 1/3）→ 预展开私信手柄（仅视觉，不打开面板，拖离即收起）
+        self.file_list.chat_zone_hover.connect(self.chat_panel.auto_expand_handle)
         self.chat_panel.relayout()
 
     def resizeEvent(self, event):
@@ -2206,11 +2209,11 @@ class SyncWindow(QMainWindow):
             self._hide_status_popup()
 
     def _status_popup_content(self) -> str:
-        """生成主机端浮层的 HTML 内容：每行「IP    状态」两列对齐。
+        """生成主机端浮层的 HTML 内容：每行「昵称 IP    状态」两列对齐。
 
-        用 HTML 表格实现：IP 左列、状态右列右对齐；已认证连接端即在线
-        （离线端由心跳超时踢出，不在连接表中），绿色圆点 + "在线"一眼可辨。
-        无连接端时显示提示。
+        用 HTML 表格实现：左列昵称为主、其后灰色小字 IP，状态右列右对齐；已认证
+        连接端即在线（离线端由心跳超时踢出，不在连接表中），绿色圆点 + "在线"
+        一眼可辨。无连接端时显示提示。
         """
         with self.server._lock:
             entries = [(cid, info) for cid, info in list(self.server.clients.items())
@@ -2220,8 +2223,11 @@ class SyncWindow(QMainWindow):
         rows = []
         for cid, info in entries:
             ip = info.get('ip') or cid.split(':')[0]
+            nick = nickname(info.get('end_id') or '')
+            left = (f"<b>{nick}</b> <span style='color:#8a8a8a;'>{ip}</span>"
+                    if nick else ip)
             rows.append(
-                f"<tr><td style='padding-right: 24px;'>{ip}</td>"
+                f"<tr><td style='padding-right: 24px;'>{left}</td>"
                 f"<td align='right' style='white-space: nowrap;'>"
                 f"<span style='color: #008000;'>●</span> "
                 f"<span style='color: #008000;'>{I18n.tr('status_online')}</span></td></tr>"
@@ -2451,9 +2457,15 @@ class SyncWindow(QMainWindow):
     # ========== 模式切换（同步/收集） ==========
 
     def _update_mode_label(self):
-        """更新信息面板身份标签：仅显示主机端/连接端，模式由切换卡片直观呈现"""
+        """更新信息面板身份标签：本端昵称做主位，主机/连接端角色为灰色副标。"""
         role = I18n.tr('host_mode') if self.is_host else I18n.tr('client_mode')
-        self.mode_label.setText(f"<b>{role}</b>")
+        nick = nickname(UserConfig.get_end_id())
+        role_html = f"<span style='color:#8a8a8a; font-size:11px;'>{role}</span>"
+        if nick:
+            self.mode_label.setText(
+                f"<b style='font-size:14px;'>{nick}</b> {role_html}")
+        else:
+            self.mode_label.setText(f"<b>{role}</b>")
 
     def _mode_name(self, mode: str) -> str:
         """模式显示名（中文，用于日志记录）"""

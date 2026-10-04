@@ -872,11 +872,17 @@ class FileStateStore(QObject):
         return False
 
     def _mark_bytes_unknown(self, name: str):
-        """把本端字节指纹清零（bytes_clock=0）：磁盘内容不可信时的兜底。
+        """把本端字节知识清零（bytes_clock/bytes_ts/bytes_vv）：磁盘内容不可信时的兜底。
 
         并发拉取迟到败者落盘后，磁盘字节已非仲裁胜者内容——清零字节指纹使
         本端不再被 _source_byte_fresh 判定为可信拉取源（不会把败者字节散布
         全网），对账 backfill 据此从字节新鲜的端补拉当前胜者覆盖收敛。
+
+        必须连同清空 bytes_vv：bytes_vv 声称持有胜者版本字节，仅清指纹时
+        _need_bytes_backfill（末行 bytes_vv 覆盖判定）与 _do_pull 去重会误判
+        「本端已持有胜者字节」而永久跳过补拉——磁盘停在败者字节且不自愈
+        （仅两端、无第三方字节副本时永久分叉）。清空后重拉成功，emit_pulled
+        以空 prev_bytes 重新写入 bytes_vv，闸门重新闭合，不无限重拉。
         """
         if self.distributor is None:
             return
@@ -886,6 +892,7 @@ class FileStateStore(QObject):
         with self.distributor._lock:
             st.bytes_clock = 0
             st.bytes_ts = 0.0
+            st.bytes_vv = {}
 
     def _do_pull(self, item: dict):
         name = item['name']
