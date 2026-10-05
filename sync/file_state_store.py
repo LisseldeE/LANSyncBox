@@ -91,9 +91,12 @@ class FileStateStore(QObject):
         self._round_has_diff = False
         self._round_gen = 0  # 轮次代数：新 request_all 递增；旧轮超时据此自证过期，不误杀新轮
         # 在线闸门（删除收敛）：本轮任一响应端声明「该路径存在」的名字集合 +
-        # 本轮已应答的直连端集合。墓碑仅在「全员应答且无人声明存在且本端磁盘
-        # 已删」时才移除，缺席端回归前一律保留墓碑压制其陈旧 add。
+        # 本轮已应答的直连端集合 + 本轮任一响应端「明确声明该路径已删除」的
+        # 集合。墓碑仅在「全员应答、无人声明存在、且确有对端明确确认该路径
+        # 也已删除、本端磁盘已删」时才移除；对端沉默（快照为空/目录不入快照）
+        # 绝不等于对端已删，缺席端回归前一律保留墓碑压制其陈旧 add。
         self._round_exists_claim = set()
+        self._round_deleted_claim = set()
         self._round_responded = set()
         # 普通回调通道（与 Distributor 同款）：GUI 用 Qt 信号；无事件循环场景
         # （后台/单测）经此同步回调——Qt 信号跨线程 emit 到 Python 槽在无事件
@@ -350,6 +353,7 @@ class FileStateStore(QObject):
         session = content.get('session')
         has_diff = False
         exists_claim = set()  # 本响应端声明「存在」的路径（在线闸门判据）
+        deleted_claim = set()  # 本响应端「明确声明已删除」的路径（在线闸门判据）
         for d in entries:
             if not isinstance(d, dict):
                 continue
@@ -415,15 +419,19 @@ class FileStateStore(QObject):
                 # 仅当对端条目确为「变更（已删）」才补删——对端若是「add 信号
                 # 已应用、字节未拉取」的待命态（ADD + exists=False），本端文件
                 # 不应被误删，否则删除-拉取震荡。
-                if local_exists and remote.state == STATE_CHANGE:
-                    self._apply_remote_delete(name, src_id, remote)
-                    has_diff = True
+                if remote.state == STATE_CHANGE:
+                    deleted_claim.add(name)  # 对端明确确认该路径已删除
+                    if local_exists:
+                        self._apply_remote_delete(name, src_id, remote)
+                        has_diff = True
                 # 收敛清理改由本轮收口统一执行（_cleanup_converged）：须等本轮
-                # 所有直连端应答且无人再声明该路径存在，避免单端报墓碑即清理
+                # 所有直连端应答且无人再声明该路径存在、且确有对端明确确认该
+                # 路径已删除，避免「对端沉默」被误当作「对端已删」而清理墓碑，
                 # 导致离线端回归时陈旧 add 复活已删内容。
         with self._lock:
             if self._round_targets is not None:
                 self._round_exists_claim |= exists_claim
+                self._round_deleted_claim |= deleted_claim
         # 空目录对账兜底（26.9C2）：对端回「我有你无」的目录 → 本端补建并扩散。
         # 判定全在本地（删除优先/祖先已删/同名文件），不用对端信号的时间戳，
         # 避免复活本端已删目录。
@@ -1164,6 +1172,7 @@ class FileStateStore(QObject):
             self._round_targets = set(targets)
             self._round_has_diff = False
             self._round_exists_claim = set()
+            self._round_deleted_claim = set()
             self._round_responded = set()
         # 目录清单每轮只算一次，供该轮所有对端复用（避免逐对端重复 isdir）
         dirs = self._local_dirs()
@@ -1189,6 +1198,7 @@ class FileStateStore(QObject):
             self._round_targets = None
             self._round_has_diff = False
             self._round_exists_claim = set()
+            self._round_deleted_claim = set()
             self._round_responded = set()
         self._notify_sync_done(had)
 
@@ -1215,18 +1225,21 @@ class FileStateStore(QObject):
             self._notify_sync_done(had)
 
     def _cleanup_converged(self):
-        """在线闸门：本轮所有直连端均已应答、无人声明该路径存在、本端磁盘已删
-        → 移除墓碑条目（防列表无限变长）。
+        """在线闸门：本轮所有直连端均已应答、无人声明该路径存在、且确有对端
+        明确确认该路径已删除、本端磁盘已删 → 移除墓碑条目（防列表无限变长）。
 
-        缺席端（未直连/未应答）回归前一律保留墓碑，使其陈旧 add 继续被删除
-        版本压制而不复活已删内容；未确认时本轮跳过、下轮重试。
+        「对端沉默」（快照为空/目录本就不入快照）绝不等同于「对端已删」：必须
+        有对端在响应里显式声明该路径为删除态才算收敛。缺席端（未直连/未应答）
+        回归前一律保留墓碑，使其陈旧 add 继续被删除版本压制而不复活已删内容。
         """
         if self.distributor is None:
             return
         with self._lock:
             claim = set(self._round_exists_claim)
+            deleted = set(self._round_deleted_claim)
             responded = set(self._round_responded)
             self._round_exists_claim = set()
+            self._round_deleted_claim = set()
             self._round_responded = set()
         if self.mesh is not None:
             try:
@@ -1240,6 +1253,8 @@ class FileStateStore(QObject):
                 continue
             if name in claim:
                 continue
+            if name not in deleted:
+                continue  # 无对端明确确认该路径已删除 → 保留墓碑压制其陈旧 add
             try:
                 if os.path.exists(self._safe_join(name)):
                     continue  # 磁盘仍残留 → 交 Distributor.retry_pending_deletes

@@ -753,12 +753,17 @@ class ToggleSwitch(QWidget):
         painter.setBrush(QBrush(bg_color))
         painter.drawRoundedRect(track_rect, track_radius, track_radius)
         
-        # 绘制滑块（圆形）
+        # 绘制滑块（圆形）：浅色模式下滑块为纯白、原描边过浅，在浅底上几乎"消失"。
+        # 先垫一层浅阴影再画滑块，并把描边加深，使轮廓在浅色底板/灰轨道上均清晰可辨。
         handle_x = margin + (width - handle_size - 2 * margin) * self._animation_progress
         handle_y = margin
-        
+
+        painter.setPen(Qt.NoPen)
+        painter.setBrush(QBrush(QColor(0, 0, 0, 38)))
+        painter.drawEllipse(QRectF(handle_x, handle_y + 1, handle_size, handle_size))
+
         painter.setBrush(QBrush(self._handle_color))
-        painter.setPen(QPen(QColor("#e0e0e0"), 1))  # 浅灰色边框
+        painter.setPen(QPen(QColor("#adb5bd"), 1))  # 描边加深（原 #e0e0e0 过浅）
         painter.drawEllipse(QRectF(handle_x, handle_y, handle_size, handle_size))
     
     def getAnimationProgress(self):

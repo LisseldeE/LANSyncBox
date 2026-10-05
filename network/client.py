@@ -24,7 +24,11 @@ from utils.send_guard import SendLock
 
 class SyncClient(QObject):
     """同步客户端"""
-    
+
+    # 验证失败消息哨兵：对端回带的主机即本端 → 本端即该房间主机，须以主机身份回归。
+    # 加入界面的调用方据此区分"需要密码"与"应回归"，避免误弹密码框。
+    REGRESS_AUTH_MSG = "本端即该房间主机，请以主机身份回归"
+
     # 信号
     connected = Signal()              # 连接成功
     disconnected = Signal()           # 断开连接
@@ -453,7 +457,7 @@ class SyncClient(QObject):
                 self._perm_auth_denied = True
                 self._reconnect_stop.set()
                 self._reconnect_active = False
-                self.auth_failed.emit("本端即该房间主机，请以主机身份回归")
+                self.auth_failed.emit(self.REGRESS_AUTH_MSG)
             self._close_mgmt_socket()
             return
         with self._ep_lock:

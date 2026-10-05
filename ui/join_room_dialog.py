@@ -867,6 +867,16 @@ class JoinRoomDialog(QDialog):
         self.status_label.setText(text)
         self.status_label.setStyleSheet(f"color: {color}; font-size: 12px;")
 
+    def _discovered_has_password(self, room_code: str):
+        """本轮发现中该房间是否设密码：True/False；无从判断（无应答或旧端）返回 None。"""
+        disc = getattr(self, 'discovery', None)
+        if disc is None:
+            return None
+        try:
+            return disc.get_has_password(room_code)
+        except Exception:
+            return None
+
     def _reset_regress_state(self):
         """复位"回归为主机"标记与按钮文案（房间号/IP 变更或重新探测时调用）"""
         if not self._regress_as_host:
@@ -1036,6 +1046,14 @@ class JoinRoomDialog(QDialog):
             if UserConfig.has_room_password_record(room_code):
                 self._start_regress()
                 return
+            # 本进程无密码记录（重启/同机双开失忆）：由发现广播判定房间有无密码。
+            # 明确无密码房 → 直接以主机身份回归，不再弹密码框（否则空输入禁用确认的死锁）
+            if self._discovered_has_password(room_code) is False:
+                self.room_code = room_code
+                self.password = ""
+                UserConfig.set_room_password(room_code, "")  # 记回属性，供下次回归免探测
+                self.accept()
+                return
             self._manual_self_checked = True  # 已判定宿主即本端，无需再做本机 IP 自检
 
         # 锚未建立时需先探测确认房间存在再连，避免用旧锚点连错 IP 卡在验证中。
@@ -1071,6 +1089,13 @@ class JoinRoomDialog(QDialog):
             # 无密码房间：无需密码对话框，直接进入同步界面
             self.password = ""
             # 记录房间密码属性（内存摘要，空串=已知的无密码房，供本机回归据此校验）
+            UserConfig.set_room_password(self.room_code, "")
+            self.accept()
+        elif status == 'regress':
+            # 对端回带主机即本端且空密码被接受 ⇒ 本端即该房间主机、房间无密码
+            # → 直接以主机身份回归，避免被当成"需要密码"而卡在密码框
+            self._regress_as_host = True
+            self.password = ""
             UserConfig.set_room_password(self.room_code, "")
             self.accept()
         elif status == 'failed':
@@ -1113,7 +1138,12 @@ class JoinRoomDialog(QDialog):
             loop.quit()
 
         def on_auth_failed(msg):
-            result['status'] = 'failed'
+            # "对端回带主机即本端"是回归信号而非密码失败：区分出来，交由 on_connect
+            # 以主机身份回归（消息已在密码校验之后产生，说明空密码已被对端接受）
+            if SyncClient.REGRESS_AUTH_MSG in (msg or ""):
+                result['status'] = 'regress'
+            else:
+                result['status'] = 'failed'
             result['message'] = msg
             timeout_timer.stop()
             loop.quit()
@@ -1187,6 +1217,8 @@ class JoinRoomDialog(QDialog):
             if result['status'] is None:
                 # 用户中途修改输入主动取消了验证（非真实失败），界面已复位，不在此提示
                 return 'cancel', ''
+            if result['status'] == 'regress':
+                return 'regress', ''
             if result['status'] == 'failed':
                 return 'failed', (result['message'] or I18n.tr('auth_failed'))
             if result['status'] == 'timeout':

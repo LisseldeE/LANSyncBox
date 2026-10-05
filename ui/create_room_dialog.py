@@ -90,6 +90,9 @@ class CreateRoomDialog(QDialog):
         self._discovery = None  # 房间发现服务
         self._loader = None  # 加载动画组件
         self._regress_as_host = False  # 创建按钮已切换为"回归"，点击以主机身份重新入房
+        self._regress_host_ip = ""    # 回归目标主机线索（探测所得，供密码校验用）
+        self._regress_host_port = 0
+        self._regress_has_password = None  # 该房间是否设密码：True/False/None(无从判断)
         self.init_ui()
     
     def init_ui(self):
@@ -334,26 +337,60 @@ class CreateRoomDialog(QDialog):
         # 更新重新生成按钮状态
         self._apply_fixed_state(fixed_enabled)
 
+    def _capture_regress_info(self, host_ip: str, port, room_code: str):
+        """抓取回归目标主机线索与房间密码属性（须在 discovery 被丢弃前调用）。"""
+        self._regress_host_ip = host_ip or ""
+        try:
+            self._regress_host_port = int(port or 0)
+        except Exception:
+            self._regress_host_port = 0
+        try:
+            self._regress_has_password = self._discovery.get_has_password(room_code)
+        except Exception:
+            self._regress_has_password = None
+
+    def _prompt_regress_password(self) -> bool:
+        """回归时本进程无密码记录且房间有密码：弹出与"加入房间"同款的密码输入界面，
+        连存活主机核对密码；通过则回填密码并返回 True，取消返回 False。"""
+        from ui.password_dialog import PasswordDialog
+        host = self._regress_host_ip or "127.0.0.1"
+        port = self._regress_host_port or Config.DEFAULT_PORT
+        dlg = PasswordDialog(self.room_code, host, port, self)
+        if not dlg.exec():
+            return False
+        self.password = dlg.get_password()
+        UserConfig.set_room_password(self.room_code, self.password)  # 记回属性，供下次回归
+        # 回归不需要连接端实例（其连的是本端自己的服务），显式断开避免幽灵成员
+        regress_client = dlg.get_verified_client()
+        if regress_client is not None:
+            try:
+                regress_client.disconnect()
+            except Exception:
+                pass
+        return True
+
     def on_create(self):
         """创建房间"""
         # 保存信息
         self.room_code = self.room_code_display.get_room_code()
         self.password = self.password_edit.text()
 
-        # 回归为主机：必须先校验房间密码（密码属房间属性、不由主机控制），
-        # 校验通过才允许以主机身份重新入房，避免把密码房带成无密码房
+        # 回归为主机：必须先确认房间密码（密码属房间属性、不由主机控制），
+        # 通过才允许以主机身份重新入房，避免把密码房带成无密码房。
+        # 判定顺序：本地有摘要 → 本地校验；明确无密码（发现广播）→ 免密回归；
+        # 其余（有密码 / 旧端无从判断）→ 弹密码框连主机校验，与"加入房间"同一方式。
         if self._regress_as_host:
-            if not UserConfig.has_room_password_record(self.room_code):
-                # 本进程不知该房间密码：无法本地校验，绝不静默放行（否则会把密码房降级成
-                # 无密码房）。拒绝即护栏：此情形只出现在端标识被复制到另一台设备时，
-                # 放行会令该设备抢当主机，同房间出现两个主机
-                self.status_label.setText(I18n.tr('room_regress_no_pwd_record'))
-                self.status_label.setStyleSheet("color: #ff6b6b; font-size: 12px;")
-                return
-            if not UserConfig.verify_room_password(self.room_code, self.password):
-                self.status_label.setText(I18n.tr('incorrect_password'))
-                self.status_label.setStyleSheet("color: #ff6b6b; font-size: 12px;")
-                return
+            if UserConfig.has_room_password_record(self.room_code):
+                if not UserConfig.verify_room_password(self.room_code, self.password):
+                    self.status_label.setText(I18n.tr('incorrect_password'))
+                    self.status_label.setStyleSheet("color: #ff6b6b; font-size: 12px;")
+                    return
+            elif self._regress_has_password is False:
+                self.password = ""   # 明确无密码房：免密回归
+            else:
+                # 有密码房（或无从判断）且无本地记录：重启后失忆的正解，弹框核对后回归
+                if not self._prompt_regress_password():
+                    return
 
         # 随机/固定共用同一键值：落盘本次房间号，便于下次直接带出以回归主机
         if self.room_code and self.room_code.isdigit() and len(self.room_code) == 6:
@@ -384,6 +421,9 @@ class CreateRoomDialog(QDialog):
 
         self._is_checking = True
         self._regress_as_host = False
+        self._regress_host_ip = ""
+        self._regress_host_port = 0
+        self._regress_has_password = None
         self._apply_regress_password_ui(False)
         self.create_btn.setText(I18n.tr('create'))
         self.create_btn.setEnabled(False)  # 检测期间禁用创建按钮
@@ -434,6 +474,7 @@ class CreateRoomDialog(QDialog):
         my_id = UserConfig.get_end_id()
         if host_id and host_id == my_id:
             self._regress_as_host = True
+            self._capture_regress_info(host_ip, port, room_code)  # 须在丢弃 discovery 前抓取
             self._apply_regress_password_ui(True)
             # 正向结论可定案：停止探测（同时取消超时定时器，防止 finish 重复处理）
             if self._discovery:
@@ -479,11 +520,14 @@ class CreateRoomDialog(QDialog):
             if self._regress_as_host:
                 return
             my_id = UserConfig.get_end_id()
-            if any(
-                (r.get('host_id') or '') == my_id
-                for r in rooms if isinstance(r, dict)
-            ):
+            mine = next(
+                (r for r in rooms if isinstance(r, dict) and (r.get('host_id') or '') == my_id),
+                None)
+            if mine is not None:
                 self._regress_as_host = True
+                self._capture_regress_info(
+                    (mine.get('ip') or '').strip(), mine.get('port') or 0,
+                    mine.get('room_code') or self.room_code_display.get_room_code())
                 self._apply_regress_password_ui(True)
                 self.create_btn.setText(I18n.tr('return_as_host'))
                 self.create_btn.setEnabled(True)

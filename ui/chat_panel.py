@@ -15,7 +15,7 @@ from PySide6.QtWidgets import (
 )
 from PySide6.QtCore import (Qt, Signal, QTimer, QPropertyAnimation, QEasingCurve,
                             QRect, QRectF, QPoint, QSize, QEvent, QByteArray, Property,
-                            QUrl, QMimeData)
+                            QUrl, QMimeData, QVariantAnimation)
 from PySide6.QtGui import (QColor, QPainter, QPen, QPainterPath, QCursor, QPalette,
                            QMouseEvent, QFontMetrics, QDrag, QDesktopServices,
                            QTextOption, QPixmap)
@@ -62,6 +62,7 @@ def _palette():
         'text': text,
         'muted': '#9a9a9a' if dark else '#8a8a8a',
         'row_sel': _shift(win, 30 if dark else -14),
+        'row_hover': _shift(win, 14 if dark else -7),   # 悬浮灰：介于常态与选中之间
         'mine_bg': _shift(win, 34 if dark else -18), 'mine_fg': text,
         'peer_bg': _shift(win, 2 if dark else -4), 'peer_fg': text,
     }
@@ -158,6 +159,7 @@ class _CheckMark(QWidget):
     def __init__(self, parent=None):
         super().__init__(parent)
         self._checked = False
+        self._enabled = True
         self.setFixedSize(16, 16)
         self.setCursor(Qt.PointingHandCursor)
 
@@ -170,8 +172,15 @@ class _CheckMark(QWidget):
             self._checked = val
             self.update()
 
+    def set_enabled_state(self, enabled: bool):
+        """禁用态（如离线端）：灰化且不接受点击。"""
+        enabled = bool(enabled)
+        if self._enabled != enabled:
+            self._enabled = enabled
+            self.update()
+
     def mouseReleaseEvent(self, event):
-        if event.button() == Qt.LeftButton:
+        if event.button() == Qt.LeftButton and self._enabled:
             self.setChecked(not self._checked)
             self.toggled.emit(self._checked)
         super().mouseReleaseEvent(event)
@@ -181,7 +190,8 @@ class _CheckMark(QWidget):
         p.setRenderHint(QPainter.Antialiasing)
         box = QRectF(1, 1, self.width() - 2, self.height() - 2)
         if self._checked:
-            accent = QApplication.palette().color(QPalette.Highlight)
+            accent = (QApplication.palette().color(QPalette.Highlight)
+                      if self._enabled else QColor(_palette()['muted']))
             p.setPen(Qt.NoPen)
             p.setBrush(accent)
             p.drawRoundedRect(box, 3, 3)
@@ -189,7 +199,8 @@ class _CheckMark(QWidget):
             p.drawLine(4, 8, 7, 11)
             p.drawLine(7, 11, 12, 5)
         else:
-            p.setPen(QPen(QColor(_palette()['border']), 1.2))
+            pen = QColor(_palette()['border']) if self._enabled else QColor(_palette()['muted'])
+            p.setPen(QPen(pen, 1.2))
             p.setBrush(Qt.NoBrush)
             p.drawRoundedRect(box, 3, 3)
 
@@ -218,25 +229,22 @@ class _ElideLabel(QLabel):
 
 
 class _PeerRow(QFrame):
-    """左栏单个端条目：状态点 + 昵称/IP + 未读徽标（选择模式下带勾选框）。"""
+    """单个端条目：状态点 + 昵称/IP + 未读徽标；可选态下行尾带勾选框、整行高亮。"""
     clicked = Signal(str)
 
     def __init__(self, end_id: str, nick: str, ip: str, parent=None):
         super().__init__(parent)
         self.end_id = end_id
         self._selected = False
+        self._hovered = False
         self.setCursor(Qt.PointingHandCursor)
         self.setFixedHeight(38)
         self._selectable = False
+        self._select_enabled = True
 
         lay = QHBoxLayout(self)
         lay.setContentsMargins(10, 0, 10, 0)
         lay.setSpacing(8)
-        self._check = _CheckMark()
-        # 点击勾选框时事件被其自身消费，这里补发 clicked 让底部「发送」按钮刷新可用态
-        self._check.toggled.connect(lambda _v: self.clicked.emit(self.end_id))
-        self._check.hide()
-        lay.addWidget(self._check, 0, Qt.AlignVCenter)
         self._dot = _StatusDot(True)
         lay.addWidget(self._dot)
         # 文本列：昵称做主位、IP 作灰色小字副标（端身份靠昵称辨识）
@@ -258,6 +266,11 @@ class _PeerRow(QFrame):
             "font-size:11px; padding:0 5px;")
         self._unread.hide()
         lay.addWidget(self._unread, 0, Qt.AlignVCenter)
+        # 勾选框置于行尾（trailing）：整行可点选，勾选框只作状态读数
+        self._check = _CheckMark()
+        self._check.toggled.connect(self._on_check_toggled)
+        self._check.hide()
+        lay.addWidget(self._check, 0, Qt.AlignVCenter)
         self._apply_style()
 
     def set_nick(self, nick: str):
@@ -281,29 +294,68 @@ class _PeerRow(QFrame):
             self._selected = sel
             self._apply_style()
 
-    def set_selectable(self, sel: bool, checked: bool = False):
+    def set_selectable(self, sel: bool, checked: bool = False, enabled: bool = True):
+        """进入/退出可选态；enabled=False（如离线端）时不可勾选并灰化。"""
         self._selectable = sel
+        self._select_enabled = enabled
+        self._check.set_enabled_state(enabled)
         self._check.setVisible(sel)
         self._check.setChecked(checked)
+        self._apply_style()
 
     def is_checked(self) -> bool:
-        return self._selectable and self._check.isChecked()
+        return self._selectable and self._select_enabled and self._check.isChecked()
+
+    def is_select_enabled(self) -> bool:
+        return self._select_enabled
 
     def set_checked(self, val: bool):
         self._check.setChecked(val)
+        self._apply_style()
+
+    def _on_check_toggled(self, _v):
+        # 点击勾选框时事件被其自身消费，这里刷新样式并补发 clicked 让底部按钮刷新
+        self._apply_style()
+        self.clicked.emit(self.end_id)
+
+    def enterEvent(self, event):
+        if not self._hovered:
+            self._hovered = True
+            self._apply_style()
+        super().enterEvent(event)
+
+    def leaveEvent(self, event):
+        if self._hovered:
+            self._hovered = False
+            self._apply_style()
+        super().leaveEvent(event)
 
     def _apply_style(self):
         c = _palette()
-        bg = c['row_sel'] if self._selected else 'transparent'
+        if self.is_checked():
+            bg = c['row_sel']                                  # 选中：主题灰
+        elif self._selectable and self._select_enabled and self._hovered:
+            bg = c['row_hover']                                # 悬浮：比选中浅一档的灰
+        elif self._selected:
+            bg = c['row_sel']
+        else:
+            bg = 'transparent'
+        offline = self._selectable and not self._select_enabled
+        nick = c['muted'] if offline else c['text']
         self.setStyleSheet(
             f"QFrame {{ background:{bg}; border:none; border-radius:4px; }}"
-            f"QLabel {{ color:{c['text']}; font-size:12px; background:transparent; }}")
+            f"QLabel {{ color:{nick}; font-size:12px; background:transparent; }}")
 
     def mouseReleaseEvent(self, event):
-        if event.button() == Qt.LeftButton:
-            if self._selectable:
-                self._check.setChecked(not self._check.isChecked())
-            self.clicked.emit(self.end_id)
+        if event.button() != Qt.LeftButton:
+            super().mouseReleaseEvent(event)
+            return
+        if self._selectable:
+            if not self._select_enabled:
+                return   # 离线端不可选
+            self._check.setChecked(not self._check.isChecked())
+            self._apply_style()
+        self.clicked.emit(self.end_id)
 
 
 class ChatHandle(QWidget):
@@ -651,7 +703,7 @@ class ChatPanel(QWidget):
         self._current = None   # 当前选中的端
         self._expanded = False
         self._dispatch_files = None
-        self._dispatch_mode = 'none'   # none / select / direct
+        self._dispatch_mode = 'none'   # none / direct（目标勾选见 SendPanel）
         self._anim = None
         self._outside_filter = False   # 展开期间是否已挂全局点击过滤器
 
@@ -993,10 +1045,7 @@ class ChatPanel(QWidget):
             row.set_online(entry['online'])
             row.set_selected(end_id == self._current)
             row.set_unread(0 if end_id == self._current else entry['unread'])
-            if self._dispatch_mode == 'select':
-                row.set_selectable(True, row.is_checked())
-            else:
-                row.set_selectable(False)
+            row.set_selectable(False)   # 目标勾选已移至独立的发送窄栏
         self._refresh_handle_badge()
         self._update_send_btn_state()
 
@@ -1038,9 +1087,6 @@ class ChatPanel(QWidget):
         self._refresh_peer_rows()
 
     def _on_peer_row_clicked(self, end_id: str):
-        if self._dispatch_mode == 'select':
-            self._update_send_btn_state()
-            return
         self._select_peer(end_id)
 
     def _refresh_handle_badge(self):
@@ -1338,20 +1384,8 @@ class ChatPanel(QWidget):
 
     # ---- 文件发送（拖拽投递） ----
 
-    def handle_drop_files(self, files: list):
-        """拖至列表右侧 1/3 松手：展开面板并进入"目标选择"投递流程。
-
-        此入口固定走目标选择：左栏端列表带勾选框 + 底部「发送/取消」按钮，
-        右栏给提示语（不展示聊天界面）。
-        """
-        files = [f for f in files if f]
-        if not files:
-            return
-        self.expand()
-        self._start_dispatch(files, 'select')
-
     def _start_dispatch(self, files: list, mode: str):
-        """进入投递态：mode='select' 手动勾选目标；mode='direct' 直发当前会话端。
+        """进入投递态：mode='direct' 直发当前会话端。
 
         投递与私信都是单文件流，文件夹不支持：统一在此漏斗剔除并提示，
         只剩文件夹则不进投递态。
@@ -1400,7 +1434,11 @@ class ChatPanel(QWidget):
             event.ignore()
 
     def dropEvent(self, event):
-        """聊天界面内拖入文件：直接作为文件消息发给当前会话端。"""
+        """聊天界面内拖入文件：直接作为文件消息发给当前会话端。
+
+        目标选择已移至独立的发送窄栏（SendPanel），本面板只做当前会话直发；
+        未选中端时提示先选端。
+        """
         if self._is_internal_drag(event):
             event.ignore()
             return
@@ -1408,27 +1446,27 @@ class ChatPanel(QWidget):
         if not files:
             event.ignore()
             return
+        if not self._current:
+            self._toast(I18n.tr('chat_select_hint'))
+            event.ignore()
+            return
         event.acceptProposedAction()
-        self._start_dispatch(files, 'direct' if self._current else 'select')
+        self._start_dispatch(files, 'direct')
 
     def _dispatch_targets(self) -> list:
-        if self._dispatch_mode == 'direct':
-            return [self._current] if self._current else []
-        return [eid for eid, row in self._rows.items() if row.is_checked()]
+        return [self._current] if self._current else []
 
     def _update_view_state(self):
-        """按选中端/投递态切换右栏视图：目标选择投递时右栏只给引导语（不展示聊天），
-        直发/聊天时展示会话；投递期间输入框让位给文件信息与发送按钮。"""
+        """按选中端/投递态切换右栏视图：聊天、直发时展示会话；投递期间输入框
+        让位给文件信息与发送按钮。"""
         has_peer = self._current is not None
         mode = self._dispatch_mode
-        show_chat = has_peer and mode in ('none', 'direct')
         self._input_area.setVisible(mode != 'none' or has_peer)
         self._input.setVisible(mode == 'none')
-        self._msg_scroll.setVisible(show_chat)
-        self._chat_title.setVisible(show_chat)
-        self._chat_hint.setVisible(not show_chat)
-        self._chat_hint.setText(I18n.tr('chat_targets') if mode == 'select'
-                                else I18n.tr('chat_select_hint'))
+        self._msg_scroll.setVisible(has_peer)
+        self._chat_title.setVisible(has_peer)
+        self._chat_hint.setVisible(not has_peer)
+        self._chat_hint.setText(I18n.tr('chat_select_hint'))
 
     def _update_send_btn_state(self):
         """投递态按已选目标数控灰；聊天态按是否有选中端且输入非空控灰。"""
@@ -1457,8 +1495,6 @@ class ChatPanel(QWidget):
         self._send_btn.setText(I18n.tr('chat_send'))
         self._update_view_state()
         self._update_send_btn_state()
-        for row in self._rows.values():
-            row.set_selectable(False)
 
     def _send_files(self, files: list, targets: list):
         provider = self._provider()
@@ -1713,3 +1749,411 @@ class ChatPanel(QWidget):
         self._peers.clear()
         if self.handle is not None:
             self.handle.close()
+
+
+class SendPanel(QWidget):
+    """多选发送窄栏：拖拽文件到同步列表右侧弹出的独立浮层。
+
+    形态与 ChatPanel 同款（圆角卡片、贴右侧内缩、向右滑入/滑出），但更窄、单列：
+    上方是待发文件名清单，下方是可勾选的接收端列表；底部两个动作按钮。
+    投递逻辑复用 ChatPanel._send_files，本面板不自行维护会话与历史。
+    """
+
+    PANEL_W = 220      # 窄栏宽度（远窄于私信面板）
+    MARGIN = 12        # 上/下/右内缩
+    FILE_MAX_H = 132   # 文件名清单最大高度（超出滚动）
+
+    def __init__(self, owner, chat_panel, parent=None):
+        super().__init__(parent or owner)
+        self._owner = owner
+        self._chat = chat_panel
+        self._files = []
+        self._rows = {}      # end_id -> _PeerRow
+        self._expanded = False
+        self._anim = None
+        self._outside_filter = False
+        self._action_is_send = None   # 底部按钮当前态；None=尚未初始化（首帧不播过渡）
+
+        self.setObjectName('SendPanel')
+        self.setAttribute(Qt.WA_StyledBackground, True)
+        self._build_ui()
+        self.setVisible(False)
+
+    # ---- 构建界面 ----
+
+    def _build_ui(self):
+        c = _palette()
+        root = QVBoxLayout(self)
+        root.setContentsMargins(12, 10, 12, 12)
+        root.setSpacing(8)
+        self.setStyleSheet(
+            f"#SendPanel {{ background:{c['bg']}; border:1px solid {c['border']}; "
+            f"border-radius:8px; }}")
+
+        # 顶部标题行
+        head = QHBoxLayout()
+        head.setSpacing(8)
+        self._title = QLabel('')
+        self._title.setStyleSheet(
+            f"color:{c['text']}; font-size:13px; font-weight:bold; background:transparent;")
+        head.addWidget(self._title)
+        head.addStretch()
+        self._collapse_btn = AnimatedButton(I18n.tr('collapse_panel'))
+        self._collapse_btn.clicked.connect(lambda: self.close_panel())
+        head.addWidget(self._collapse_btn)
+        root.addLayout(head)
+
+        # 待发文件名清单（只读，超出滚动）
+        self._file_scroll = QScrollArea()
+        self._file_scroll.setWidgetResizable(True)
+        self._file_scroll.setFrameShape(QFrame.NoFrame)
+        self._file_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        self._file_scroll.setMaximumHeight(self.FILE_MAX_H)
+        self._file_scroll.setStyleSheet("background:transparent; border:none;")
+        self._file_host = QWidget()
+        self._file_list = QVBoxLayout(self._file_host)
+        self._file_list.setContentsMargins(2, 0, 2, 0)
+        self._file_list.setSpacing(2)
+        self._file_list.addStretch()
+        self._file_scroll.setWidget(self._file_host)
+        root.addWidget(self._file_scroll)
+
+        # 接收端区标题：已选计数 + 全选
+        peer_head = QHBoxLayout()
+        peer_head.setSpacing(8)
+        self._selected_label = QLabel('')
+        self._selected_label.setStyleSheet(
+            f"color:{c['muted']}; font-size:12px; background:transparent;")
+        peer_head.addWidget(self._selected_label)
+        peer_head.addStretch()
+        self._select_all_check = _CheckMark()
+        self._select_all_check.toggled.connect(self._on_select_all)
+        peer_head.addWidget(self._select_all_check, 0, Qt.AlignVCenter)
+        self._select_all_label = QLabel(I18n.tr('send_panel_select_all'))
+        self._select_all_label.setStyleSheet(
+            f"color:{c['text']}; font-size:12px; background:transparent;")
+        peer_head.addWidget(self._select_all_label)
+        root.addLayout(peer_head)
+
+        # 接收端勾选列表（可滚动、占满剩余高度）
+        self._peer_scroll = QScrollArea()
+        self._peer_scroll.setWidgetResizable(True)
+        self._peer_scroll.setFrameShape(QFrame.NoFrame)
+        self._peer_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        self._peer_scroll.setStyleSheet("background:transparent; border:none;")
+        self._peer_host = QWidget()
+        self._peer_list = QVBoxLayout(self._peer_host)
+        self._peer_list.setContentsMargins(0, 0, 0, 0)
+        self._peer_list.setSpacing(2)
+        self._peer_list.addStretch()
+        self._peer_scroll.setWidget(self._peer_host)
+        root.addWidget(self._peer_scroll, 1)
+
+        # 底部：进入私信开关 + 单按钮（未选目标=取消，已选=发送 (N)）
+        # 开关行包一层容器：仅在发送态淡入显示，取消态淡出隐藏
+        self._enter_chat_check = _CheckMark()
+        self._enter_wrap = QWidget()
+        self._enter_wrap.setStyleSheet("background:transparent;")
+        enter_row = QHBoxLayout(self._enter_wrap)
+        enter_row.setContentsMargins(0, 0, 0, 0)
+        enter_row.setSpacing(8)
+        enter_row.addWidget(self._enter_chat_check, 0, Qt.AlignVCenter)
+        self._enter_chat_label = QLabel(I18n.tr('send_enter_chat'))
+        self._enter_chat_label.setStyleSheet(
+            f"color:{c['text']}; font-size:12px; background:transparent;")
+        enter_row.addWidget(self._enter_chat_label)
+        enter_row.addStretch()
+        self._enter_wrap.setVisible(False)
+        root.addWidget(self._enter_wrap)
+
+        self._action_btn = AnimatedButton(I18n.tr('cancel'))
+        self._action_btn.setStyleSheet(BUTTON_STYLES['secondary'])
+        self._action_btn.setFixedHeight(36)   # 钉死高度：主/次样式边框差 2px，避免切换时跳动
+        self._action_btn.clicked.connect(self._on_action)
+        root.addWidget(self._action_btn)
+
+        # 视口与内容层保持透明，避免平台 base 色渗进面板
+        for area, host in ((self._file_scroll, self._file_host),
+                           (self._peer_scroll, self._peer_host)):
+            area.viewport().setStyleSheet("background:transparent;")
+            host.setStyleSheet("background:transparent;")
+
+        self._update_action_state()
+
+    # ---- 定位与展开/收起 ----
+
+    def _host_size(self):
+        """定位基准：面板父控件（central widget）尺寸；无父时退回同步窗口。"""
+        host = self.parentWidget() or self._owner
+        return host.width(), host.height()
+
+    def relayout(self):
+        """窗口尺寸变化时重定位：贴右侧内缩，展开态固定宽度。"""
+        w, h = self._host_size()
+        pw = self.PANEL_W
+        ph = h - self.MARGIN * 2
+        x = w - pw - self.MARGIN
+        if self._expanded:
+            self.setGeometry(x, self.MARGIN, pw, ph)
+        else:
+            self.setGeometry(w, self.MARGIN, pw, ph)
+
+    def is_expanded(self) -> bool:
+        return self._expanded
+
+    def open(self, files: list):
+        """拖入文件：剔除文件夹后展示窄栏（文件名清单 + 接收端勾选）。"""
+        raw = [f for f in files if f]
+        good = _regular_files(raw)
+        if len(good) < len(raw):
+            self._chat._toast(I18n.tr('chat_folder_unsupported'))
+        if not good:
+            return
+        self._files = good
+        self._title.setText(I18n.tr('send_panel_title', count=len(good)))
+        self._render_file_list()
+        self._enter_chat_check.setChecked(False)
+        self._action_is_send = None   # 重新打开：按钮直接就位到「取消」，不播过渡
+        self._chat._sync_peers()
+        self._render_peer_list()
+        if not self._rows:
+            self._chat._toast(I18n.tr('send_panel_no_peer'))
+        self._expand()
+
+    def _expand(self):
+        self.relayout()
+        w, h = self._host_size()
+        pw = self.PANEL_W
+        end = QRect(w - pw - self.MARGIN, self.MARGIN, pw, h - self.MARGIN * 2)
+        start = QRect(w, end.y(), end.width(), end.height())
+        self.show()
+        self.raise_()
+        self._expanded = True
+        self._install_outside_filter()
+        self._animate_geometry(start, end)
+
+    def close_panel(self, animate: bool = True):
+        """收起窄栏：向右滑出并隐藏；animate=False 立即隐藏（转交私信时用）。"""
+        if not self._expanded:
+            return
+        w, _h = self._host_size()
+        start = self.geometry()
+        end = QRect(w, start.y(), start.width(), start.height())
+        self._expanded = False
+        self._remove_outside_filter()
+        if animate:
+            self._animate_geometry(start, end, on_end=self._after_close)
+        else:
+            self._after_close()
+
+    def _after_close(self):
+        self.setVisible(False)
+        for row in self._rows.values():
+            row.set_selectable(False)
+        self._files = []
+
+    def _animate_geometry(self, start: QRect, end: QRect, on_end=None):
+        self._anim = QPropertyAnimation(self, b"geometry")
+        self._anim.setDuration(ANIM_MS)
+        self._anim.setEasingCurve(QEasingCurve.OutCubic)
+        self._anim.setStartValue(start)
+        self._anim.setEndValue(end)
+        if on_end is not None:
+            self._anim.finished.connect(on_end)
+        self._anim.start(QPropertyAnimation.DeleteWhenStopped)
+
+    # ---- 点击面板外收起 ----
+
+    def _install_outside_filter(self):
+        if self._outside_filter:
+            return
+        app = QApplication.instance()
+        if app is not None:
+            app.installEventFilter(self)
+            self._outside_filter = True
+
+    def _remove_outside_filter(self):
+        if not self._outside_filter:
+            return
+        app = QApplication.instance()
+        if app is not None:
+            app.removeEventFilter(self)
+        self._outside_filter = False
+
+    def _outside_press(self, obj, event) -> bool:
+        """判断本次鼠标按下是否落在面板之外（同一窗口内）。"""
+        if not isinstance(obj, QWidget):
+            return False
+        if obj is self or self.isAncestorOf(obj):
+            return False
+        if obj.window() is not self.window():
+            return False
+        return not self.rect().contains(self.mapFromGlobal(
+            event.globalPosition().toPoint()))
+
+    def eventFilter(self, obj, event):
+        if self._expanded and isinstance(event, QMouseEvent) \
+                and event.type() == QEvent.MouseButtonPress \
+                and self._outside_press(obj, event):
+            self.close_panel()
+        return super().eventFilter(obj, event)
+
+    # ---- 内容渲染 ----
+
+    def _render_file_list(self):
+        c = _palette()
+        while self._file_list.count():
+            item = self._file_list.takeAt(0)
+            w = item.widget()
+            if w is not None:
+                w.deleteLater()
+        for path in self._files:
+            lbl = _ElideLabel(os.path.basename(path))
+            lbl.setStyleSheet(
+                f"color:{c['text']}; font-size:12px; background:transparent;")
+            self._file_list.addWidget(lbl)
+        self._file_list.addStretch()
+
+    def _render_peer_list(self):
+        """按私信面板的端快照重建勾选列表（每次打开重置勾选）。"""
+        peers = self._chat._peers
+        for end_id in list(self._rows.keys()):
+            if end_id not in peers:
+                row = self._rows.pop(end_id)
+                self._peer_list.removeWidget(row)
+                row.deleteLater()
+        for end_id, entry in peers.items():
+            row = self._rows.get(end_id)
+            nick = nickname(end_id)
+            if row is None:
+                row = _PeerRow(end_id, nick, entry['ip'])
+                row.clicked.connect(self._on_row_clicked)
+                self._rows[end_id] = row
+                self._peer_list.insertWidget(0, row)
+            else:
+                row.set_nick(nick)
+                row.set_ip(entry['ip'])
+            row.set_online(entry['online'])
+            row.set_selected(False)
+            row.set_unread(0)
+            # 离线端仍列出但灰化不可勾（勾了也投递失败）
+            row.set_selectable(True, False, enabled=entry['online'])
+        self._update_action_state()
+
+    def _on_row_clicked(self, _end_id: str):
+        self._update_action_state()
+
+    def _on_select_all(self, checked: bool):
+        for row in self._rows.values():
+            if row.is_select_enabled():
+                row.set_checked(checked)
+        self._update_action_state()
+
+    def _checked_targets(self) -> list:
+        return [eid for eid, row in self._rows.items() if row.is_checked()]
+
+    def _update_action_state(self):
+        """刷新计数、全选态与单按钮：未选目标=取消，已选=发送 (N)。"""
+        n = len(self._checked_targets())
+        self._selected_label.setText(
+            I18n.tr('send_panel_selected_count', count=n))
+        is_send = n > 0
+        if self._action_is_send is None:
+            self._apply_action_visual(is_send)          # 首帧：直接就位，不播过渡
+            self._enter_wrap.setVisible(is_send)
+        elif is_send != self._action_is_send:
+            self._transition_action(is_send)            # 状态翻转：淡出换装再淡入
+        else:
+            self._apply_action_visual(is_send)          # 仅计数变化：更新文案
+        self._action_is_send = is_send
+        # 全部在线端均已勾选时点亮「全选」（setChecked 不触发 toggled，无回环）
+        enabled = [r for r in self._rows.values() if r.is_select_enabled()]
+        self._select_all_check.setChecked(bool(enabled) and all(
+            r.is_checked() for r in enabled))
+
+    def _apply_action_text(self, is_send: bool):
+        """只写文案（底色由过渡或 _apply_action_visual 负责）。"""
+        if is_send:
+            n = len(self._checked_targets())
+            self._action_btn.setText(I18n.tr('send_panel_send_count', count=n))
+        else:
+            self._action_btn.setText(I18n.tr('cancel'))
+
+    def _apply_action_visual(self, is_send: bool):
+        """按态写入按钮文案与标准样式（主/次）。"""
+        self._apply_action_text(is_send)
+        self._action_btn.setStyleSheet(
+            BUTTON_STYLES['primary'] if is_send else BUTTON_STYLES['secondary'])
+
+    def _transition_action(self, is_send: bool):
+        """取消↔发送的过渡：底色快速渐变（不做透明度亮灭），开关随态淡入/淡出。"""
+        self._apply_action_text(is_send)   # 文案即时就位，仅底色渐变
+        start, end = (('#868e96', '#339af0') if is_send
+                      else ('#339af0', '#868e96'))
+        c0, c1 = QColor(start), QColor(end)
+        anim = QVariantAnimation(self)
+        anim.setDuration(120)
+        anim.setStartValue(0.0)
+        anim.setEndValue(1.0)
+        anim.setEasingCurve(QEasingCurve.OutCubic)
+        anim.valueChanged.connect(
+            lambda t: self._paint_action_bg(c0, c1, float(t)))
+        anim.finished.connect(lambda: self._apply_action_visual(is_send))
+        anim.start(QPropertyAnimation.DeleteWhenStopped)
+        if is_send:
+            self._enter_wrap.setVisible(True)
+            self._fade(self._enter_wrap, 0.0, 1.0)
+        else:
+            self._fade(self._enter_wrap, 1.0, 0.0,
+                       on_end=lambda: self._enter_wrap.setVisible(False))
+
+    def _paint_action_bg(self, c0: QColor, c1: QColor, t: float):
+        """渐变色下写按钮底色；期间不带 hover/pressed，收尾由 _apply_action_visual 套回。"""
+        col = QColor(
+            round(c0.red() + (c1.red() - c0.red()) * t),
+            round(c0.green() + (c1.green() - c0.green()) * t),
+            round(c0.blue() + (c1.blue() - c0.blue()) * t))
+        self._action_btn.setStyleSheet(
+            f"QPushButton {{ background-color:{col.name()}; color:#ffffff; "
+            f"border:1px solid transparent; border-radius:6px; "
+            f"padding:8px 16px; font-size:13px; }}")
+
+    def _fade(self, widget: QWidget, start: float, end: float, on_end=None):
+        """透明度过渡；结束后移除效果，避免残留影响其它渲染。"""
+        try:
+            eff = QGraphicsOpacityEffect(widget)
+            widget.setGraphicsEffect(eff)
+            anim = QPropertyAnimation(eff, b"opacity", widget)
+            anim.setDuration(140)
+            anim.setStartValue(start)
+            anim.setEndValue(end)
+            anim.setEasingCurve(QEasingCurve.OutCubic)
+
+            def _done():
+                widget.setGraphicsEffect(None)
+                if on_end is not None:
+                    on_end()
+
+            anim.finished.connect(_done)
+            anim.start(QPropertyAnimation.DeleteWhenStopped)
+        except Exception:
+            if on_end is not None:
+                on_end()
+
+    # ---- 发送 ----
+
+    def _on_action(self):
+        """单按钮：未选目标时收起（取消）；已选时投递，按开关决定是否进入私信。"""
+        targets = self._checked_targets()
+        if not targets or not self._files:
+            self.close_panel()
+            return
+        self._chat._send_files(self._files, targets)
+        if self._enter_chat_check.isChecked():
+            self.close_panel(animate=False)
+            self._chat.expand()
+            if len(targets) == 1:
+                self._chat._select_peer(targets[0])
+        else:
+            self._chat._toast(I18n.tr('send_panel_sent', count=len(targets)))
+            self.close_panel()

@@ -73,7 +73,7 @@ class I18n:
             "room_code_exists": "房间号已存在，请重新生成",
             "return_as_host": "回归",
             "room_own_regress": "此房间由本机创建，可回归为主机",
-            "room_regress_no_pwd_record": "该房间由本端标识持有，但本进程无其密码记录，已阻止本次回归",
+            
             "create": "创建",
             "cancel": "取消",
             "close": "关闭",
@@ -242,6 +242,14 @@ class I18n:
             "chat_file_failed": "接收失败",
             "chat_file_expired": "已过期",
             "chat_file_no_local": "文件尚未接收或已不存在",
+            # 多选发送窄栏
+            "send_panel_title": "发送文件 ({count} 个)",
+            "send_enter_chat": "发送后进入私信界面",
+            "send_panel_sent": "已发送至 {count} 个接收端",
+            "send_panel_no_peer": "当前没有可发送的端",
+            "send_panel_select_all": "全选",
+            "send_panel_selected_count": "已选 {count} 个",
+            "send_panel_send_count": "发送 ({count})",
             
             # 提示文字
             "click_to_copy_room": "点击复制房间号",
@@ -415,7 +423,7 @@ class I18n:
             "room_code_exists": "Room code already exists, please regenerate",
             "return_as_host": "Regain Host",
             "room_own_regress": "This room was created by this device; you can return as host",
-            "room_regress_no_pwd_record": "This room is held by this device's identity, but no password record exists in this session; regression blocked",
+            
             "create": "Create",
             "cancel": "Cancel",
             "close": "Close",
@@ -584,6 +592,14 @@ class I18n:
             "chat_file_failed": "Failed",
             "chat_file_expired": "Expired",
             "chat_file_no_local": "File not received yet or no longer exists",
+            # Multi-select send panel
+            "send_panel_title": "Send files ({count})",
+            "send_enter_chat": "Open chat after sending",
+            "send_panel_sent": "Sent to {count} peer(s)",
+            "send_panel_no_peer": "No available peers",
+            "send_panel_select_all": "Select all",
+            "send_panel_selected_count": "{count} selected",
+            "send_panel_send_count": "Send ({count})",
             
             # Tooltip texts
             "click_to_copy_room": "Click to copy room code",

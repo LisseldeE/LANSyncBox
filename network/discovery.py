@@ -278,6 +278,11 @@ class RoomDiscovery(QObject):
                             'version': version,
                             'sync_version': sync_version,
                             'host_id': response.get('host_id', ''),
+                            # 房间密码属性：非布尔（旧端未上报）记 None，供 get_has_password
+                            # 区分"明确无密码"与"无从判断"，避免误判无密码房而放行回归
+                            'has_password': (response.get('has_password')
+                                             if isinstance(response.get('has_password'), bool)
+                                             else None),
                             'timestamp': time.time()
                         }
                         # 去中心化发现：应答方自报端点（end_id/mesh_port）+ 其已知对端清单，
@@ -399,6 +404,34 @@ class RoomDiscovery(QObject):
             return ""
         return max(counts, key=counts.get)
 
+    def get_has_password(self, room_code: str):
+        """返回最近一次发现中指定房间是否设密码：True / False；无从判断返回 None。
+
+        同房间多处应答（主机 + 成员 reuse 监听）密码属性一致，任一处声称有密码即
+        按有密码保守处理；若存在未上报该字段的旧端应答，则整体判为 None（不敢断定
+        无密码），调用方须回退旧逻辑，绝不据空判定放行回归。
+        """
+        seen = False
+        any_true = False
+        unknown = False
+        with self._lock:
+            for info in self.discovered_rooms.values():
+                if info.get('room_code') != room_code:
+                    continue
+                seen = True
+                val = info.get('has_password')
+                if val is True:
+                    any_true = True
+                elif val is None:
+                    unknown = True
+        if not seen:
+            return None
+        if any_true:
+            return True
+        if unknown:
+            return None
+        return False
+
     def get_discovered_rooms(self) -> List[dict]:
         """获取已发现的房间列表（按应答 IP 逐条）"""
         with self._lock:
@@ -485,7 +518,8 @@ class RoomResponder(QObject):
     DISCOVERY_PORT_END = 9537    # 发现端口结束（包含）
 
     def __init__(self, parent=None, host_id: str = None, host_id_provider=None,
-                 endpoint_provider=None, peers_provider=None):
+                 endpoint_provider=None, peers_provider=None,
+                 has_password_provider=None):
         super().__init__(parent)
         self.socket: Optional[socket.socket] = None
         self.running = False
@@ -504,6 +538,9 @@ class RoomResponder(QObject):
         self._endpoint_provider = endpoint_provider
         # peers_provider：返回本端已知对端清单 list[dict]，应答时附带下发（对端自扩散）。
         self._peers_provider = peers_provider
+        # has_password_provider：返回本房间是否设密码的 bool，随应答下发。探测端据此在
+        # 重启失忆（内存密码记录为空）后判定"无密码房可直接回归"，不必再靠本地摘要。
+        self._has_password_provider = has_password_provider
 
     def start(self, room_code: str, port: int = None) -> bool:
         """
@@ -589,6 +626,12 @@ class RoomResponder(QObject):
                         'sync_version': Config.SYNC_LOGIC_VERSION,
                         'host_id': host_id
                     }
+                    # 房间密码属性：供探测端（创建/加入的回归判定）在失忆后判断能否直接回归
+                    if self._has_password_provider:
+                        try:
+                            response['has_password'] = bool(self._has_password_provider())
+                        except Exception:
+                            pass
                     # 去中心化发现：附带本端端点与已知对端清单（旧端忽略未知字段，混版安全）
                     if self._endpoint_provider:
                         try:

@@ -511,6 +511,16 @@ class Distributor(QObject):
             # 远端胜出：覆盖本地内容
             if local.clock > 0:
                 self._notify_log(f"本地修改被远端覆盖: {file}")
+        # 祖先目录已删（墓碑）→ 非删除信号不得重建其内部路径，改记同版本墓碑
+        # 顶回（防残缺视图下 dir_create 的 os.makedirs 复活幽灵目录）。
+        if op != self.OP_DELETE:
+            anc = self._deleted_ancestor(file)
+            if anc is not None:
+                self._store(FileState(name=file, op_no=anc.op_no,
+                                      state=STATE_CHANGE, exists=False,
+                                      clock=anc.clock, ts=anc.ts, vv=dict(anc.vv)))
+                self._forward(signal, src_id)
+                return
         try:
             if op == self.OP_ADD:
                 exists = os.path.exists(self._safe_join(file))
@@ -780,6 +790,20 @@ class Distributor(QObject):
         elif os.path.isdir(path):
             from sync.file_manager import safe_rmtree
             safe_rmtree(path)
+
+    def _deleted_ancestor(self, name: str) -> Optional[FileState]:
+        """最近的已删祖先目录（墓碑）状态副本；无则 None。"""
+        if '/' not in name:
+            return None
+        parts = name.split('/')
+        with self._lock:
+            for i in range(1, len(parts)):
+                st = self._states.get('/'.join(parts[:i]))
+                if st is not None and not st.exists and st.state == STATE_CHANGE:
+                    return FileState(name=st.name, op_no=st.op_no, state=st.state,
+                                     exists=st.exists, clock=st.clock, ts=st.ts,
+                                     vv=dict(st.vv))
+        return None
 
     def set_protected_dirs(self, dirs):
         """设置不可被删除的目录集合（相对路径，如收集模式 IP 文件夹名）。

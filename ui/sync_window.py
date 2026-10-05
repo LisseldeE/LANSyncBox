@@ -26,7 +26,7 @@ from pathlib import Path
 from i18n import I18n
 from config import Config, UserConfig
 from ui.file_list_widget import FileListWidget
-from ui.chat_panel import ChatPanel
+from ui.chat_panel import ChatPanel, SendPanel
 from ui.capsule_notification import _RoundedProgressBar
 from ui.widgets import AnimatedButton, BUTTON_STYLES, ToggleSwitch
 from ui.about_dialog import AboutDialog
@@ -765,20 +765,27 @@ class SyncWindow(QMainWindow):
 
         # 私信浮层（悬浮于同步界面之上，不进入布局、不挤压底层内容）
         self.chat_panel = ChatPanel(self, parent=central_widget)
-        # 拖至同步列表右侧 1/3 松手 → 私信投递
-        self.file_list.chat_files_dropped.connect(self.chat_panel.handle_drop_files)
+        # 多选发送窄栏（拖至同步列表右侧 1/3 松手 → 独立窄栏勾选接收端）
+        self.send_panel = SendPanel(self, self.chat_panel, parent=central_widget)
+        # 拖至同步列表右侧 1/3 松手 → 多选发送窄栏
+        self.file_list.chat_files_dropped.connect(self.send_panel.open)
         # 拖拽悬停私信分区（右 1/3）→ 预展开私信手柄（仅视觉，不打开面板，拖离即收起）
         self.file_list.chat_zone_hover.connect(self.chat_panel.auto_expand_handle)
         self.chat_panel.relayout()
+        self.send_panel.relayout()
 
     def resizeEvent(self, event):
-        """窗口尺寸变化：同步重定位私信浮层与手柄。"""
+        """窗口尺寸变化：同步重定位私信浮层、发送窄栏与手柄。"""
         super().resizeEvent(event)
         panel = getattr(self, 'chat_panel', None)
         if panel is not None:
             panel.relayout()
             # central widget 布局可能在本次 resize 后才落定，延迟再定位一次
             QTimer.singleShot(0, panel.relayout)
+        send_panel = getattr(self, 'send_panel', None)
+        if send_panel is not None:
+            send_panel.relayout()
+            QTimer.singleShot(0, send_panel.relayout)
 
     def init_network(self):
         """初始化网络"""
@@ -824,7 +831,8 @@ class SyncWindow(QMainWindow):
             self.responder = RoomResponder(
                 self,
                 endpoint_provider=self._local_endpoint,
-                peers_provider=self._mesh_peer_list)
+                peers_provider=self._mesh_peer_list,
+                has_password_provider=lambda: bool(self.password))
             if not self.responder.start(self.room_code):
                 self._add_record("启动发现服务失败", "错误", "")
                 return
@@ -2280,6 +2288,9 @@ class SyncWindow(QMainWindow):
         # 且不受屏幕 DPI/缩放比例影响产生偏移）
         anchor = self.status_label.mapTo(self, self.status_label.rect().topLeft())
         x = anchor.x() + (self.status_label.width() - self._status_popup.width()) // 2
+        # 昵称 + IP 两列后浮层可能宽于状态标签：居中会使 x 为负、左侧被窗口边线切断。
+        # 夹回窗口内（左右各留 8px）。
+        x = max(8, min(x, self.width() - self._status_popup.width() - 8))
         y = anchor.y() + self.status_label.height() + 6
         self._status_popup.move(x, y)
         # 停止未完成的关闭定时器（鼠标重新进入时取消即将的隐藏）
@@ -2441,7 +2452,8 @@ class SyncWindow(QMainWindow):
                 self.responder = RoomResponder(
                     self, host_id_provider=lambda: getattr(self.client, '_host_id', '') or '',
                     endpoint_provider=self._local_endpoint,
-                    peers_provider=self._mesh_peer_list)
+                    peers_provider=self._mesh_peer_list,
+                    has_password_provider=lambda: bool(getattr(self.client, 'password', '')))
                 # 广播本端真实管理监听端口：reuse 下 9527 被占会顺延，写死 9527
                 # 会让本端虽存活却无法被新端发现（单点盲区）。mgmt_port() 取实际绑定值。
                 if self.responder.start(self.room_code, self.client.mgmt_port()):
