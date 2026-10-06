@@ -173,14 +173,30 @@ def main():
     # Windows任务栏图标设置
     if Config.IS_WINDOWS and os.path.exists(icon_path):
         try:
+            user32 = ctypes.windll.user32
+            # 句柄是 64 位指针，必须显式声明 restype/argtypes，避免默认 c_int 截断句柄
+            user32.LoadImageW.restype = ctypes.c_void_p
+            user32.LoadImageW.argtypes = [
+                ctypes.c_void_p, ctypes.c_wchar_p, ctypes.c_uint,
+                ctypes.c_int, ctypes.c_int, ctypes.c_uint]
+            user32.SendMessageW.argtypes = [
+                ctypes.c_void_p, ctypes.c_uint, ctypes.c_void_p, ctypes.c_void_p]
+            LR_LOADFROMFILE, IMAGE_ICON, WM_SETICON, ICON_BIG = 0x10, 1, 0x80, 1
             hwnd = int(window.winId())
-            hicon = ctypes.windll.user32.LoadImageW(
-                None, icon_path, 1,  # IMAGE_ICON
-                0, 0, 0x10  # LR_LOADFROMFILE
-            )
-            if hicon:
-                ctypes.windll.user32.SendMessageW(hwnd, 0x80, 0, hicon)  # WM_SETICON, ICON_SMALL
-                ctypes.windll.user32.SendMessageW(hwnd, 0x80, 1, hicon)  # WM_SETICON, ICON_BIG
+            # 必须按系统度量分别取小/大图标尺寸：cx=cy=0 会让多帧 ICO 回落到首帧
+            # (16px)，当作大图标塞进任务栏后被放大 -> 模糊
+            hicon_small = user32.LoadImageW(
+                None, icon_path, IMAGE_ICON,
+                user32.GetSystemMetrics(49), user32.GetSystemMetrics(50),  # SM_CXSMICON/CYSMICON
+                LR_LOADFROMFILE)
+            hicon_big = user32.LoadImageW(
+                None, icon_path, IMAGE_ICON,
+                user32.GetSystemMetrics(11), user32.GetSystemMetrics(12),  # SM_CXICON/CYICON
+                LR_LOADFROMFILE)
+            if hicon_small:
+                user32.SendMessageW(hwnd, WM_SETICON, 0, hicon_small)  # ICON_SMALL
+            if hicon_big:
+                user32.SendMessageW(hwnd, WM_SETICON, ICON_BIG, hicon_big)
         except Exception:
             pass
     

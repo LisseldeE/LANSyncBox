@@ -648,9 +648,11 @@ class MessageReceiver:
     """消息接收器 - 处理TCP流式数据的分包"""
 
     # 缓冲/头长度上限：对端发送无法组成合法头的字节流时，防止 buffer 无界增长（内存泄漏）。
-    MAX_BUFFER_SIZE = 8 * 1024 * 1024            # 缓冲总上限（8MB）
     MAX_NAME_LEN = 64 * 1024                     # 文件名/路径长度上限（64KB）
     MAX_CONTENT_SIZE = 8 * 1024 * 1024           # 单条 content 长度上限（8MB，需能装进缓冲）
+    # 缓冲上限须容纳"头 + 最长文件名 + 最大 content"：若与 MAX_CONTENT_SIZE 相等，
+    # 贴近上限的合法大帧会先触顶被判垃圾断连，导致该 content 永远无法成帧
+    MAX_BUFFER_SIZE = MAX_CONTENT_SIZE + MAX_NAME_LEN + Protocol.HEADER_SIZE
 
     # content 为 JSON 字典的消息类型（get_message 时自动 json.loads 为 dict）
     # 仅限去中心化新类型（0x20-0x28）；0x17/0x18 剪贴板会话类保持原始 bytes，

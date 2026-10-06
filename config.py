@@ -17,7 +17,7 @@ class Config:
     APP_VERSION = "R1.2.0.0"
     # 同步逻辑版本号
     SYNC_LOGIC_VERSION = "26.9C2"
-    APP_SERIAL = "P269.WH"
+    APP_SERIAL = "P2610.WH"
     APP_SERIAL_FULL = ".".join(x for x in (APP_NAME, APP_VERSION, APP_SERIAL) if x)
     APP_VERSION_SERIAL = ".".join(x for x in (APP_VERSION, APP_SERIAL) if x)
     APP_AUTHOR = "Lisselde_E"

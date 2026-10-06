@@ -9,7 +9,7 @@
 </div>
 
 <p align="center">
-  <a href="https://github.com/LisseldeE/LANSyncBox/releases/tag/pro-R1.1.1.0"><img src="https://img.shields.io/badge/releases-R1.1.1.0-3b82f6" alt="releases R1.1.1.0"></a>
+  <a href="https://github.com/LisseldeE/LANSyncBox/releases/tag/pro-R1.2.0.0"><img src="https://img.shields.io/badge/releases-R1.2.0.0-3b82f6" alt="releases R1.2.0.0"></a>
   <a href="LICENSE"><img src="https://img.shields.io/github/license/LisseldeE/LANSyncBox" alt="License"></a>
   <img src="https://img.shields.io/badge/platform-Windows-blue?logo=windows" alt="Platform">
   <img src="https://img.shields.io/badge/platform-Linux-orange?logo=linux" alt="Platform">
@@ -28,7 +28,7 @@
 
 ## Project Introduction
 
-LANSyncBox Pro is a cross-platform, LAN-focused real-time file synchronization tool for multiplayer collaboration. It requires no public network: it supports large-file streaming transfer, serialized sending, and broken-transfer resumption, ensuring reliable data and stable transfer under multi-connection, high-concurrency scenarios. Compared to the legacy version, Pro adopts a new decentralized distributed architecture, eliminating the single-point-of-failure that affects the entire link. It also introduces several new capabilities: **Delivery** (cross-device copy & paste), top-edge drag-and-drop **quick-add**, Collect mode, permission management, and more.
+LANSyncBox Pro is a cross-platform, LAN-focused real-time file synchronization tool for multiplayer collaboration. It requires no public network: it supports large-file streaming transfer, serialized sending, and broken-transfer resumption, ensuring reliable data and stable transfer under multi-connection, high-concurrency scenarios. Compared to the legacy version, Pro adopts a new decentralized distributed architecture, eliminating the single-point-of-failure that affects the entire link. It also introduces several new capabilities: **Delivery** (cross-device copy & paste), top-edge drag-and-drop **quick-add**, peer-to-peer **Chat**, **endpoint nicknames**, Collect mode, permission management, and more.
 
 ## Version Comparison
 
@@ -39,9 +39,11 @@ LANSyncBox Pro is a cross-platform, LAN-focused real-time file synchronization t
 | Large file transfer (streaming · resume) | ✔ | ✔ |
 | File operations (add/edit/delete · read-only preview) | ✔ | ✔ |
 | Chinese / English UI switching | ✔ | ✔ |
+| **Endpoint nickname (replaces IP)** | — | ⭐ **New** |
 | **Delivery · cross-device copy & paste** | — | ⭐ **New** |
 | **Text clipboard broadcast** | — | ⭐ **New** |
 | **Image / file peer-to-peer delivery** | — | ⭐ **New** |
+| **Chat · peer-to-peer private transfer** | — | ⭐ **New** |
 | **Top quick-add** | — | ⭐ **New** |
 | **Sync / Collect modes** | — | ⭐ **New** |
 | **Decentralized mesh sync** | — | ⭐ **New** |
@@ -62,6 +64,10 @@ LANSyncBox Pro is a cross-platform, LAN-focused real-time file synchronization t
 | :---: | :---: |
 | ![Text Content Delivery](https://lisseldee.github.io/assets/images/gif/1p-3.gif) | ![File Content Delivery](https://lisseldee.github.io/assets/images/gif/1p-4.gif) |
 
+| Chat · Peer-to-Peer Private Transfer |
+| :---: |
+| ![Chat](https://lisseldee.github.io/assets/images/gif/1p-5.gif) |
+
 ## Project Information
 
 - **Project Name**: LANSyncBox Pro
@@ -77,6 +83,23 @@ LANSyncBox Pro is a cross-platform, LAN-focused real-time file synchronization t
 - **Large File Transfer**: streaming chunked transfer with resume support; transfers fail without corrupting files; up to 5 files in parallel, same-name pulls serialized for byte consistency
 - **File Operations**: add, create, copy, cut, paste, delete, rename; double-click for read-only preview
 - **Interface**: smooth Qt6 UI, real-time Chinese/English switching, visible transfer progress
+
+## New in Pro
+
+### Endpoint Nickname
+
+Each endpoint derives a stable, human-readable nickname from its own `end_id` (e.g. `青狐·3f2a` / `Teal Fox·3f2a`), replacing the legacy, unreliable IP display: the same `end_id` always maps to the same nickname, localized to the current UI language. The 4-character suffix is the prefix of that endpoint's `end_id`, keeping endpoints that happen to share a nickname distinguishable; the IP is retained only as a grey sub-label.
+
+### Chat
+
+Peer-to-peer, one-to-one private messaging inside a room — **text** and **files** — delivered mesh-direct to the target endpoint with no host relay:
+
+- **How to start**: open the chat overlay and pick a peer; or select files in the list and drag them onto the right-hand 1/3 chat zone; or start directly from the list's quick-action bar
+- **Multi-select send**: send several files at once, or deliver to several peers in one go
+- **File sessions**: each file session lives for 600 seconds, after which the entry greys out as "Expired"; the receiver accepts files one by one, and progress shows in the sync log just like Delivery
+- **Unread badge**: the peer list carries an unread badge, clearable at once with "Mark all read"
+- **Cleanup**: leaving the room destroys this endpoint's chat sessions and content — nothing is persisted
+- **Limit**: files only — folders are not supported ("Folders are not supported; please select files")
 
 ## System Support
 

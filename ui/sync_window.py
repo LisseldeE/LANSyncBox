@@ -2799,9 +2799,9 @@ class SyncWindow(QMainWindow):
         """开始接收远程文件（线程安全）"""
         # 使用 QMetaObject.invokeMethod 确保在主线程执行
         QMetaObject.invokeMethod(self, "_do_file_receive_start", Qt.QueuedConnection,
-                                 Q_ARG(str, filename), Q_ARG(int, file_size))
+                                 Q_ARG(str, filename), Q_ARG('qlonglong', file_size))
     
-    @Slot(str, int)
+    @Slot(str, 'qlonglong')
     def _do_file_receive_start(self, filename: str, file_size: int):
         """实际执行：开始接收远程文件
 

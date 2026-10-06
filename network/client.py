@@ -35,7 +35,7 @@ class SyncClient(QObject):
     error_occurred = Signal(str)      # 错误
     auth_failed = Signal(str)         # 验证失败
     file_received = Signal(str)       # 收到文件
-    file_receive_start = Signal(str, int)  # 开始接收文件 (filename, file_size)
+    file_receive_start = Signal(str, 'qlonglong')  # 开始接收文件 (filename, file_size 字节，>2GB 需 64 位)
     file_receive_progress = Signal(str, int, int)  # 文件接收进度 (filename, current, total)
     file_receive_cancelled = Signal(str)  # 文件接收被取消
     file_deleted = Signal(str)        # 文件已删除

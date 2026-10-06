@@ -92,7 +92,7 @@ For a detailed feature comparison, please refer to each edition's project page. 
   <img src="https://lisseldee.github.io/assets/images/webp/1-e1.webp" width="100%" alt="LANSyncBox">
 </p>
 
-### [R1.1.1.0](https://github.com/LisseldeE/LANSyncBox/releases/tag/pro-R1.1.1.0)
+### [R1.2.0.0](https://github.com/LisseldeE/LANSyncBox/releases/tag/pro-R1.2.0.0)
 
 > Latest build
 
@@ -100,11 +100,18 @@ For a detailed feature comparison, please refer to each edition's project page. 
 
 | OS | Architecture | Mirror | Link |
 |:---|:---|:---|:---|
-| Windows | x64 | GitHub | [**Download**](https://github.com/LisseldeE/LANSyncBox/releases/download/pro-R1.1.1.0/LANSyncBoxPro_Setup.exe) |
-| Linux | x64 | GitHub | [**Download**](https://github.com/LisseldeE/LANSyncBox/releases/download/pro-R1.1.1.0/lansyncboxpro_amd64.deb) |
+| Windows | x64 | GitHub | [**Download**](https://github.com/LisseldeE/LANSyncBox/releases/download/pro-R1.2.0.0/LANSyncBoxPro_Setup.exe) |
+| Linux | x64 | GitHub | [**Download**](https://github.com/LisseldeE/LANSyncBox/releases/download/pro-R1.2.0.0/lansyncboxpro_amd64.deb) |
 
 <details>
 <summary>Older releases (click to expand)</summary>
+
+### [R1.1.1.0](https://github.com/LisseldeE/LANSyncBox/releases/tag/pro-R1.1.1.0)
+
+| OS | Architecture | Mirror | Link |
+|:---|:---|:---|:---|
+| Windows | x64 | GitHub | [**Download**](https://github.com/LisseldeE/LANSyncBox/releases/download/pro-R1.1.1.0/LANSyncBoxPro_Setup.exe) |
+| Linux | x64 | GitHub | [**Download**](https://github.com/LisseldeE/LANSyncBox/releases/download/pro-R1.1.1.0/lansyncboxpro_amd64.deb) |
 
 ### [R1.1.0.0](https://github.com/LisseldeE/LANSyncBox/releases/tag/pro-R1.1.0.0)
 

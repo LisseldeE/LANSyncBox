@@ -20,6 +20,7 @@ from PySide6.QtGui import (QColor, QPainter, QPen, QPainterPath, QCursor, QPalet
                            QMouseEvent, QFontMetrics, QDrag, QDesktopServices,
                            QTextOption, QPixmap)
 from PySide6.QtSvg import QSvgRenderer
+from shiboken6 import isValid
 
 from i18n import I18n
 from config import Config
@@ -61,8 +62,9 @@ def _palette():
         'border': _shift(win, 38 if dark else -20),   # 浅灰细线：勾出手柄与卡片边缘
         'text': text,
         'muted': '#9a9a9a' if dark else '#8a8a8a',
-        'row_sel': _shift(win, 30 if dark else -14),
-        'row_hover': _shift(win, 14 if dark else -7),   # 悬浮灰：介于常态与选中之间
+        'row_sel': _shift(win, 38 if dark else -14),
+        # 悬浮灰：须比面板底色(bg)更亮/更暗一档才看得出悬浮，深色下不可压到 bg 之下
+        'row_hover': _shift(win, 26 if dark else -7),
         'mine_bg': _shift(win, 34 if dark else -18), 'mine_fg': text,
         'peer_bg': _shift(win, 2 if dark else -4), 'peer_fg': text,
     }
@@ -1254,7 +1256,9 @@ class ChatPanel(QWidget):
 
     def _update_file_item(self, item: dict):
         label = item.get('status_label')
-        if label is None:
+        # 切端会 deleteLater 旧行控件，但 item 内的控件引用仍在；对已销毁的 C++ 对象
+        # setText 会抛 RuntimeError，这里统一拦截失效控件
+        if label is None or not isValid(label):
             return
         state = item.get('state', 'pending')
         key = {'pending': 'chat_file_pending', 'downloading': 'chat_file_downloading',

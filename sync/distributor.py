@@ -145,11 +145,20 @@ class Distributor(QObject):
         if not file:
             return None
         with self._lock:
-            op_no = self._op_counters.get(file, 0) + 1
-            self._op_counters[file] = op_no
-            clock = self._clocks.get(file, 0) + 1
-            self._clocks[file] = clock
             prev = self._states.get(file)
+            # 版本地板：op_no/clock 必须严格超过本端该路径已记录的版本。目录删除时
+            # _tombstone_children 会把父目录版本复制给每个子路径，子路径自身计数器
+            # 低于该版本；不取地板则重建子路径会发出与墓碑相等/更低的 op_no，被对端
+            # 按重复丢弃——删除收敛前整棵子树的重建都不同步。
+            floor_op = self._op_counters.get(file, 0)
+            floor_ck = self._clocks.get(file, 0)
+            if prev is not None:
+                floor_op = max(floor_op, prev.op_no, prev.vv.get(self.end_id, 0))
+                floor_ck = max(floor_ck, prev.clock)
+            op_no = floor_op + 1
+            clock = floor_ck + 1
+            self._op_counters[file] = op_no
+            self._clocks[file] = clock
             vv = dict(prev.vv) if prev else {}
         vv[self.end_id] = op_no
         signal = {
