@@ -39,14 +39,14 @@ LANSyncBox Pro is a cross-platform, LAN-focused real-time file synchronization t
 | Large file transfer (streaming · resume) | ✔ | ✔ |
 | File operations (add/edit/delete · read-only preview) | ✔ | ✔ |
 | Chinese / English UI switching | ✔ | ✔ |
-| **Endpoint nickname (replaces IP)** | — | ⭐ **New** |
-| **Delivery · cross-device copy & paste** | — | ⭐ **New** |
-| **Text clipboard broadcast** | — | ⭐ **New** |
-| **Image / file peer-to-peer delivery** | — | ⭐ **New** |
-| **Chat · peer-to-peer private transfer** | — | ⭐ **New** |
-| **Top quick-add** | — | ⭐ **New** |
-| **Sync / Collect modes** | — | ⭐ **New** |
-| **Decentralized mesh sync** | — | ⭐ **New** |
+| **Endpoint nickname (replaces IP)** | — | ✔ |
+| **Delivery · cross-device copy & paste** | — | ✔ |
+| **Text clipboard broadcast** | — | ✔ |
+| **Image / file peer-to-peer delivery** | — | ✔ |
+| **Chat · peer-to-peer private transfer** | — | ✔ |
+| **Top quick-add** | — | ✔ |
+| **Sync / Collect modes** | — | ✔ |
+| **Decentralized mesh sync** | — | ✔ |
 
 ## Screenshots
 
