@@ -320,12 +320,12 @@ class _CapsuleItem(QFrame):
 
         inner.addWidget(self._text_box, 0, Qt.AlignVCenter)
 
-        # Linux 专用"接收"按钮：仅 IS_LINUX 创建（Windows 无此按钮，布局零改动）。
-        # 全局 Ctrl+V 热键为 Windows 专用、Wayland 禁止全局抓键，投递改由可用态
+        # Linux / macOS 专用"接收"按钮：仅 IS_LINUX / IS_MACOS 创建（Windows 无此按钮，布局零改动）。
+        # 全局 Ctrl+V 热键为 Windows 专用，Linux/macOS 无可靠全局热键，投递改由可用态
         # 胶囊上的"接收"按钮 + 保存位置选择完成。与询问按钮同款布局（同槽位），
         # 默认隐藏，仅可用态展示，点击发射 receive_requested。
         self._receive_btn = None
-        if Config.IS_LINUX:
+        if Config.IS_LINUX or Config.IS_MACOS:
             self._receive_btn = QPushButton("接收", self._content)
             self._receive_btn.setFixedHeight(22)
             self._receive_btn.setCursor(Qt.PointingHandCursor)
@@ -393,9 +393,9 @@ class _CapsuleItem(QFrame):
         self._refresh_theme()
         self._hint_mode = False
         self._title.setText(f"有可用的远程文件  {file_name}  {format_bytes(total_bytes)}")
-        # Windows/macOS：提示按 Ctrl+V 粘贴；Linux：无全局热键（Wayland 禁抓键），
+        # Windows：提示按 Ctrl+V 粘贴；Linux/macOS：无可靠全局热键，
         # 展示"接收"按钮引导选择保存位置，胶囊外观其余部分保持不变。
-        if Config.IS_LINUX and self._receive_btn is not None:
+        if (Config.IS_LINUX or Config.IS_MACOS) and self._receive_btn is not None:
             self._hint.setText("点击 接收 选择保存位置")
             self._receive_btn.setVisible(True)
         else:
@@ -1045,7 +1045,7 @@ class CapsuleNotification(QObject):
     """
 
     paste_requested = Signal()
-    # Linux：可用态胶囊"接收"按钮被点击（聚合自 _available，sender 守卫）。
+    # Linux/macOS：可用态胶囊"接收"按钮被点击（聚合自 _available，sender 守卫）。
     # Windows 无此按钮，信号永不发射。
     receive_requested = Signal()
     # 传输胶囊"取消"按钮被点击（聚合自 _transfer，sender 守卫）→ 请求取消当前投递
@@ -1268,7 +1268,7 @@ class CapsuleNotification(QObject):
         self.paste_requested.emit()
 
     def _on_receive_requested(self):
-        """Linux：点击可用态胶囊"接收"按钮 → 通知调用方选择保存位置后接收。
+        """Linux/macOS：点击可用态胶囊"接收"按钮 → 通知调用方选择保存位置后接收。
 
         sender 守卫只响应可用槽位（同胶囊过渡换位后触发者不再是"可用"角色）。
         停止超时计时保持胶囊悬浮（保存位置选择是模态框，胶囊不应在此期间消失）；

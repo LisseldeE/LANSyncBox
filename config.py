@@ -8,6 +8,20 @@ import sys
 import json
 from pathlib import Path
 
+def _detect_platform() -> str:
+    """运行时识别当前系统平台：'w' Windows / 'l' Linux / 'm' macOS。"""
+    if sys.platform.startswith("win"):
+        return "w"
+    if sys.platform.startswith("linux"):
+        return "l"
+    if sys.platform == "darwin":
+        return "m"
+    return "w"
+
+# 平台码与序列号字母映射：w→W / l→L / m→M（序列号中的平台字母据此自动填充）
+_PLATFORM = _detect_platform()
+_PLATFORM_LETTER = {"w": "W", "l": "L", "m": "M"}.get(_PLATFORM, "W")
+
 
 class Config:
     """应用配置"""
@@ -17,16 +31,15 @@ class Config:
     APP_VERSION = "R1.2.0.0"
     # 同步逻辑版本号
     SYNC_LOGIC_VERSION = "26.9C2"
-    APP_SERIAL = "P2610.WH"
+    # 序列号：P(Pro 固定) + 构建年月 YYMM(发布时手改) + . + 平台字母(自动识别) + H(GitHub 发布源固定)
+    APP_SERIAL_DATE = "2610"
+    APP_SERIAL = f"P{APP_SERIAL_DATE}.{_PLATFORM_LETTER}H"
     APP_SERIAL_FULL = ".".join(x for x in (APP_NAME, APP_VERSION, APP_SERIAL) if x)
     APP_VERSION_SERIAL = ".".join(x for x in (APP_VERSION, APP_SERIAL) if x)
     APP_AUTHOR = "Lisselde_E"
     APP_AUTHOR_LINK = "https://lisseldee.github.io/#1"  # 作者主页链接
+    PLATFORM = _PLATFORM
 
-    # 运行平台
-    PLATFORM = 'w'
-
-    # 平台派生布尔标志，供各处分支使用（勿手动改，由上方 PLATFORM 推导）
     IS_WINDOWS = PLATFORM == 'w'
     IS_LINUX = PLATFORM == 'l'
     IS_MACOS = PLATFORM == 'm'

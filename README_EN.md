@@ -13,6 +13,7 @@
   <a href="LICENSE"><img src="https://img.shields.io/github/license/LisseldeE/LANSyncBox" alt="License"></a>
   <img src="https://img.shields.io/badge/platform-Windows-blue?logo=windows" alt="Platform">
   <img src="https://img.shields.io/badge/platform-Linux-orange?logo=linux" alt="Platform">
+  <img src="https://img.shields.io/badge/platform-macOS-black?logo=apple" alt="Platform">
 </p>
 
 <p align="center">
@@ -109,11 +110,9 @@ Peer-to-peer, one-to-one private messaging inside a room — **text** and **file
 | :--- | :---: | :---: |
 | Windows | ✅ | ❌ |
 | Linux | ✅ | ❌ |
-| macOS | ❌ | ❌ |
+| macOS | ❌ | ✅ |
 
 </div>
-
-> Currently covers Windows 10/11 and Linux (x64) only; macOS support is on the roadmap.
 
 ## Download
 
@@ -184,6 +183,7 @@ See [Changelog](https://github.com/LisseldeE/LANSyncBox/blob/pro/CHANGELOG.md)
 ### System Requirements
 - Windows 10 or later (64-bit)
 - Linux x64 (amd64) distributions
+- macOS (Apple Silicon / ARM64, macOS 11 or later)
 
 ### Installation Methods
 - **Windows**: Download the installer from [GitHub Releases](https://github.com/LisseldeE/LANSyncBox/releases), then run it
@@ -191,6 +191,9 @@ See [Changelog](https://github.com/LisseldeE/LANSyncBox/blob/pro/CHANGELOG.md)
   ```bash
   sudo apt install -y ./lansyncbox_*.deb
   ```
+- **macOS (dmg)**: Download `LANSyncBoxPro_arm64.dmg` from [GitHub Releases](https://github.com/LisseldeE/LANSyncBox/releases), open it, and drag `LANSyncBox Pro.app` into the Applications folder. The app is not signed or notarized by Apple, so macOS blocks it on first launch — allow it as follows:
+  1. In Applications, **right-click** (or Control-click) LANSyncBox Pro, choose "Open", then click "Open" again in the dialog; or
+  2. If it has already been blocked, open System Settings → Privacy & Security and click "Open Anyway" in the Security section.
 
 ### Running
 - **Windows**: After installation, launch LANSyncBox Pro from the Start menu or desktop shortcut
@@ -198,6 +201,7 @@ See [Changelog](https://github.com/LisseldeE/LANSyncBox/blob/pro/CHANGELOG.md)
   ```bash
   sudo apt install -y libxcb-cursor0 libgl1 libxkbcommon-x11-0
   ```
+- **macOS**: Once allowed, launch it normally from Launchpad or the Applications folder
 
 ## Open Source License
 

@@ -102,6 +102,7 @@ For a detailed feature comparison, please refer to each edition's project page. 
 |:---|:---|:---|:---|
 | Windows | x64 | GitHub | [**Download**](https://github.com/LisseldeE/LANSyncBox/releases/download/pro-R1.2.0.0/LANSyncBoxPro_Setup.exe) |
 | Linux | x64 | GitHub | [**Download**](https://github.com/LisseldeE/LANSyncBox/releases/download/pro-R1.2.0.0/lansyncboxpro_amd64.deb) |
+| macOS | arm64 | GitHub | [**Download**](https://github.com/LisseldeE/LANSyncBox/releases/download/pro-R1.2.0.0/LANSyncBoxPro_arm64.dmg.deb) |
 
 <details>
 <summary>Older releases (click to expand)</summary>

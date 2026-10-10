@@ -13,6 +13,7 @@
   <a href="LICENSE"><img src="https://img.shields.io/github/license/LisseldeE/LANSyncBox" alt="开源协议"></a>
   <img src="https://img.shields.io/badge/platform-Windows-blue?logo=windows" alt="支持平台">
   <img src="https://img.shields.io/badge/platform-Linux-orange?logo=linux" alt="支持平台">
+  <img src="https://img.shields.io/badge/platform-macOS-black?logo=apple" alt="支持平台">
 </p>
 
 <p align="center">
@@ -109,11 +110,9 @@ LANSyncBox Pro 是一款跨平台、专注局域网多人协作的文件实时�
 | :--- | :---: | :---: |
 | Windows | ✅ | ❌ |
 | Linux | ✅ | ❌ |
-| macOS | ❌ | ❌ |
+| macOS | ❌ | ✅ |
 
 </div>
-
-> 目前仅覆盖 Windows 10/11 与 Linux (x64)；macOS 支持已在计划中
 
 ## 下载
 
@@ -184,6 +183,7 @@ LANSyncBox Pro 是一款跨平台、专注局域网多人协作的文件实时�
 ### 系统要求
 - Windows 10 或更高版本（64位）
 - Linux x64（amd64）发行版
+- macOS（Apple Silicon / ARM64，需 macOS 11 及以上）
 
 ### 安装方式
 - **Windows**：从 [GitHub Releases](https://github.com/LisseldeE/LANSyncBox/releases) 下载安装包，双击运行即可
@@ -191,6 +191,9 @@ LANSyncBox Pro 是一款跨平台、专注局域网多人协作的文件实时�
   ```bash
   sudo apt install -y ./lansyncbox_*.deb
   ```
+- **macOS（dmg 包）**：从 [GitHub Releases](https://github.com/LisseldeE/LANSyncBox/releases) 下载 `LANSyncBoxPro_arm64.dmg`，打开后将 `LANSyncBox Pro.app` 拖入"应用程序"文件夹。本应用未经 Apple 签名与公证，首次启动会被系统拦截，请按以下方式放行：
+  1. 在"应用程序"中**右键点击**（或按住 Control 点击）LANSyncBox Pro，选择"打开"，再于弹窗中点击"打开"；或
+  2. 若已被拦截，前往"系统设置 → 隐私与安全性"，在"安全性"一栏点击"仍要打开"
 
 ### 运行
 - **Windows**：安装完成后，从开始菜单或桌面快捷方式启动 LANSyncBox Pro
@@ -198,6 +201,7 @@ LANSyncBox Pro 是一款跨平台、专注局域网多人协作的文件实时�
   ```bash
   sudo apt install -y libxcb-cursor0 libgl1 libxkbcommon-x11-0
   ```
+- **macOS**：首次放行后，即可从"启动台"或"应用程序"文件夹正常启动
 
 ## 开源声明
 

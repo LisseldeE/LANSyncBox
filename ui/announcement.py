@@ -92,8 +92,14 @@ def fetch_announcement():
         失败: (None, "错误描述")；格式非法: (None, None)
         本端无匹配内容: ("26.9.15.2", "")——批次号已更新但本端无正文可显示
     """
-    # 默认上下文即开启证书校验；证书异常由下方 except 转为返回错误，调用方静默降级
-    ssl_context = ssl.create_default_context()
+    # 优先使用 certifi 自带 CA 根证书（macOS 及打包环境的系统证书库常缺失，
+    # 会导致 CERTIFICATE_VERIFY_FAILED）；certifi 缺失时回退默认上下文。
+    # 证书异常由下方 except 转为返回错误，调用方静默降级。
+    try:
+        import certifi
+        ssl_context = ssl.create_default_context(cafile=certifi.where())
+    except ImportError:
+        ssl_context = ssl.create_default_context()
 
     req = urllib.request.Request(Config.ANNOUNCEMENT_URL)
     req.add_header('User-Agent', Config.APP_NAME)

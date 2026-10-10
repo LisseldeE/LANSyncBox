@@ -102,6 +102,7 @@
 |:---|:---|:---|:---|
 | Windows | x64 | GitHub | [**下载**](https://github.com/LisseldeE/LANSyncBox/releases/download/pro-R1.2.0.0/LANSyncBoxPro_Setup.exe) |
 | Linux | x64 | GitHub | [**下载**](https://github.com/LisseldeE/LANSyncBox/releases/download/pro-R1.2.0.0/lansyncboxpro_amd64.deb) |
+| macOS | arm64 | GitHub | [**下载**](https://github.com/LisseldeE/LANSyncBox/releases/download/pro-R1.2.0.0/LANSyncBoxPro_arm64.dmg.deb) |
 
 <details>
 <summary>历史版本（点击展开）</summary>

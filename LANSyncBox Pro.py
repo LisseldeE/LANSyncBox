@@ -145,8 +145,13 @@ def main():
         # 对 QMainWindow / QDialog 两类顶层窗口统一加 1px 直角边框；子控件不受影响
         app.setStyleSheet(f"QMainWindow, QDialog {{ border: 1px solid {border_color}; }}")
     
-    # 设置程序图标（Linux 用 icon.png，其余用 icon.ico）
-    icon_name = 'icon.png' if Config.IS_LINUX else 'icon.ico'
+    # 设置程序图标（Linux 用 icon.png，macOS 用 icon.icns，其余用 icon.ico）
+    if Config.IS_LINUX:
+        icon_name = 'icon.png'
+    elif Config.IS_MACOS:
+        icon_name = 'icon.icns'
+    else:
+        icon_name = 'icon.ico'
     icon_path = get_resource_path(icon_name)
     if os.path.exists(icon_path):
         app.setWindowIcon(QIcon(icon_path))
