@@ -1,0 +1,135 @@
+name: Build & Release (Standard)
+
+on:
+  push:
+    tags:
+      - 'R*'
+
+permissions:
+  contents: write
+
+env:
+  APP_NAME: LANSyncBox
+  ENTRY: LANSyncBox.py
+  WIN_ASSET: LANSyncBox_Setup.exe
+  LINUX_ASSET: lansyncbox_amd64.deb
+  LINUX_PKG: lansyncbox
+
+jobs:
+  build-windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: 准备 Inno Setup 与简体中文语言文件
+        shell: pwsh
+        run: |
+          $iscc = "C:\Program Files (x86)\Inno Setup 6\ISCC.exe"
+          if (-not (Test-Path $iscc)) {
+            choco install innosetup -y --no-progress
+          }
+          Copy-Item "$env:GITHUB_WORKSPACE\.github\ci\windows\ChineseSimplified.isl" `
+            "C:\Program Files (x86)\Inno Setup 6\Languages\ChineseSimplified.isl" -Force
+          Copy-Item "$env:GITHUB_WORKSPACE\LICENSE" "$env:GITHUB_WORKSPACE\LICENSE.txt" -Force
+
+      - name: 安装依赖
+        shell: pwsh
+        run: python -m pip install --upgrade pip; pip install PySide6 certifi comtypes pyinstaller
+
+      - name: 生成版本资源
+        shell: pwsh
+        run: python .github/ci/gen_version_info.py
+
+      - name: PyInstaller 打包
+        shell: pwsh
+        run: pyinstaller --noconfirm --onefile --windowed --icon icon.ico --version-file ".github/ci/version_info.txt" --add-data "icon.ico;." --distpath dist "${{ env.ENTRY }}"
+
+      - name: Inno Setup 编译安装包
+        shell: pwsh
+        run: |
+          $iscc = "C:\Program Files (x86)\Inno Setup 6\ISCC.exe"
+          $ver  = $env:GITHUB_REF_NAME -replace '^R', ''
+          $src  = Join-Path $env:GITHUB_WORKSPACE "dist"
+          $out  = Join-Path $env:GITHUB_WORKSPACE "out"
+          New-Item -ItemType Directory -Force -Path $out | Out-Null
+          & $iscc `
+            "/DEdition=standard" `
+            "/DAppVersion=$ver" `
+            "/DSourceDir=$src" `
+            "/DOutputDir=$out" `
+            "/DSetupIcon=$env:GITHUB_WORKSPACE\icon.ico" `
+            "/DLicenseFile=$env:GITHUB_WORKSPACE\LICENSE.txt" `
+            ".github\ci\windows\app.iss"
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: windows
+          path: out/${{ env.WIN_ASSET }}
+          if-no-files-found: error
+
+  build-linux:
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: 安装依赖
+        run: pip install PySide6 certifi pyinstaller
+
+      - name: PyInstaller 打包
+        run: |
+          pyinstaller --noconfirm --clean --onedir --name "${{ env.LINUX_PKG }}" \
+            --add-data "icon.png:." --add-data "icon.ico:." --distpath dist "${{ env.ENTRY }}"
+
+      - name: 生成 .deb
+        run: |
+          python .github/ci/linux/build_deb.py \
+            --app-name "${{ env.APP_NAME }}" \
+            --version "${GITHUB_REF_NAME#R}" \
+            --source-dir "dist/${{ env.LINUX_PKG }}" \
+            --icon icon.png \
+            --package "${{ env.LINUX_PKG }}" \
+            --desktop-name "${{ env.APP_NAME }}.desktop" \
+            --output "out/${{ env.LINUX_ASSET }}"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: linux
+          path: out/${{ env.LINUX_ASSET }}
+          if-no-files-found: error
+
+  release:
+    needs: [build-windows, build-linux]
+    if: ${{ always() && needs.build-windows.result == 'success' && needs.build-linux.result == 'success' }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+
+      - name: 发布 Release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ github.ref_name }}
+        run: |
+          TITLE="${APP_NAME}_R${GITHUB_REF_NAME#R}"
+          ls -l dist
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            gh release upload "$TAG" dist/* --clobber
+            gh release edit "$TAG" --title "$TITLE"
+          else
+            gh release create "$TAG" dist/* --title "$TITLE"
+          fi
