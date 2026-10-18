@@ -16,6 +16,10 @@
 </p>
 
 <p align="center">
+  <a href="https://lansyncbox.com">Official Website: lansyncbox.com</a>
+</p>
+
+<p align="center">
   <a href="#features">Features</a> |
   <a href="#system-support">Download</a> |
   <a href="#usage">Usage</a> |
@@ -55,7 +59,7 @@ LANSyncBox is a cross-platform file synchronization tool built specifically for 
 - **Project Name**: LANSyncBox
 - **Project Author**: Lisselde_E
 - **License**: GNU General Public License v3.0
-- **Project Homepage**: https://lisseldee.github.io/#1
+- **Official Website**: https://lansyncbox.com
 - **Project Repository**: https://github.com/LisseldeE/LANSyncBox
 
 ## Features

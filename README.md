@@ -16,6 +16,10 @@
 </p>
 
 <p align="center">
+  <a href="https://lansyncbox.com">官方网站：lansyncbox.com</a>
+</p>
+
+<p align="center">
   <a href="#功能特性">功能特性</a> |
   <a href="#系统支持">下载</a> |
   <a href="#使用方法">使用方法</a> |
@@ -55,7 +59,7 @@ LANSyncBox 是一款跨平台、专为局域网场景设计的文件实时同步
 - **项目名称**: LANSyncBox
 - **项目作者**: Lisselde_E
 - **开源协议**: GNU General Public License v3.0
-- **项目主页**: https://lisseldee.github.io/#1
+- **官方网站**: https://lansyncbox.com
 - **项目仓库**: https://github.com/LisseldeE/LANSyncBox
 
 ## 功能特性
