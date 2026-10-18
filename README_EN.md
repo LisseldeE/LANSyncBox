@@ -17,6 +17,10 @@
 </p>
 
 <p align="center">
+  <a href="https://lansyncbox.com">Official Website: lansyncbox.com</a>
+</p>
+
+<p align="center">
   <a href="#project-information">Project Info</a> |
   <a href="#system-support">Download</a> |
   <a href="#usage">Usage</a> |
@@ -74,7 +78,7 @@ LANSyncBox Pro is a cross-platform, LAN-focused real-time file synchronization t
 - **Project Name**: LANSyncBox Pro
 - **Project Author**: Lisselde_E
 - **License**: GNU General Public License v3.0
-- **Project Homepage**: https://lisseldee.github.io/#1
+- **Official Website**: https://lansyncbox.com
 - **Project Repository**: https://github.com/LisseldeE/LANSyncBox/tree/pro
 
 ## Core Features (Existing)
