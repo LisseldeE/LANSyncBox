@@ -59,19 +59,6 @@ LANSyncBox Pro 是一款跨平台、专注局域网多人协作的文件实时�
 | :---: | :---: |
 | ![主界面](https://lisseldee.github.io/assets/images/webp/1p-1.webp) | ![同步界面](https://lisseldee.github.io/assets/images/webp/1p-2.webp) |
 
-## 功能演示
-
-| 文件快捷顶部添加 | 列表快捷操作栏 |
-| :---: | :---: |
-| ![文件快捷顶部添加](https://lisseldee.github.io/assets/images/gif/1p-1.gif) | ![列表快捷操作栏](https://lisseldee.github.io/assets/images/gif/1p-2.gif) |
-
-| 文本内容投递 | 文件内容投递 |
-| :---: | :---: |
-| ![文本内容投递](https://lisseldee.github.io/assets/images/gif/1p-3.gif) | ![文件内容投递](https://lisseldee.github.io/assets/images/gif/1p-4.gif) |
-
-| 私信 · 端到端私密传输 |
-| :---: |
-| ![私信](https://lisseldee.github.io/assets/images/gif/1p-5.gif) |
 
 ## 项目信息
 
@@ -80,6 +67,21 @@ LANSyncBox Pro 是一款跨平台、专注局域网多人协作的文件实时�
 - **开源协议**: GNU General Public License v3.0
 - **官方网站**: https://lansyncbox.com
 - **项目仓库**: https://github.com/LisseldeE/LANSyncBox/tree/pro
+
+
+## 演示
+
+### 同步架构
+
+<p align="center">
+  <img src="https://lansyncbox.com/assets/images/svg/sync-mesh.svg" width="100%" alt="同步架构">
+</p>
+
+### 投递
+
+| 文本内容投递 | 文件内容投递 |
+| :---: | :---: |
+| ![文本内容投递](https://lansyncbox.com/assets/images/svg/deliver-text.svg) | ![文件内容投递](https://lansyncbox.com/assets/images/svg/deliver-file.svg) |
 
 ## 核心特性（既有）
 

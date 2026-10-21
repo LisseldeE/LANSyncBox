@@ -126,7 +126,7 @@ class AboutDialog(QDialog):
 
         link_layout.addSpacing(20)  # 两个链接之间间距
 
-        # 查看详情链接
+        # 官方网站链接
         details_label = ClickableLabel(
             I18n.tr('about_details'),
             normal_color="#339af0",
@@ -186,8 +186,8 @@ class AboutDialog(QDialog):
         QDesktopServices.openUrl(QUrl(f"https://github.com/{Config.GITHUB_REPO}/issues"))
 
     def _open_details(self, event):
-        """打开作者主页链接（查看详情）"""
-        QDesktopServices.openUrl(QUrl(Config.APP_AUTHOR_LINK))
+        """打开官方网站（官方网站链接）"""
+        QDesktopServices.openUrl(QUrl("https://lansyncbox.com"))
 
     def _open_support(self, event):
         """打开爱发电赞助页（支持作者）"""

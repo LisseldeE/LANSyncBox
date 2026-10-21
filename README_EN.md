@@ -59,20 +59,6 @@ LANSyncBox Pro is a cross-platform, LAN-focused real-time file synchronization t
 | :---: | :---: |
 | ![Main Interface](https://lisseldee.github.io/assets/images/webp/1p-3.webp) | ![Sync Interface](https://lisseldee.github.io/assets/images/webp/1p-4.webp) |
 
-## Feature Demos
-
-| File Quick Top-Add | List Quick Action Bar |
-| :---: | :---: |
-| ![File Quick Top-Add](https://lisseldee.github.io/assets/images/gif/1p-1.gif) | ![List Quick Action Bar](https://lisseldee.github.io/assets/images/gif/1p-2.gif) |
-
-| Text Content Delivery | File Content Delivery |
-| :---: | :---: |
-| ![Text Content Delivery](https://lisseldee.github.io/assets/images/gif/1p-3.gif) | ![File Content Delivery](https://lisseldee.github.io/assets/images/gif/1p-4.gif) |
-
-| Chat · Peer-to-Peer Private Transfer |
-| :---: |
-| ![Chat](https://lisseldee.github.io/assets/images/gif/1p-5.gif) |
-
 ## Project Information
 
 - **Project Name**: LANSyncBox Pro
@@ -80,6 +66,20 @@ LANSyncBox Pro is a cross-platform, LAN-focused real-time file synchronization t
 - **License**: GNU General Public License v3.0
 - **Official Website**: https://lansyncbox.com
 - **Project Repository**: https://github.com/LisseldeE/LANSyncBox/tree/pro
+
+## Feature Demos
+
+### Sync Architecture
+
+<p align="center">
+  <img src="https://lansyncbox.com/assets/images/svg/sync-mesh.svg" width="100%" alt="Sync Mesh Architecture">
+</p>
+
+### Delivery
+
+| Text Content Delivery | File Content Delivery |
+| :---: | :---: |
+| ![Text Content Delivery](https://lansyncbox.com/assets/images/svg/deliver-text.svg) | ![File Content Delivery](https://lansyncbox.com/assets/images/svg/deliver-file.svg) |
 
 ## Core Features (Existing)
 
