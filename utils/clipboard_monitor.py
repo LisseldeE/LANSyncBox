@@ -25,6 +25,8 @@ class ClipboardMonitor(QObject):
     def __init__(self, parent=None):
         super().__init__(parent)
         self._enabled = False
+        self._text_enabled = True
+        self._file_enabled = True
         self._last_content_hash = None  # 最近一次"写入系统剪贴板"的内容摘要（用于防回环）
         self._throttle = QElapsedTimer()
         self._throttle.invalidate()
@@ -33,6 +35,11 @@ class ClipboardMonitor(QObject):
     def set_enabled(self, enabled: bool):
         """使能/禁用分发。房间连接成功后才应开启分发，避免房间外的复制被投递。"""
         self._enabled = enabled
+
+    def set_content_enabled(self, text_enabled: bool, file_enabled: bool):
+        """设置可投递内容类别（文本剪切板 / 文件含图片）"""
+        self._text_enabled = bool(text_enabled)
+        self._file_enabled = bool(file_enabled)
 
     def set_written_hash(self, mime_type: str, data: bytes):
         """记录一次"写入系统剪贴板"的内容摘要。
@@ -60,6 +67,8 @@ class ClipboardMonitor(QObject):
 
         # 文件（URL 本地文件）：作为文件投递会话（TCP 直连）
         if mime_data.hasUrls():
+            if not self._file_enabled:
+                return
             paths = [url.toLocalFile() for url in mime_data.urls()
                      if url.isLocalFile() and url.toLocalFile()]
             if paths:
@@ -70,6 +79,8 @@ class ClipboardMonitor(QObject):
 
         # 图片：一律作为文件处理，先把剪贴板图存为临时 PNG 再进文件会话
         if mime_data.hasImage():
+            if not self._file_enabled:
+                return
             temp_path = self._save_clipboard_image()
             if temp_path:
                 self.file_copy.emit([{'name': os.path.basename(temp_path), 'path': temp_path}])
@@ -78,6 +89,8 @@ class ClipboardMonitor(QObject):
 
         # 文本：走剪切板广播
         if mime_data.hasText():
+            if not self._text_enabled:
+                return
             data = mime_data.text().encode('utf-8')
             if len(data) <= self.TEXT_MAX_BYTES and self._commit("text", data):
                 self._throttle.restart()

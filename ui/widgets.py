@@ -3,11 +3,16 @@
 Copyright (c) 2026 Lisselde_E <Lisselde.E@outlook.com>.
 Licensed under the GNU General Public License v3.0.
 """
-from PySide6.QtWidgets import QPushButton, QLabel, QFrame, QGraphicsOpacityEffect, QWidget, QApplication, QLineEdit
-from PySide6.QtCore import Qt, QTimer, QPropertyAnimation, QByteArray, QPoint, QEvent, Signal, Property, QRectF, QEasingCurve, QObject
+from PySide6.QtWidgets import (QPushButton, QLabel, QFrame, QGraphicsOpacityEffect, QWidget,
+                              QApplication, QLineEdit, QVBoxLayout, QHBoxLayout)
+from PySide6.QtCore import (Qt, QTimer, QPropertyAnimation, QByteArray, QPoint, QEvent,
+                            Signal, Property, QRectF, QEasingCurve, QObject, QVariantAnimation)
 from PySide6.QtGui import QFont, QEnterEvent, QPainter, QColor, QPen, QBrush, QPalette, QMouseEvent
 from functools import partial
 from math import ceil, floor
+
+from config import UserConfig
+from i18n import I18n
 
 
 class AnimatedButton(QPushButton):
@@ -728,6 +733,9 @@ class ToggleSwitch(QWidget):
         """绘制开关"""
         painter = QPainter(self)
         painter.setRenderHint(QPainter.Antialiasing)
+        # 禁用态整体压暗（保留开关状态可读，仅表示当前不可操作）
+        if not self.isEnabled():
+            painter.setOpacity(0.45)
         
         # 尺寸参数
         width = self.width()
@@ -777,6 +785,246 @@ class ToggleSwitch(QWidget):
     
     # 定义动画属性
     animationProgress = Property(float, getAnimationProgress, setAnimationProgress)
+
+
+class DeliveryModeControl(QWidget):
+    """投递总开关四档分段胶囊：全部 / 仅发送 / 仅接收 / 关闭
+
+    外观与同步界面的模式切换胶囊一致（浅灰焦点气泡随档位滑动），
+    档位数由 values 决定；点击仅发出目标档位，是否写配置由使用方决定。
+    """
+
+    valueChanged = Signal(str)
+
+    _MARGIN = 3
+    _HEIGHT = 26
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setFixedHeight(self._HEIGHT)
+        self.setAttribute(Qt.WA_Hover, True)
+        self.setMouseTracking(True)
+        self.setCursor(Qt.PointingHandCursor)
+        self._values = ("all", "send", "recv", "off")
+        self._labels = (
+            I18n.tr('delivery_mode_all'), I18n.tr('delivery_mode_send'),
+            I18n.tr('delivery_mode_recv'), I18n.tr('delivery_mode_off'),
+        )
+        self._value = self._values[0]
+        self._pos = 0.0
+        self._hover_side = -1
+        self._anim = None
+
+    def value(self) -> str:
+        return self._value
+
+    def set_value(self, value: str, animate: bool = True):
+        """设置当前档位，气泡（可选）滑动到对应位置"""
+        if value not in self._values:
+            return
+        self._value = value
+        target = float(self._values.index(value))
+        if animate and abs(target - self._pos) > 1e-3:
+            self._stop_anim()
+            anim = QVariantAnimation(self)
+            anim.setDuration(220)
+            anim.setStartValue(self._pos)
+            anim.setEndValue(target)
+            anim.setEasingCurve(QEasingCurve.OutCubic)
+            anim.valueChanged.connect(lambda v: self._set_pos(float(v)))
+            anim.finished.connect(self._on_anim_finished)
+            self._anim = anim
+            anim.start()
+        else:
+            self._stop_anim()
+            self._pos = target
+            self.update()
+
+    def enterEvent(self, event):
+        self._update_hover_side(event.position().x())
+        self.update()
+        super().enterEvent(event)
+
+    def leaveEvent(self, event):
+        self._hover_side = -1
+        self.update()
+        super().leaveEvent(event)
+
+    def mouseMoveEvent(self, event):
+        self._update_hover_side(event.position().x())
+        self.update()
+        super().mouseMoveEvent(event)
+
+    def mousePressEvent(self, event):
+        if event.button() == Qt.LeftButton:
+            side = self._side_at(event.position().x())
+            if side < 0:
+                return
+            target = self._values[side]
+            if target != self._value:
+                self.valueChanged.emit(target)
+        super().mousePressEvent(event)
+
+    def _side_at(self, x: float) -> int:
+        n = len(self._values)
+        if x < 0:
+            return -1
+        return min(int(x / (self.width() / float(n))), n - 1)
+
+    def _update_hover_side(self, x: float):
+        side = self._side_at(x)
+        if side != self._hover_side:
+            self._hover_side = side
+
+    def _set_pos(self, v: float):
+        self._pos = v
+        self.update()
+
+    def _stop_anim(self):
+        if self._anim is not None:
+            self._anim.stop()
+            self._anim.deleteLater()
+            self._anim = None
+
+    def _on_anim_finished(self):
+        self._anim = None
+
+    def _is_dark(self) -> bool:
+        win = self.window()
+        pal = win.palette() if win is not None and win is not self else QApplication.palette()
+        bg = pal.color(QPalette.Window)
+        return (bg.red() * 0.299 + bg.green() * 0.587 + bg.blue() * 0.114) < 128
+
+    def paintEvent(self, event):
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.Antialiasing, True)
+        dark = self._is_dark()
+        w, h = self.width(), self.height()
+        n = len(self._values)
+        r = h / 2.0
+        m = self._MARGIN
+
+        # 胶囊底板（中性玻璃）
+        bg = QColor(0, 0, 0, 12) if not dark else QColor(255, 255, 255, 26)
+        painter.setPen(Qt.NoPen)
+        painter.setBrush(bg)
+        painter.drawRoundedRect(QRectF(0, 0, w, h), r, r)
+
+        active_i = self._values.index(self._value)
+        # 未选中档位的悬浮反馈
+        if self._hover_side >= 0 and self._hover_side != active_i:
+            seg_w = w / float(n)
+            hover_rect = QRectF(self._hover_side * seg_w + m, m,
+                                seg_w - 2 * m, h - 2 * m)
+            hcol = QColor(0, 0, 0, 22) if not dark else QColor(255, 255, 255, 30)
+            painter.setBrush(hcol)
+            painter.drawRoundedRect(hover_rect, (h - 2 * m) / 2.0, (h - 2 * m) / 2.0)
+
+        # 焦点气泡（随 _pos 滑动）：按档位等分宽度居中，与文字中心严格对齐
+        seg_w = w / float(n)
+        bubble = QRectF(m + self._pos * seg_w, m, seg_w - 2 * m, h - 2 * m)
+        bcol = QColor("#e9eaee") if not dark else QColor("#eceef2")
+        painter.setBrush(bcol)
+        painter.drawRoundedRect(bubble, (h - 2 * m) / 2.0, (h - 2 * m) / 2.0)
+
+        # 档位文字：每个档位区域内水平垂直居中
+        f = QFont(self.font())
+        f.setPointSize(10)
+        f.setWeight(QFont.Weight.DemiBold)
+        painter.setFont(f)
+        for i, label in enumerate(self._labels):
+            painter.setPen(QColor("#1f2328") if i == active_i
+                           else QColor("#767d86" if not dark else "#a0a0a0"))
+            painter.drawText(QRectF(i * seg_w, 0, seg_w, h),
+                             Qt.AlignHCenter | Qt.AlignVCenter, label)
+
+
+class DeliverySettingsPanel(QWidget):
+    """投递设置面板（投递模式四档 + 文本/文件内容开关）
+
+    设置对话框「投递」页与同步界面底部胶囊浮层共用：
+    改动立即写入 UserConfig 并发出 changed 信号，由使用方即时应用。
+    关闭投递模式时内容开关保留状态、仅置灰不可操作。
+    """
+
+    changed = Signal()
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self._loading = False
+
+        lay = QVBoxLayout(self)
+        lay.setContentsMargins(0, 0, 0, 0)
+        lay.setSpacing(12)
+
+        # 投递模式：标题在上，四档胶囊单独占一行
+        mode_title = QLabel(I18n.tr('delivery_mode_label'))
+        mode_title.setContentsMargins(0, 4, 0, 0)
+        lay.addWidget(mode_title)
+        self._mode = DeliveryModeControl()
+        self._mode.valueChanged.connect(self._on_mode_changed)
+        lay.addWidget(self._mode)
+
+        # 内容开关：文本剪切板 / 文件（含图片）
+        self._text_row, self._text_sw = self._make_switch_row(
+            I18n.tr('delivery_text'), self._on_text_changed)
+        lay.addWidget(self._text_row)
+        self._file_row, self._file_sw = self._make_switch_row(
+            I18n.tr('delivery_file'), self._on_file_changed)
+        lay.addWidget(self._file_row)
+
+        self.refresh()
+
+    def _make_switch_row(self, label_text: str, on_changed):
+        row = QWidget()
+        lay = QHBoxLayout(row)
+        lay.setContentsMargins(0, 4, 0, 4)
+        lay.setSpacing(12)
+        label = QLabel(label_text)
+        lay.addWidget(label)
+        lay.addStretch()
+        sw = ToggleSwitch()
+        sw.stateChanged.connect(on_changed)
+        lay.addWidget(sw)
+        return row, sw
+
+    def refresh(self):
+        """从配置重新加载全部控件（不触发保存）"""
+        self._loading = True
+        self._mode.set_value(UserConfig.get_delivery_mode(), animate=False)
+        self._text_sw.setChecked(UserConfig.get_delivery_text_enabled(), animate=False)
+        self._file_sw.setChecked(UserConfig.get_delivery_file_enabled(), animate=False)
+        self._loading = False
+        self._sync_enabled()
+
+    def _sync_enabled(self):
+        """关闭总开关时内容开关保留状态并置灰"""
+        enabled = self._mode.value() != "off"
+        self._text_row.setEnabled(enabled)
+        self._file_row.setEnabled(enabled)
+        self._text_sw.setEnabled(enabled)
+        self._file_sw.setEnabled(enabled)
+
+    def _on_mode_changed(self, mode: str):
+        if self._loading:
+            return
+        # 控件只发目标档位，不自行更新；在此写入档位以触发气泡滑动动画
+        self._mode.set_value(mode, animate=True)
+        UserConfig.set_delivery_mode(mode)
+        self._sync_enabled()
+        self.changed.emit()
+
+    def _on_text_changed(self, checked: bool):
+        if self._loading:
+            return
+        UserConfig.set_delivery_text_enabled(checked)
+        self.changed.emit()
+
+    def _on_file_changed(self, checked: bool):
+        if self._loading:
+            return
+        UserConfig.set_delivery_file_enabled(checked)
+        self.changed.emit()
 
 
 class UnderlineEdit(QLineEdit):

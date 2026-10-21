@@ -809,12 +809,11 @@ class FileListWidget(QWidget):
 
         action_bar_layout.addStretch()
 
-        # 右侧状态指示：已选数量 + 投递列表数量（与预览图一致，随选中/投递状态实时更新）
+        # 右侧状态指示：已选数量（随选中状态实时更新）
         self._sel_status_label = QLabel()
-        self._delivery_status_label = QLabel()
-        for label in (self._sel_status_label, self._delivery_status_label):
-            label.setStyleSheet(f"color: {'#6c757d' if _lum > 128 else '#9a9ea6'}; font-size: 12px;")
-            action_bar_layout.addWidget(label, 0, Qt.AlignVCenter)
+        self._sel_status_label.setStyleSheet(
+            f"color: {'#6c757d' if _lum > 128 else '#9a9ea6'}; font-size: 12px;")
+        action_bar_layout.addWidget(self._sel_status_label, 0, Qt.AlignVCenter)
 
         layout.addWidget(action_bar)
         
@@ -938,14 +937,9 @@ class FileListWidget(QWidget):
             self._rename_btn.setEnabled(len(selected_rows) == 1)
             self._delete_btn.setEnabled(has_selection)
 
-        # 右侧状态指示
+        # 右侧状态指示：已选数量
         self._sel_status_label.setText(
             I18n.tr('selected_count', count=len(selected_rows)))
-        if self.clipboard_files:
-            self._delivery_status_label.setText(
-                I18n.tr('delivery_list_count', count=len(self.clipboard_files)))
-        else:
-            self._delivery_status_label.setText(I18n.tr('delivery_list_empty'))
     
     def load_files(self):
         """加载文件列表"""

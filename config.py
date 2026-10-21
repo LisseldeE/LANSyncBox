@@ -295,6 +295,10 @@ class UserConfig:
             "confirm_leave_no_ask": False,
             "auto_check_update": False,
             "receive_announcements": True,
+            # 投递设置：总开关 all/send/recv/off + 内容开关（关闭总开关时内容开关保留状态）
+            "delivery_mode": "all",
+            "delivery_text_enabled": True,
+            "delivery_file_enabled": True,
             "last_announcement": "",
             "last_announcement_text": "",
             "end_id": "",
@@ -523,6 +527,50 @@ class UserConfig:
     def set_capsule_announcements(cls, enabled: bool):
         """设置「新公告通过胶囊栏显示」并持久化"""
         cls.set("capsule_announcements", bool(enabled))
+
+    # ---------- 投递设置 ----------
+
+    @classmethod
+    def get_delivery_mode(cls) -> str:
+        """获取投递总开关："all" 全部 / "send" 仅发送 / "recv" 仅接收 / "off" 关闭"""
+        mode = cls.get("delivery_mode", "all")
+        return mode if mode in ("all", "send", "recv", "off") else "all"
+
+    @classmethod
+    def set_delivery_mode(cls, mode: str):
+        """设置投递总开关并持久化"""
+        if mode in ("all", "send", "recv", "off"):
+            cls.set("delivery_mode", mode)
+
+    @classmethod
+    def get_delivery_text_enabled(cls) -> bool:
+        """获取「文本剪切板」投递开关（关闭总开关时仍保留该状态）"""
+        return bool(cls.get("delivery_text_enabled", True))
+
+    @classmethod
+    def set_delivery_text_enabled(cls, enabled: bool):
+        """设置「文本剪切板」投递开关并持久化"""
+        cls.set("delivery_text_enabled", bool(enabled))
+
+    @classmethod
+    def get_delivery_file_enabled(cls) -> bool:
+        """获取「文件（含图片）」投递开关（关闭总开关时仍保留该状态）"""
+        return bool(cls.get("delivery_file_enabled", True))
+
+    @classmethod
+    def set_delivery_file_enabled(cls, enabled: bool):
+        """设置「文件（含图片）」投递开关并持久化"""
+        cls.set("delivery_file_enabled", bool(enabled))
+
+    @classmethod
+    def is_delivery_send_enabled(cls) -> bool:
+        """是否允许发送投递（总开关为全部/仅发送）"""
+        return cls.get_delivery_mode() in ("all", "send")
+
+    @classmethod
+    def is_delivery_recv_enabled(cls) -> bool:
+        """是否允许接收投递（总开关为全部/仅接收）"""
+        return cls.get_delivery_mode() in ("all", "recv")
 
     @classmethod
     def get_last_announcement(cls) -> str:

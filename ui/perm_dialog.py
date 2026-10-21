@@ -118,9 +118,10 @@ class PermManageDialog(QDialog):
         self._state_timer.timeout.connect(lambda: self._state_label.setText(''))
 
         # 关闭按钮：使用全局取消样式（同进度/创建等对话框），深浅色下均不突兀
+        # 只钉宽度、高度交由样式内边距决定：固定 30px 会把文字底部裁掉
         close_btn = AnimatedButton(I18n.tr('close'))
         close_btn.setCursor(Qt.PointingHandCursor)
-        close_btn.setFixedSize(100, 30)
+        close_btn.setFixedWidth(100)
         close_btn.setStyleSheet(BUTTON_STYLES['secondary'])
         close_btn.clicked.connect(self.close)
         btn_row = QHBoxLayout()

@@ -17,7 +17,7 @@ from PySide6.QtGui import QPainter, QColor, QFont, QPalette, QDesktopServices
 
 from config import Config, UserConfig
 from i18n import I18n
-from ui.widgets import ToggleSwitch, AnimatedButton, BUTTON_STYLES
+from ui.widgets import ToggleSwitch, AnimatedButton, BUTTON_STYLES, DeliverySettingsPanel
 from sync.file_manager import safe_rmtree
 
 
@@ -179,6 +179,7 @@ class SettingsDialog(QDialog):
         self._menu.set_items([
             I18n.tr('settings_category_general'),
             I18n.tr('settings_category_system'),
+            I18n.tr('settings_category_delivery'),
             I18n.tr('settings_category_cache'),
         ])
         self._menu.picked.connect(self._switch_category)
@@ -188,6 +189,7 @@ class SettingsDialog(QDialog):
         self._stack = QStackedWidget(self)
         self._stack.addWidget(self._build_general_page())
         self._stack.addWidget(self._build_system_page())
+        self._stack.addWidget(self._build_delivery_page())
         self._stack.addWidget(self._build_cache_page())
         root.addWidget(self._stack, 1)
 
@@ -254,6 +256,22 @@ class SettingsDialog(QDialog):
             lambda checked: UserConfig.set_capsule_announcements(checked),
         )
         lay.addWidget(capsule_row)
+
+        lay.addStretch()
+        return page
+
+    def _build_delivery_page(self):
+        page = QWidget()
+        lay = QVBoxLayout(page)
+        lay.setContentsMargins(0, 0, 0, 0)
+        lay.setSpacing(12)
+
+        lay.addWidget(self._make_section_label(I18n.tr('settings_section_delivery')))
+        lay.addWidget(self._make_divider())
+
+        # 总开关 + 文本/文件内容开关（与同步界面胶囊浮层共用同一份配置）
+        self._delivery_panel = DeliverySettingsPanel()
+        lay.addWidget(self._delivery_panel)
 
         lay.addStretch()
         return page

@@ -36,16 +36,27 @@ class I18n:
             # 设置对话框
             "settings_category_general": "常规",
             "settings_category_system": "系统",
+            "settings_category_delivery": "投递",
             "settings_category_cache": "缓存",
             "settings_subtitle": "个性化偏好与本地存储",
             "settings_section_general": "通用",
             "settings_section_notify": "通知",
+            "settings_section_delivery": "投递",
             "settings_section_cache": "缓存目录",
             "settings_confirm_leave_ask": "退出房间询问",
             "settings_auto_check_update": "自动检查更新",
             "settings_receive_announcements": "接收推送公告",
             "settings_capsule_announcements": "新公告通过胶囊栏显示",
             "settings_manage_folders": "管理文件夹",
+            # 投递设置
+            "delivery_settings": "投递设置",
+            "delivery_mode_label": "投递模式",
+            "delivery_mode_all": "全部",
+            "delivery_mode_send": "仅发送",
+            "delivery_mode_recv": "仅接收",
+            "delivery_mode_off": "关闭",
+            "delivery_text": "文本剪切板",
+            "delivery_file": "文件",
             "settings_clear": "清空",
             "settings_cache_empty": "暂无缓存目录",
             "settings_clear_confirm": "确定清空该目录？",
@@ -274,8 +285,6 @@ class I18n:
 
             # 快捷操作栏状态指示
             "selected_count": "已选 {count} 项",
-            "delivery_list_count": "投递列表 {count} 项",
-            "delivery_list_empty": "投递列表为空",
             
             # 拖拽操作
             "drag_add": "添加文件",
@@ -386,16 +395,27 @@ class I18n:
             # Settings dialog
             "settings_category_general": "General",
             "settings_category_system": "System",
+            "settings_category_delivery": "Delivery",
             "settings_category_cache": "Cache",
             "settings_subtitle": "Preferences & local storage",
             "settings_section_general": "General",
             "settings_section_notify": "Notifications",
+            "settings_section_delivery": "Delivery",
             "settings_section_cache": "Cache folders",
             "settings_confirm_leave_ask": "Ask on leaving room",
             "settings_auto_check_update": "Auto-check for updates",
             "settings_receive_announcements": "Receive announcements",
             "settings_capsule_announcements": "Show new announcements in the capsule bar",
             "settings_manage_folders": "Manage Folders",
+            # Delivery settings
+            "delivery_settings": "Delivery Settings",
+            "delivery_mode_label": "Delivery mode",
+            "delivery_mode_all": "All",
+            "delivery_mode_send": "Send",
+            "delivery_mode_recv": "Receive",
+            "delivery_mode_off": "Off",
+            "delivery_text": "Text clipboard",
+            "delivery_file": "Files",
             "settings_clear": "Clear",
             "settings_cache_empty": "No cache folders",
             "settings_clear_confirm": "Clear this folder?",
@@ -624,8 +644,6 @@ class I18n:
 
             # Quick action bar status
             "selected_count": "Selected {count}",
-            "delivery_list_count": "Delivery list: {count}",
-            "delivery_list_empty": "Delivery list empty",
             
             # Drag operations
             "drag_add": "Add Files",

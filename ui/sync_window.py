@@ -17,7 +17,7 @@ from PySide6.QtWidgets import (
     QTableWidget, QTableWidgetItem, QProgressBar, QHeaderView, QApplication,
     QGraphicsOpacityEffect, QCheckBox
 )
-from PySide6.QtCore import Qt, Signal, QEvent, QMetaObject, Q_ARG, Slot, QTimer, QPropertyAnimation, QEasingCurve, QSize, QVariantAnimation, QAbstractAnimation, QRectF, QPointF
+from PySide6.QtCore import Qt, Signal, QEvent, QMetaObject, Q_ARG, Slot, QTimer, QPropertyAnimation, QEasingCurve, QSize, QVariantAnimation, QAbstractAnimation, QRect, QRectF, QPointF, QPoint
 from PySide6.QtGui import (QColor, QIcon, QPixmap, QCursor, QPalette, QKeySequence,
                            QShortcut, QPainter, QPainterPath, QPen)
 from PySide6.QtSvg import QSvgRenderer
@@ -28,7 +28,7 @@ from config import Config, UserConfig
 from ui.file_list_widget import FileListWidget
 from ui.chat_panel import ChatPanel, SendPanel
 from ui.capsule_notification import _RoundedProgressBar
-from ui.widgets import AnimatedButton, BUTTON_STYLES, ToggleSwitch
+from ui.widgets import AnimatedButton, BUTTON_STYLES, ToggleSwitch, DeliverySettingsPanel
 from ui.about_dialog import AboutDialog
 from network.server import SyncServer
 from utils.clean_queue import get_clean_queue
@@ -401,6 +401,202 @@ class RoomManageCard(QFrame):
         return self.seg.mode()
 
 
+class DeliveryPopup(QFrame):
+    """同步界面底部「投递设置」胶囊浮层
+
+    弹出方式：窗口按完整尺寸一次性呈现，卡片固定在窗口内，展开时从下方
+    12px 处淡入并平滑上移就位。全程不做窗口裁切、不改宽度，内容不会重排
+    或出现跳动。
+    - 打开：淡入 + 上移 12px；
+    - 收起：淡出 + 下移 12px 后隐藏；
+    - 不抢焦点（WA_ShowWithoutActivating），避免主同步窗口失活导致边缘
+      阴影闪烁；
+    - 展开/收起期间挂应用级事件过滤器处理点外、Esc 与应用失活。
+    内容复用 DeliverySettingsPanel（与设置对话框「投递」页同一份配置）。
+    """
+
+    _ANIM_MS = 180
+    _RISE = 12
+    _FULL_W = 320
+
+    def __init__(self, parent=None):
+        # 禁用系统投影：Windows 原生投影按矩形窗口边界绘制，会在四角圆角外侧
+        # 留下灰色/白色残边；改用卡片自身的 1px 边框承担层次区分
+        super().__init__(parent, Qt.Tool | Qt.FramelessWindowHint
+                         | Qt.NoDropShadowWindowHint)
+        self.setAttribute(Qt.WA_TranslucentBackground)
+        # 不抢焦点：浮窗若激活自己，会让主同步窗口失活、边缘阴影随之闪烁
+        self.setAttribute(Qt.WA_ShowWithoutActivating)
+        self.setFixedWidth(self._FULL_W)
+
+        # 卡片不由布局托管：动画只改窗口 geometry，卡片始终保持完整尺寸，
+        # 由窗口边界自然裁切，内容不会因尺寸变化而重排
+        self._card = QFrame(self)
+        self._card.setObjectName("deliveryCard")
+        self._card.setStyleSheet(
+            "QFrame#deliveryCard { background: palette(window);"
+            " border: 1px solid palette(mid); border-radius: 10px; }"
+        )
+
+        lay = QVBoxLayout(self._card)
+        lay.setContentsMargins(14, 12, 14, 12)
+        lay.setSpacing(8)
+        title = QLabel(I18n.tr('delivery_settings'))
+        title.setStyleSheet(
+            f"font-size: 11px; color: "
+            f"{'#a0a0a0' if self._is_dark() else '#868e96'};"
+        )
+        lay.addWidget(title)
+        self.panel = DeliverySettingsPanel(self._card)
+        lay.addWidget(self.panel)
+
+        self._hidden_ts = 0.0
+        self._full_h = 1
+        self._anchor_x = 0
+        self._bottom = 0
+        self._closing = False
+        self._anim = None
+        self._fade = None
+        self._outside_filter = False
+
+    # ---------- 展开/收起 ----------
+
+    def prepare(self) -> int:
+        """刷新配置并测量完整高度，返回目标高度"""
+        self.panel.refresh()
+        lay = self._card.layout()
+        if lay is not None:
+            lay.activate()
+        self._full_h = max(1, self._card.sizeHint().height())
+        # 卡片尺寸固定并贴在窗口左上角：窗口整体位移/淡入，内容不重排
+        self._card.setGeometry(0, 0, self._FULL_W, self._full_h)
+        return self._full_h
+
+    def open_animated(self, x: int, bottom: int):
+        """淡入并向上轻移就位：x 为左边缘，bottom 为底边 y
+
+        窗口始终为完整尺寸，卡片固定不动；只对窗口整体做 12px 上移与
+        透明度渐入，不裁切、不缩放，文字不发生任何重排或跳动。
+        """
+        self._closing = False
+        self._anchor_x = x
+        self._bottom = bottom
+        end = QRect(x, bottom - self._full_h, self._FULL_W, self._full_h)
+        start = end.translated(0, self._RISE)
+        self._card.setGeometry(0, 0, self._FULL_W, self._full_h)
+        self.setGeometry(start)
+        self.setWindowOpacity(0.0)
+        self.show()
+        # 不调用 activateWindow/setFocus：焦点保留在主窗口，避免边缘阴影闪烁；
+        # 点外、Esc、切换应用由应用级事件过滤器处理
+        self._install_outside_filter()
+        self._animate(start, end, 0.0, 1.0)
+
+    def close_animated(self):
+        """淡出并下移后隐藏"""
+        if not self.isVisible() or self._closing:
+            return
+        self._closing = True
+        end = QRect(self._anchor_x, self._bottom - self._full_h,
+                    self._FULL_W, self._full_h)
+        start = end.translated(0, self._RISE)
+        self._animate(self.geometry(), start, self.windowOpacity(), 0.0,
+                      on_end=self._after_collapse)
+
+    def _animate(self, rect_from: QRect, rect_to: QRect,
+                 opacity_from: float, opacity_to: float, on_end=None):
+        self._stop_anim()
+        geo = QPropertyAnimation(self, b"geometry", self)
+        geo.setDuration(self._ANIM_MS)
+        geo.setEasingCurve(QEasingCurve.OutCubic)
+        geo.setStartValue(rect_from)
+        geo.setEndValue(rect_to)
+        fade = QPropertyAnimation(self, b"windowOpacity", self)
+        fade.setDuration(self._ANIM_MS)
+        fade.setEasingCurve(QEasingCurve.OutCubic)
+        fade.setStartValue(float(opacity_from))
+        fade.setEndValue(float(opacity_to))
+        fade.finished.connect(self._on_anim_finished)
+        if on_end is not None:
+            fade.finished.connect(on_end)
+        self._anim = geo
+        self._fade = fade
+        geo.start(QPropertyAnimation.DeleteWhenStopped)
+        fade.start(QPropertyAnimation.DeleteWhenStopped)
+
+    def _stop_anim(self):
+        for anim in (self._anim, self._fade):
+            if anim is not None:
+                anim.stop()
+        self._anim = None
+        self._fade = None
+
+    def _on_anim_finished(self):
+        self._anim = None
+        self._fade = None
+
+    def _after_collapse(self):
+        self._closing = False
+        self._remove_outside_filter()
+        self.hide()
+
+    # ---------- 点外/Esc 关闭 ----------
+
+    def _install_outside_filter(self):
+        if self._outside_filter:
+            return
+        app = QApplication.instance()
+        if app is not None:
+            app.installEventFilter(self)
+            self._outside_filter = True
+
+    def _remove_outside_filter(self):
+        if not self._outside_filter:
+            return
+        app = QApplication.instance()
+        if app is not None:
+            app.removeEventFilter(self)
+        self._outside_filter = False
+
+    def eventFilter(self, obj, event):
+        if self.isVisible() and not self._closing:
+            if event.type() == QEvent.MouseButtonPress:
+                if isinstance(obj, QWidget):
+                    pos = event.globalPosition().toPoint()
+                    if not self.frameGeometry().contains(pos):
+                        self.close_animated()
+            elif event.type() == QEvent.KeyPress and event.key() == Qt.Key_Escape:
+                self.close_animated()
+                return True
+            elif event.type() == QEvent.ApplicationDeactivate:
+                # 浮窗不抢焦点，切到其它应用时由应用失活事件收起
+                self.close_animated()
+        return super().eventFilter(obj, event)
+
+    def event(self, e):
+        # 切到其它应用窗口时（应用级过滤器收不到外部点击）同样先收起
+        if e.type() == QEvent.WindowDeactivate and self.isVisible() and not self._closing:
+            self.close_animated()
+        return super().event(e)
+
+    def hideEvent(self, event):
+        # 记录关闭时刻：收起动画结束或窗口被动隐藏后，点击胶囊的 clicked
+        # 仍会补发一次，需短暂屏蔽以免刚关闭就重新展开
+        self._hidden_ts = time.monotonic()
+        self._stop_anim()
+        self._closing = False
+        self._remove_outside_filter()
+        super().hideEvent(event)
+
+    def just_hidden(self) -> bool:
+        return time.monotonic() - self._hidden_ts < 0.25
+
+    def _is_dark(self) -> bool:
+        pal = QApplication.palette()
+        bg = pal.color(QPalette.Window)
+        return (bg.red() * 0.299 + bg.green() * 0.587 + bg.blue() * 0.114) < 128
+
+
 class SyncWindow(QMainWindow):
     """同步窗口"""
     
@@ -443,6 +639,11 @@ class SyncWindow(QMainWindow):
 
         # 顶部拖拽放置区（快捷添加文件）：仅在房间连接就绪后创建
         self._drop_zone = None
+
+        # 投递设置：房间就绪标志 + 底部胶囊浮层（懒创建）
+        self._room_ready = False
+        self._delivery_popup = None
+        self._delivery_btn = None
         
         # 传输进度跟踪
         self._transfer_rows = {}  # 文件名 -> 行号映射
@@ -529,6 +730,8 @@ class SyncWindow(QMainWindow):
 
         self.init_ui()
         self.init_network()
+        # 应用持久化的投递配置（房间就绪前监听保持关闭）
+        self._apply_delivery_settings()
     
     def init_ui(self):
         """初始化界面"""
@@ -746,6 +949,21 @@ class SyncWindow(QMainWindow):
 
         bottom_layout.addStretch()
 
+        # 投递设置胶囊按钮（点击展开浮层；与设置对话框「投递」页共用配置）
+        self._delivery_btn = QPushButton(I18n.tr('delivery_settings'))
+        self._delivery_btn.setCursor(Qt.PointingHandCursor)
+        self._delivery_btn.setFixedHeight(22)
+        self._delivery_btn.setToolTip(I18n.tr('delivery_settings'))
+        self._delivery_btn.setStyleSheet(
+            "QPushButton { background: palette(alternate-base); color: palette(text);"
+            " border: 1px solid palette(mid); border-radius: 11px;"
+            " font-size: 11px; padding: 0 12px; }"
+            "QPushButton:hover { background: palette(midlight); }"
+        )
+        self._delivery_btn.clicked.connect(self._toggle_delivery_popup)
+        bottom_layout.addWidget(self._delivery_btn)
+        bottom_layout.addSpacing(8)
+
         # 清理缓存文件开关
         clean_cache_label = QLabel(I18n.tr('clean_cache_label'))
         bottom_layout.addWidget(clean_cache_label)
@@ -847,7 +1065,8 @@ class SyncWindow(QMainWindow):
                 self._init_drop_zone()
                 # 房间就绪：开启局域网剪切板分发 + 启动本端目录服务（复制端 serve 用）
                 self._start_provider()
-                self._monitor.set_enabled(True)
+                self._room_ready = True
+                self._apply_delivery_settings()
                 # 房间就绪：启动对端自发现（周期广播 + 定向 TCP 查询）
                 self._start_peer_discovery()
                 # 房间就绪：mesh 已建，接私信上下线信号
@@ -939,6 +1158,10 @@ class SyncWindow(QMainWindow):
         """本端系统剪贴板新增文本：沿网状直连广播投递给各对端（去中心化）"""
         if mime_type != "text" or not data:
             return
+        # 投递总开关/文本开关关闭时不发送
+        if not (UserConfig.is_delivery_send_enabled()
+                and UserConfig.get_delivery_text_enabled()):
+            return
         # 本端新复制内容：用户的下一次 Ctrl+V 应留给前台应用，释放全局劫持；
         # 旧"可用远程文件"意图被本次本机复制取代，一并清空避免后续重新劫持
         self._release_global_hotkey()
@@ -952,6 +1175,10 @@ class SyncWindow(QMainWindow):
     def _apply_system_clipboard(self, mime_type: str, data: bytes) -> bool:
         """将接收到的剪切板文本写入本端系统剪贴板，并记录摘要以抑制回环。"""
         if mime_type != "text" or not data:
+            return False
+        # 投递总开关/文本开关关闭时不接收
+        if not (UserConfig.is_delivery_recv_enabled()
+                and UserConfig.get_delivery_text_enabled()):
             return False
         # 远程同步新文字剪贴板：用户的下一次 Ctrl+V 应粘贴该文本，释放全局劫持；
         # 远程文件意图被本次文字投递取代，清空可用状态
@@ -1019,6 +1246,10 @@ class SyncWindow(QMainWindow):
         Args:
             entries: [{'name', 'path'}, ...]（图片已由 monitor 存为临时 PNG）
         """
+        # 投递总开关/文件开关关闭时不发送
+        if not (UserConfig.is_delivery_send_enabled()
+                and UserConfig.get_delivery_file_enabled()):
+            return
         if self._provider is None or not entries:
             return
         # 本端新复制文件：用户的下一次 Ctrl+V 应留给前台应用，释放全局劫持；
@@ -1144,6 +1375,10 @@ class SyncWindow(QMainWindow):
             return
         if not notify.get('session_id') or not notify.get('files'):
             return
+        # 投递总开关/文件开关关闭时不接收（不展示可用胶囊，也不劫持 Ctrl+V）
+        if not (UserConfig.is_delivery_recv_enabled()
+                and UserConfig.get_delivery_file_enabled()):
+            return
         # 共享剪贴板回环抑制：本端刚复制过相同文件，该通知是回声（如虚拟机共享剪贴板同步），不展示
         if self._is_own_copy_echo(notify):
             return
@@ -1189,6 +1424,8 @@ class SyncWindow(QMainWindow):
         if hotkey is None:
             return
         if (self._remote_files is not None
+                and UserConfig.is_delivery_recv_enabled()
+                and UserConfig.get_delivery_file_enabled()
                 and not self.isActiveWindow()):
             hotkey.register()
         else:
@@ -2439,7 +2676,8 @@ class SyncWindow(QMainWindow):
             # 首次全量差异同步改由模式确认后触发（sync 模式下收到 MODE_RESP 自动上报）
             # 连接就绪：开启局域网剪切板分发 + 启动本端目录服务（复制端 serve 用）
             self._start_provider()
-            self._monitor.set_enabled(True)
+            self._room_ready = True
+            self._apply_delivery_settings()
             # 去中心化房间发现：本连接端也是房间存活成员，认证后就绪即启动 UDP
             # 应答服务。只上报自身端点（自身 mgmt 端口 = 共享管理监听端口），绝不上报
             # 主机在线状态/地址；host 亲和由 mesh 既有回探机制负责。只要房间里任意
@@ -3732,6 +3970,57 @@ class SyncWindow(QMainWindow):
         """清理缓存开关状态改变"""
         # 保存状态到配置
         UserConfig.set_clean_cache_enabled(checked)
+
+    # ---------- 投递设置 ----------
+
+    def _toggle_delivery_popup(self):
+        """点击底部「投递设置」胶囊：展开/收起浮层"""
+        popup = self._delivery_popup
+        if popup is not None and popup.isVisible():
+            popup.close_animated()
+            return
+        if popup is not None and popup.just_hidden():
+            return
+        if popup is None:
+            popup = DeliveryPopup(self)
+            popup.panel.changed.connect(self._apply_delivery_settings)
+            self._delivery_popup = popup
+        # 每次打开重新读取配置并测量目标高度（与设置对话框共用同一份数据）
+        full_h = popup.prepare()
+
+        g = self._delivery_btn.mapToGlobal(QPoint(0, 0))
+        x = g.x()
+        y = g.y() - full_h - 6
+        screen = QApplication.screenAt(g) or QApplication.primaryScreen()
+        if screen is not None:
+            geo = screen.availableGeometry()
+            x = max(geo.left() + 8, min(x, geo.right() - popup._FULL_W - 8))
+            y = max(geo.top() + 8, y)
+        popup.open_animated(x, y + full_h)
+
+    def _apply_delivery_settings(self):
+        """按投递配置即时生效：发送监听、接收胶囊与全局 Ctrl+V 接管
+
+        - 总开关为全部/仅发送时允许发送，为全部/仅接收时允许接收；
+        - 内容开关控制文本剪切板与文件（含图片）；
+        - 关闭接收时立即收起可用胶囊、清空待接收文件并释放全局劫持；
+        - 子开关状态始终保留，关闭总开关仅停用行为。
+        """
+        send = UserConfig.is_delivery_send_enabled()
+        recv = UserConfig.is_delivery_recv_enabled()
+        text_on = UserConfig.get_delivery_text_enabled()
+        file_on = UserConfig.get_delivery_file_enabled()
+
+        self._monitor.set_content_enabled(text_on, file_on)
+        # 房间就绪后才监听；发送关闭或两类内容都关闭时不监听
+        self._monitor.set_enabled(self._room_ready and send and (text_on or file_on))
+
+        if not (recv and file_on):
+            self._remote_files = None
+            self._pending_confirm = None
+            if self._capsule is not None:
+                self._capsule.dismiss()
+        self._update_global_hotkey()
 
     def closeEvent(self, event):
         """窗口关闭事件"""
