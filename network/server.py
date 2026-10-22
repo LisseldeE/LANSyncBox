@@ -233,15 +233,21 @@ class SyncServer(QObject):
         self._ping_stop.set()
         
         # 关闭所有客户端连接，清理大文件接收状态
+        cancelled_receives = []
         with self._lock:
             for client_id, client_info in list(self.clients.items()):
                 # 关闭大文件接收句柄，删除临时文件
-                self._cleanup_client_receiving(client_info)
+                cancelled_receives.extend(
+                    self._cleanup_client_receiving(client_info))
                 try:
                     client_info['socket'].close()
                 except Exception:
                     pass
             self.clients.clear()
+
+        # 锁外通告中止接收：UI 据此清掉接收进度行，不残留「同步中」
+        for filename in cancelled_receives:
+            self.file_receive_cancelled.emit(filename)
         
         # 关闭服务器socket
         if self.server_socket:
@@ -266,9 +272,15 @@ class SyncServer(QObject):
             self.file_state_store = None
     
     @staticmethod
-    def _cleanup_client_receiving(client_info: dict):
-        """清理客户端的大文件接收状态（关闭句柄、删除临时文件）"""
+    def _cleanup_client_receiving(client_info: dict) -> list:
+        """清理客户端的大文件接收状态（关闭句柄、删除临时文件）。
+
+        Returns:
+            被中止接收的文件名列表；调用方须在释放锁后逐个发
+            file_receive_cancelled，避免接收进度行与总体状态残留。
+        """
         receiving_files = client_info.get('receiving_files', {})
+        cancelled = []
         for filename, rf in list(receiving_files.items()):
             handle = rf.get('handle')
             if handle:
@@ -282,7 +294,9 @@ class SyncServer(QObject):
                     os.remove(temp_path)
                 except Exception:
                     pass
+            cancelled.append(filename)
         client_info['receiving_files'] = {}
+        return cancelled
 
     def _safe_join(self, filename: str) -> str:
         """
@@ -1957,18 +1971,23 @@ class SyncServer(QObject):
         """移除客户端"""
         end_id = None
         authenticated = False  # 仅已认证端才向 UI 通告"断开"；探活/失败连接未通告"连接"，静默移除
+        cancelled_receives = []
         with self._lock:
             if client_id in self.clients:
                 client_info = self.clients[client_id]
                 authenticated = client_info.get('authenticated', False)
                 end_id = client_info.get('end_id') or None  # 网状身份（LEAVE 通告用）
                 # 清理大文件接收状态：关闭句柄、删除临时文件
-                self._cleanup_client_receiving(client_info)
+                cancelled_receives = self._cleanup_client_receiving(client_info)
                 try:
                     client_info['socket'].close()
                 except Exception:
                     pass
                 del self.clients[client_id]
+
+        # 锁外通告中止接收：该端上传中途断开，UI 清掉接收进度行与「同步中」
+        for filename in cancelled_receives:
+            self.file_receive_cancelled.emit(filename)
 
         # 接收端断开：取消该端所有在途/排队的主机直推任务，避免发送端继续向已离线
         # 对端推送文件（_send_* 会打到死 socket，且对端重连后可能残留旧任务重复推）。

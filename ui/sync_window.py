@@ -652,6 +652,14 @@ class SyncWindow(QMainWindow):
         
         # 传输队列管理器（限制同时传输5个文件）
         self.transfer_queue = TransferQueue(max_concurrent=5)
+        # 队列彻底空闲时刷新总体同步状态：任务来源不止 UI 文件操作（主机转发、
+        # 连接端上传也入同一队列），逐个入队点挂回调必漏；只在队列真正排空时
+        # 回主线程刷新，保证「同步中」不会残留（收集模式靠此回到「已同步」）
+        self.transfer_queue.set_idle_callback(self._request_sync_state_refresh)
+
+        # 总体同步状态（文件列表操作栏胶囊）：在途的自同步发送/接收会话
+        self._sync_active_sends = set()   # "session_id:name:conn_id"
+        self._sync_active_recvs = set()   # 相对路径
 
         # 局域网剪切板监控（房间连接成功后才使能；本端复制→上报主机分发）
         from utils.clipboard_monitor import ClipboardMonitor
@@ -2128,6 +2136,9 @@ class SyncWindow(QMainWindow):
         act = I18n.tr('sync_transfer_send') if sync else I18n.tr('clipboard_deliver_send')
         color = "#51cf66" if sync else "#74c0fc"
         key = f"{session_id}:{name}:{conn_id}"
+        if sync and key not in self._sync_active_sends:
+            self._sync_active_sends.add(key)
+            self._refresh_sync_state()
         # 连接标识 = "对端IP:端口"：进度条带 IP 前缀区分不同接收端（防互串），
         # 与旧版"转发进度含目标 IP"同款；IPv6 用 rsplit 取 IP 段
         peer_ip = conn_id.rsplit(':', 1)[0]
@@ -2181,6 +2192,9 @@ class SyncWindow(QMainWindow):
         sync = session_id.startswith("sync_")
         act = I18n.tr('sync_transfer_send') if sync else I18n.tr('clipboard_deliver_send')
         key = f"{session_id}:{name}:{conn_id}"
+        if sync and key in self._sync_active_sends:
+            self._sync_active_sends.discard(key)
+            self._refresh_sync_state()
         info = self._send_rows.pop(key, None)
         if not info:
             return
@@ -2237,6 +2251,9 @@ class SyncWindow(QMainWindow):
         行在首次收到进度时创建（此时才得知真实总字节），之后仅更新；
         与同步发送进度行同区（投递区之上），键为相对路径（每文件一行）。
         """
+        if name not in self._sync_active_recvs:
+            self._sync_active_recvs.add(name)
+            self._refresh_sync_state()
         act = I18n.tr('sync_transfer_receive')
         info = self._sync_pull_rows.get(name)
         if info is None:
@@ -2282,6 +2299,9 @@ class SyncWindow(QMainWindow):
         与旧版"文件名 - 完成"同款：动作"接收"、绿色完成 / 橙色失败。
         无进度行（文件极小/拉取立即失败）时同样新增完成/失败记录。
         """
+        if name in self._sync_active_recvs:
+            self._sync_active_recvs.discard(name)
+            self._refresh_sync_state()
         act = I18n.tr('sync_transfer_receive')
         info = self._sync_pull_rows.pop(name, None)
         if info:
@@ -2443,6 +2463,7 @@ class SyncWindow(QMainWindow):
                 count = len([c for c in self.server.clients.values() if c['authenticated']])
             # 主机端显示"已就绪 | 在线: X"，"已就绪"为绿色，其余为系统默认颜色
             self.status_label.setText(f'<span style="color: green;">{I18n.tr("status_ready")}</span> | {I18n.tr("online_count")}: {count}')
+        self._refresh_sync_state()
 
     def _on_status_label_hover(self, enter: bool):
         """主机端连接数标签悬停：显示/隐藏连接端详情浮层"""
@@ -2637,6 +2658,52 @@ class SyncWindow(QMainWindow):
             self.status_label.setText(
                 f'<span style="color: red;">{I18n.tr("status_offline")}</span>')
         self.status_label.setStyleSheet("")
+        self._refresh_sync_state()
+
+    def _has_sync_peer(self) -> bool:
+        """是否存在可同步的在线对端（主机端=已认证连接端；连接端=mesh 直连对端）。"""
+        if self.is_host:
+            if not self.server:
+                return False
+            with self.server._lock:
+                return any(c.get('authenticated')
+                           for c in self.server.clients.values())
+        mesh = getattr(self.client, 'mesh', None)
+        return bool(mesh and mesh.connected_end_ids())
+
+    @Slot()
+    def _refresh_sync_state(self):
+        """刷新文件列表操作栏的总体同步状态。
+
+        等待中 = 仅本端在线（无对端可同步）；同步中 = 有在途的自同步发送/接收
+        （收集模式下另计本端传输队列的在途 + 排队任务）；已同步 = 空闲。
+        """
+        file_list = getattr(self, 'file_list', None)
+        if file_list is None:
+            return
+        if not self._has_sync_peer():
+            state = 'waiting'
+        elif self._sync_active_sends or self._sync_active_recvs:
+            state = 'syncing'
+        elif self._mode != "sync" and (
+                self.transfer_queue.get_active_count()
+                + self.transfer_queue.get_queue_size()
+                + (1 if self._collect_recv_active() else 0)) > 0:
+            # 收集模式没有 sync_ 会话：以本端传输队列（在途 + 排队）为准；
+            # 对端上传到本端由网络线程直接落盘、不占队列，按接收进度行判定
+            state = 'syncing'
+        else:
+            state = 'synced'
+        file_list.set_sync_state(state)
+
+    def _collect_recv_active(self) -> bool:
+        """收集模式是否有在途的文件接收（上传不经过本端传输队列）。"""
+        return any(info.get('action') == '接收'
+                   for info in self._transfer_rows.values())
+
+    def _request_sync_state_refresh(self):
+        """工作线程任务结束后请求刷新：排队回主线程执行，避免跨线程改 UI"""
+        QMetaObject.invokeMethod(self, "_refresh_sync_state", Qt.QueuedConnection)
 
     def _ensure_mesh_status_signals(self):
         """连接 mesh 数据面上下线信号 → 刷新在线指示（同步状态驱动）。
@@ -2703,6 +2770,8 @@ class SyncWindow(QMainWindow):
         self._ensure_chat_wired()
         # 房间就绪：启用顶部拖拽放置区（快捷添加文件到当前同步列表/根目录）
         self._init_drop_zone()
+        # 房间就绪：刷新总体同步状态（主机端无连接端 → 等待中）
+        self._refresh_sync_state()
 
     # ========== 模式切换（同步/收集） ==========
 
@@ -2755,6 +2824,7 @@ class SyncWindow(QMainWindow):
             self.room_card.set_switching(False)
             if self.room_card.mode() != new_mode:
                 self.room_card.set_mode(new_mode, animate=True)
+        self._refresh_sync_state()
 
     def on_client_mode_changed(self, new_mode: str):
         """连接端模式变更（收到主机 MODE_RESP/MODE_SWITCH）"""
@@ -2766,6 +2836,7 @@ class SyncWindow(QMainWindow):
         else:
             with self.transfer_queue.lock:
                 self.transfer_queue.queue.clear()
+        self._refresh_sync_state()
 
     def on_client_perm_changed(self, perm: str):
         """连接端权限变更（收到主机 PERM_UPDATE）：应用只读/读写 UI 状态
@@ -2859,6 +2930,8 @@ class SyncWindow(QMainWindow):
     def on_disconnected(self):
         """断开连接（含心跳超时判定离线）"""
         self._add_record("", I18n.tr('disconnected'), "")
+        self._sync_active_sends.clear()
+        self._sync_active_recvs.clear()
         if self.is_host:
             # 主机端统一显示红色"离线"；恢复默认样式以便下次"在线"绿色正常渲染
             self.status_label.setText(f'<span style="color: red;">{I18n.tr("status_offline")}</span>')
@@ -2867,6 +2940,7 @@ class SyncWindow(QMainWindow):
             # 连接端：在线 = mesh 数据面（同步状态）。管理连接（仅连主机）断开不代表
             # 同步不可用，仅当 mesh 无任何可同步对端时才判"离线"。
             self._refresh_client_online()
+        self._refresh_sync_state()
 
     def on_state_sync_done(self, has_diff: bool):
         """一轮端到端状态对比结束：仅在有差异时写日志（周期对账/建连自动补齐/
@@ -3077,6 +3151,8 @@ class SyncWindow(QMainWindow):
         else:
             # 在表格中添加进度行（接收）
             self._add_transfer_progress(filename, 0, 0, "接收")
+        # 收集模式：接收在途 → 总体状态「同步中」
+        self._refresh_sync_state()
     
     def on_file_receive_progress(self, filename: str, current: int, total: int):
         """文件接收进度（线程安全）"""
@@ -3114,6 +3190,7 @@ class SyncWindow(QMainWindow):
                 self._update_clients_count()
             else:
                 self._show_client_online()
+        self._refresh_sync_state()
 
     def on_remote_file_cancelled(self, filename: str):
         """远程文件接收被取消（线程安全）"""
@@ -3139,6 +3216,7 @@ class SyncWindow(QMainWindow):
                 self._update_clients_count()
             else:
                 self._show_client_online()
+        self._refresh_sync_state()
     
     def on_remote_file_deleted(self, filename: str):
         """远程文件已删除（线程安全）"""
@@ -3183,6 +3261,9 @@ class SyncWindow(QMainWindow):
         # 所有文件都显示进度条（统一逻辑）
         if filename not in self._transfer_rows:
             self._add_transfer_progress(filename, current, total, "发送")
+            # 收集模式下任务也可能由主机转发/连接端上传入队（不经过本窗口的
+            # 入队点）：首个进度到达即点亮「同步中」，收尾由队列空闲回调负责
+            self._refresh_sync_state()
         else:
             # 更新进度
             self._update_transfer_progress(filename, current, total)
@@ -3233,6 +3314,8 @@ class SyncWindow(QMainWindow):
         transfer_key = f"{target_ip}:{filename}"
         if transfer_key not in self._transfer_rows:
             self._add_transfer_progress(filename, current, total, "发送", target_ip)
+            # 转发任务同样由队列驱动：首个进度到达即刷新（收集模式）
+            self._refresh_sync_state()
         else:
             # 更新进度
             self._update_transfer_progress(filename, current, total, target_ip)
@@ -3822,8 +3905,10 @@ class SyncWindow(QMainWindow):
             except Exception as e:
                 self.add_log("错误", f"同步文件失败: {e}")
         
-        # 将任务加入传输队列
+        # 将任务加入传输队列；入队即刷新状态（收集模式据此立即显示同步中），
+        # 任务全部结束后由队列空闲回调回到「已同步」
         self.transfer_queue.add_task('file', sync_file, rel_path)
+        self._refresh_sync_state()
     
     def on_file_deleted(self, file_path: str):
         """文件删除事件（本地操作）"""
@@ -3853,8 +3938,9 @@ class SyncWindow(QMainWindow):
             except Exception as e:
                 self.add_log("错误", f"同步删除失败: {e}")
         
-        # 将任务加入传输队列
+        # 将任务加入传输队列；入队即刷新状态，队列空闲回调负责收尾
         self.transfer_queue.add_task('delete', sync_delete, rel_path)
+        self._refresh_sync_state()
     
     def on_file_renamed(self, old_path: str, new_path: str):
         """文件重命名事件（本地操作）"""
@@ -3885,9 +3971,10 @@ class SyncWindow(QMainWindow):
             except Exception as e:
                 self.add_log("错误", f"同步变更失败: {e}")
         
-        # 将任务加入传输队列
+        # 将任务加入传输队列；入队即刷新状态，队列空闲回调负责收尾
         new_rel_path = os.path.relpath(new_path, self.room_folder).replace('\\', '/')
         self.transfer_queue.add_task('rename', sync_rename, new_rel_path)
+        self._refresh_sync_state()
 
     def on_dir_created(self, dir_path: str):
         """目录创建事件（本地操作）"""
@@ -3912,9 +3999,10 @@ class SyncWindow(QMainWindow):
             except Exception as e:
                 self.add_log("错误", f"同步创建目录失败: {e}")
 
-        # 将任务加入传输队列
+        # 将任务加入传输队列；入队即刷新状态，队列空闲回调负责收尾
         rel_path = os.path.relpath(dir_path, self.room_folder).replace('\\', '/')
         self.transfer_queue.add_task('dir_create', sync_dir_create, rel_path)
+        self._refresh_sync_state()
 
     def _confirm_leave(self) -> bool:
         """退出房间二次确认（勾选「退出且不再询问」后不再弹窗）

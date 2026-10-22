@@ -28,7 +28,7 @@ class Config:
 
     # 应用信息
     APP_NAME = "LANSyncBox Pro"
-    APP_VERSION = "R1.2.0.0"
+    APP_VERSION = "R1.2.1.0"
     # 同步逻辑版本号
     SYNC_LOGIC_VERSION = "26.9C2"
     # 序列号：P(Pro 固定) + 构建年月 YYMM(发布时手改) + . + 平台字母(自动识别) + H(GitHub 发布源固定)
@@ -37,7 +37,7 @@ class Config:
     APP_SERIAL_FULL = ".".join(x for x in (APP_NAME, APP_VERSION, APP_SERIAL) if x)
     APP_VERSION_SERIAL = ".".join(x for x in (APP_VERSION, APP_SERIAL) if x)
     APP_AUTHOR = "Lisselde_E"
-    APP_AUTHOR_LINK = "https://lisseldee.github.io/#1"  # 作者主页链接
+    APP_AUTHOR_LINK = "https://lisseldee.github.io"  # 作者主页链接
     PLATFORM = _PLATFORM
 
     IS_WINDOWS = PLATFORM == 'w'

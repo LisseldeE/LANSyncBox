@@ -804,6 +804,9 @@ class FileStateStore(QObject):
                         self._do_pull(item)
                     except Exception as e:
                         self.log_message.emit(f"拉取任务失败: {e}")
+                        # 异常退出未必已上报结束（如落盘后统计/回调抛错），补一次
+                        # 失败结束，保证接收侧状态（_sync_active_recvs）不残留
+                        self.pull_done.emit(item['name'], False)
             finally:
                 # 拉取结束（成功/失败/未获锁放弃）：解除在途标记，后续轮次可再补拉。
                 # 用 _cond 与 _enqueue_pull 的读侧同步；acquired 在 try 内初始化，

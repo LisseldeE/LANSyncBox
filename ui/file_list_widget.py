@@ -18,10 +18,11 @@ from PySide6.QtWidgets import (
     QFileDialog, QAbstractItemView, QLabel, QPushButton,
     QRubberBand, QGraphicsOpacityEffect, QFrame
 )
-from PySide6.QtCore import (Qt, Signal, QMimeData, QUrl, QPoint, QThread,
-                            QMetaObject, Q_ARG, QRect, QItemSelection,
+from PySide6.QtCore import (Qt, Signal, QMimeData, QUrl, QPoint, QPointF, QThread,
+                            QMetaObject, Q_ARG, QRect, QRectF, QItemSelection,
                             QItemSelectionModel, QTimer, QPropertyAnimation,
-                            QSequentialAnimationGroup, QEasingCurve, QSize)
+                            QSequentialAnimationGroup, QEasingCurve, QSize,
+                            QVariantAnimation, QAbstractAnimation)
 from PySide6.QtGui import (QAction, QIcon, QDrag, QDropEvent, QDragEnterEvent,
                            QDragMoveEvent, QCursor, QColor, QDesktopServices,
                            QPixmap, QPainter)
@@ -71,6 +72,211 @@ _SVG_DELETE = (
     '<path d="M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6"/>'
     '<path d="M10 11v6M14 11v6"/></svg>'
 )
+
+# 总体同步状态图标（操作栏右侧状态胶囊；%C% 占位符替换为状态色）
+# viewBox 紧贴图形外沿（含描边），使渲染后的可见高度与文字墨迹高度一致
+_SVG_SYNC_ARROWS = (
+    '<svg viewBox="2.6 1.6 18.8 20.8" fill="none" stroke="%C%" stroke-width="2" '
+    'stroke-linecap="round" stroke-linejoin="round">'
+    '<path d="M4.2 12a7.8 7.8 0 0 1 13.3-5.5"/>'
+    '<path d="M17.5 2.9v3.7h-3.7"/>'
+    '<path d="M19.8 12a7.8 7.8 0 0 1-13.3 5.5"/>'
+    '<path d="M6.5 21.1v-3.7h3.7"/></svg>'
+)
+_SVG_SYNC_DONE = (
+    '<svg viewBox="2 2 20 20">'
+    '<circle cx="12" cy="12" r="10" fill="%C%"/>'
+    '<path d="M7.6 12.3l2.9 2.9 5.9-6" fill="none" stroke="#ffffff" '
+    'stroke-width="2.1" stroke-linecap="round" stroke-linejoin="round"/></svg>'
+)
+_SVG_SYNC_WAIT = (
+    '<svg viewBox="2.5 2.5 19 19" fill="none" stroke="%C%" stroke-width="2" '
+    'stroke-linecap="round" stroke-linejoin="round">'
+    '<circle cx="12" cy="12" r="8.5"/><path d="M12 7.4V12l3.1 1.9"/></svg>'
+)
+
+
+class SyncStatusChip(QWidget):
+    """文件列表操作栏右侧的总体同步状态指示（三态）。
+
+    - syncing：蓝色双箭头圆环，持续旋转
+    - synced：绿色圆形底板 + 白色对勾
+    - waiting：灰色时钟（仅本端在线、无对端可同步）
+    状态切换用交叉淡入 + 图标轻微缩放过渡；宽度固定为三态文本最大宽度，
+    切换时不会把「已选 N 项」挤动。
+    """
+
+    _STATES = ('syncing', 'synced', 'waiting')
+    _GAP = 5
+    _FADE_MS = 180
+    _SPIN_MS = 1500
+    _FONT_PX = 12
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setAttribute(Qt.WA_TranslucentBackground)
+        self.setFixedHeight(22)
+        f = self.font()
+        f.setPixelSize(self._FONT_PX)
+        self.setFont(f)
+        # 图标边长与字号一致：图标盒与文字行在同一视觉中线上，
+        # 上下各比文字墨迹多出不到 1px，视觉上等高且不会「下方多出一块」
+        self._icon_px = self._FONT_PX
+
+        win = self.palette().color(self.palette().ColorRole.Window)
+        dark = (0.299 * win.red() + 0.587 * win.green()
+                + 0.114 * win.blue()) < 128
+        self._text_color = QColor("#9a9ea6" if dark else "#6c757d")
+        self._icon_color = {
+            'syncing': '#4dabf7',
+            'synced': '#40c057',
+            'waiting': '#8a919b' if dark else '#adb5bd',
+        }
+        self._labels = {
+            'syncing': I18n.tr('sync_state_syncing'),
+            'synced': I18n.tr('sync_state_synced'),
+            'waiting': I18n.tr('sync_state_waiting'),
+        }
+        # 图标与文字都按控件高度居中：两者共用同一条水平中线
+        self._icons = {st: self._render_icon(st) for st in self._STATES}
+
+        self._state = 'waiting'
+        self._prev = None
+        self._progress = 1.0
+        self._angle = 0.0
+        self._fade = None
+
+        # 旋转只作用于 syncing 状态；其余状态静止（等待中为灰色时钟）
+        self._spin = QVariantAnimation(self)
+        self._spin.setStartValue(0.0)
+        self._spin.setEndValue(360.0)
+        self._spin.setDuration(self._SPIN_MS)
+        self._spin.setLoopCount(-1)
+        self._spin.valueChanged.connect(self._on_spin)
+
+        self._fit_width()
+
+    # ---------- 外部接口 ----------
+
+    def set_state(self, state: str):
+        """切换状态（syncing / synced / waiting），带交叉淡入过渡。"""
+        if state not in self._STATES:
+            return
+        if state == self._state and self._progress >= 1.0:
+            return
+        # 先停掉上一段过渡（DeleteWhenStopped 会随之销毁），再改写状态，
+        # 避免上一段的 finished 回调覆盖新过渡的进度
+        if self._fade is not None:
+            self._fade.stop()
+            self._fade = None
+        self._prev = self._state
+        self._state = state
+        self._progress = 0.0
+        fade = QVariantAnimation(self)
+        fade.setStartValue(0.0)
+        fade.setEndValue(1.0)
+        fade.setDuration(self._FADE_MS)
+        fade.setEasingCurve(QEasingCurve.OutCubic)
+        fade.valueChanged.connect(self._on_fade)
+        fade.finished.connect(self._on_fade_done)
+        self._fade = fade
+        fade.start(QVariantAnimation.DeleteWhenStopped)
+        self._apply_spin()
+
+    # ---------- 尺寸与图标 ----------
+
+    def _fit_width(self):
+        """宽度取三态文本最大宽度：切换时不改变宽度，右侧「已选 N 项」不抖动。"""
+        fm = self.fontMetrics()
+        text_w = max(fm.horizontalAdvance(t) for t in self._labels.values())
+        self._text_x = self._icon_px + self._GAP
+        self.setFixedWidth(self._text_x + text_w + 2)
+
+    def _render_icon(self, state: str) -> QPixmap:
+        svg = {'syncing': _SVG_SYNC_ARROWS,
+               'synced': _SVG_SYNC_DONE,
+               'waiting': _SVG_SYNC_WAIT}[state]
+        dpr = self.devicePixelRatioF()
+        size = self._icon_px
+        pix = QPixmap(max(1, int(round(size * dpr))),
+                      max(1, int(round(size * dpr))))
+        pix.setDevicePixelRatio(dpr)
+        pix.fill(Qt.transparent)
+        p = QPainter(pix)
+        p.setRenderHint(QPainter.Antialiasing)
+        renderer = QSvgRenderer(bytearray(
+            svg.replace('%C%', self._icon_color[state]).encode('utf-8')))
+        renderer.render(p, QRectF(0, 0, size, size))
+        p.end()
+        return pix
+
+    # ---------- 动画 ----------
+
+    def _on_fade(self, value):
+        self._progress = float(value)
+        self.update()
+
+    def _on_fade_done(self):
+        self._progress = 1.0
+        self._prev = None
+        self._fade = None
+        self.update()
+
+    def _on_spin(self, value):
+        self._angle = float(value)
+        self.update()
+
+    def _apply_spin(self):
+        if self._state == 'syncing':
+            if self._spin.state() != QAbstractAnimation.Running:
+                self._spin.start()
+        else:
+            self._spin.stop()
+            self._angle = 0.0
+        self.update()
+
+    def showEvent(self, event):
+        super().showEvent(event)
+        self._apply_spin()
+
+    def hideEvent(self, event):
+        self._spin.stop()
+        super().hideEvent(event)
+
+    # ---------- 绘制 ----------
+
+    def paintEvent(self, event):
+        p = QPainter(self)
+        p.setRenderHint(QPainter.Antialiasing)
+        p.setRenderHint(QPainter.SmoothPixmapTransform)
+        if self._prev is not None and self._progress < 1.0:
+            # 旧状态淡出、轻微缩小；新状态淡入、从 0.92 放大到 1
+            self._paint_layer(p, self._prev, 1.0 - self._progress,
+                              1.0 - 0.08 * self._progress)
+            self._paint_layer(p, self._state, self._progress,
+                              0.92 + 0.08 * self._progress)
+        else:
+            self._paint_layer(p, self._state, 1.0, 1.0)
+        p.end()
+
+    def _paint_layer(self, painter, state, alpha, scale):
+        if alpha <= 0.01:
+            return
+        painter.save()
+        painter.setOpacity(alpha)
+        half = self._icon_px / 2.0
+        painter.save()
+        painter.translate(half, self.height() / 2.0)
+        if state == 'syncing':
+            painter.rotate(self._angle)
+        painter.scale(scale, scale)
+        painter.drawPixmap(QPointF(-half, -half), self._icons[state])
+        painter.restore()
+        painter.setPen(self._text_color)
+        painter.drawText(
+            QRect(self._text_x, 0, self.width() - self._text_x, self.height()),
+            Qt.AlignLeft | Qt.AlignVCenter, self._labels[state])
+        painter.restore()
 
 
 class DragableTableWidget(QTableWidget):
@@ -809,6 +1015,11 @@ class FileListWidget(QWidget):
 
         action_bar_layout.addStretch()
 
+        # 右侧：总体同步状态（同步中 / 已同步 / 等待中），由 SyncWindow 驱动
+        self._sync_chip = SyncStatusChip()
+        action_bar_layout.addWidget(self._sync_chip, 0, Qt.AlignVCenter)
+        action_bar_layout.addSpacing(10)
+
         # 右侧状态指示：已选数量（随选中状态实时更新）
         self._sel_status_label = QLabel()
         self._sel_status_label.setStyleSheet(
@@ -916,6 +1127,10 @@ class FileListWidget(QWidget):
             painter.end()
             icon.addPixmap(pix, mode)
         return icon
+
+    def set_sync_state(self, state: str):
+        """设置操作栏总体同步状态：syncing / synced / waiting（由 SyncWindow 驱动）。"""
+        self._sync_chip.set_state(state)
 
     def _update_action_states(self):
         """刷新快捷操作栏按钮启用状态与右侧状态指示（与右键菜单同一套判定逻辑）。"""

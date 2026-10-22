@@ -30,8 +30,22 @@ class TransferQueue:
 
         # 任务ID到文件名的映射（用于取消任务）
         self.task_id_to_filename: Dict[int, str] = {}
+
+        # 队列彻底空闲（在途与排队都为 0）时的回调：依赖队列的状态显示据此刷新。
+        # 队列任务来自多处（UI 文件操作、主机端转发、连接端上传），只有队列自己
+        # 知道"最后一个任务何时结束"，逐个入队点挂回调会漏。
+        self._on_idle: Optional[Callable[[], None]] = None
+
+    def set_idle_callback(self, callback: Optional[Callable[[], None]]):
+        """登记队列彻底空闲时的回调（在任务执行线程内调用）。
+
+        transfer_queue 是跨采集/同步共用的实例，回调应由状态显示方注册一次，
+        避免每个入队点各自传 on_done 造成遗漏（如主机端转发、连接端上传）。
+        """
+        self._on_idle = callback
     
-    def add_task(self, task_type: str, task_func: Callable, filename: str, *args, **kwargs) -> bool:
+    def add_task(self, task_type: str, task_func: Callable, filename: str, *args,
+                 **kwargs) -> bool:
         """
         添加传输任务到队列
 
@@ -66,7 +80,7 @@ class TransferQueue:
                 'filename': filename,
                 'args': args,
                 'kwargs': kwargs,
-                'stop_event': threading.Event()  # 停止标志
+                'stop_event': threading.Event(),  # 停止标志
             }
             self.queue.append(task)
 
@@ -121,6 +135,21 @@ class TransferQueue:
                 
                 # 尝试启动下一个任务（在锁内部调用）
                 self._try_start_task_internal()
+                # 计数、锁、后续任务启动都处理完后再判定：此刻的空闲才是真空闲，
+                # 不会出现"最后一个任务刚结束、下一个已排队"时误报空闲
+                idle = self.active_count == 0 and not self.queue
+            if idle:
+                self._invoke_idle()
+
+    def _invoke_idle(self):
+        """队列彻底空闲时执行回调（异常不影响队列收尾）"""
+        callback = self._on_idle
+        if callback is None:
+            return
+        try:
+            callback()
+        except Exception as e:
+            print(f"传输队列空闲回调失败: {e}")
     
     def cancel_task(self, filename: str):
         """
