@@ -277,6 +277,7 @@ class I18n:
             "cut": "剪切",
             "paste": "粘贴",
             "save_to": "保存至",
+            "locate_item": "定位至此项",
             "choose_save_dir": "选择保存位置",
             "delete": "删除",
             "rename": "重命名",
@@ -288,6 +289,22 @@ class I18n:
 
             # 快捷操作栏状态指示
             "selected_count": "已选 {count} 项",
+
+            # 文件搜索
+            "search": "搜索",
+            "exit_search": "退出搜索",
+            "search_mode": "搜索模式",
+            "search_hint": "输入关键词搜索当前目录及子目录",
+            "search_placeholder": "搜索文件名…",
+            "searching": "搜索中…",
+            "searching_hint": "正在扫描当前目录及子目录",
+            "search_no_results": "未找到匹配项",
+            "search_no_results_hint": "换个关键词试试",
+            "search_items": "项",
+            "search_count": "找到 {count} 项",
+            "search_summary": "找到 {count} 项 · {seconds} 秒",
+            "search_truncated": "仅显示前 200 条",
+            "search_location": "所在位置",
             
             # 拖拽操作
             "drag_add": "添加文件",
@@ -639,6 +656,7 @@ class I18n:
             "cut": "Cut",
             "paste": "Paste",
             "save_to": "Save To",
+            "locate_item": "Locate Item",
             "choose_save_dir": "Select Save Location",
             "delete": "Delete",
             "rename": "Rename",
@@ -650,6 +668,22 @@ class I18n:
 
             # Quick action bar status
             "selected_count": "Selected {count}",
+
+            # File search
+            "search": "Search",
+            "exit_search": "Exit search",
+            "search_mode": "Search mode",
+            "search_hint": "Type to search this folder and subfolders",
+            "search_placeholder": "Search file names…",
+            "searching": "Searching…",
+            "searching_hint": "Scanning this folder and subfolders",
+            "search_no_results": "No matches",
+            "search_no_results_hint": "Try another keyword",
+            "search_items": "items",
+            "search_count": "{count} results",
+            "search_summary": "{count} results · {seconds}s",
+            "search_truncated": "Showing first 200 only",
+            "search_location": "Location",
             
             # Drag operations
             "drag_add": "Add Files",

@@ -8,6 +8,7 @@ Licensed under the GNU General Public License v3.0.
 import os
 import threading
 import shutil
+import time
 from pathlib import Path
 from typing import List, Optional, Set
 from datetime import datetime
@@ -16,22 +17,24 @@ from PySide6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QTableWidget, 
     QTableWidgetItem, QHeaderView, QMenu, QMessageBox, 
     QFileDialog, QAbstractItemView, QLabel, QPushButton,
-    QRubberBand, QGraphicsOpacityEffect, QFrame
+    QRubberBand, QGraphicsOpacityEffect, QFrame,
+    QStyledItemDelegate, QStyle, QStyleOptionViewItem
 )
 from PySide6.QtCore import (Qt, Signal, QMimeData, QUrl, QPoint, QPointF, QThread,
                             QMetaObject, Q_ARG, QRect, QRectF, QItemSelection,
                             QItemSelectionModel, QTimer, QPropertyAnimation,
                             QSequentialAnimationGroup, QEasingCurve, QSize,
-                            QVariantAnimation, QAbstractAnimation)
+                            QVariantAnimation, QAbstractAnimation, QEvent)
 from PySide6.QtGui import (QAction, QIcon, QDrag, QDropEvent, QDragEnterEvent,
                            QDragMoveEvent, QCursor, QColor, QDesktopServices,
-                           QPixmap, QPainter)
+                           QPixmap, QPainter, QFontMetrics, QPalette, QBrush)
 from PySide6.QtSvg import QSvgRenderer
 from PySide6.QtWidgets import QApplication
 
 from i18n import I18n
 from config import Config
 from ui.widgets import BUTTON_STYLES, UnderlineEdit
+from ui.file_search import FileSearchWorker
 
 
 # 快捷操作栏图标（轻量线条风格 SVG，%C% 占位符在渲染时替换为实际颜色）
@@ -71,6 +74,17 @@ _SVG_DELETE = (
     '<path d="M3 6h18"/><path d="M8 6V4a1 1 0 0 1 1-1h6a1 1 0 0 1 1 1v2"/>'
     '<path d="M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6"/>'
     '<path d="M10 11v6M14 11v6"/></svg>'
+)
+_SVG_SEARCH = (
+    '<svg viewBox="0 0 24 24" fill="none" stroke="%C%" stroke-width="1.8" '
+    'stroke-linecap="round" stroke-linejoin="round">'
+    '<circle cx="10.5" cy="10.5" r="6.5"/><path d="M15.4 15.4L21 21"/></svg>'
+)
+# 搜索态退出图标：红色叉号（%C% 固定替换为警示红）
+_SVG_SEARCH_CLOSE = (
+    '<svg viewBox="0 0 24 24" fill="none" stroke="%C%" stroke-width="2.2" '
+    'stroke-linecap="round" stroke-linejoin="round">'
+    '<path d="M6 6l12 12"/><path d="M18 6L6 18"/></svg>'
 )
 
 # 总体同步状态图标（操作栏右侧状态胶囊；%C% 占位符替换为状态色）
@@ -347,6 +361,9 @@ class DragableTableWidget(QTableWidget):
         self._chat_zone = False
         self._chat_zone_ratio = 2.0 / 3.0
 
+        # 搜索态禁止拖入（结果列表是筛选视图，不允许写入）
+        self.drop_blocked = False
+
     def _set_chat_zone(self, val: bool):
         """置位私信分区态；变化时发信号（联动私信手柄预展开/收起）。"""
         if self._chat_zone != val:
@@ -549,6 +566,9 @@ class DragableTableWidget(QTableWidget):
     
     def dragEnterEvent(self, event):
         """拖拽进入事件"""
+        if self.drop_blocked:
+            event.ignore()
+            return
         if event.mimeData().hasUrls():
             self._update_drop_indicator(event.pos())
             event.acceptProposedAction()
@@ -557,6 +577,9 @@ class DragableTableWidget(QTableWidget):
     
     def dragMoveEvent(self, event):
         """拖拽移动事件"""
+        if self.drop_blocked:
+            event.ignore()
+            return
         if event.mimeData().hasUrls():
             # 实时更新目标行高亮与提示
             self._update_drop_indicator(event.pos())
@@ -571,6 +594,9 @@ class DragableTableWidget(QTableWidget):
     
     def dropEvent(self, event):
         """拖拽放下事件"""
+        if self.drop_blocked:
+            event.ignore()
+            return
         if event.mimeData().hasUrls():
             # 私信分区：右侧 1/3 松手 → 交私信面板处理（不加入同步列表）
             in_chat = self._chat_zone
@@ -813,6 +839,86 @@ class FileCopyWorker(QThread):
         self._is_cancelled = True
 
 
+# 搜索结果名称列的自定义数据角色（与 Qt.UserRole 的绝对路径并存）
+SEARCH_NAME_ROLE = Qt.UserRole + 1
+
+
+class _SearchNameDelegate(QStyledItemDelegate):
+    """搜索结果名称列：命中关键词高亮；非搜索态完全沿用默认绘制。
+
+    FileListWidget 的列 0 始终安装本委托：只有携带 SEARCH_NAME_ROLE 且
+    keyword 非空时才接管绘制，保证普通文件列表外观零变化。
+    """
+
+    def __init__(self, parent=None, dark: bool = False):
+        super().__init__(parent)
+        self.keyword = ""
+        # 表格自身带透明背景样式，其 QPalette.Window 会被算成黑色，
+        # 因此主题明暗由 FileListWidget 创建时传入，而不是从 option.palette 推断
+        self.dark = dark
+
+    def paint(self, painter, option, index):
+        name = index.data(SEARCH_NAME_ROLE)
+        keyword = self.keyword
+        if not keyword or not name:
+            super().paint(painter, option, index)
+            return
+
+        opt = QStyleOptionViewItem(option)
+        self.initStyleOption(opt, index)
+        opt.text = ""
+        style = opt.widget.style() if opt.widget else QApplication.style()
+        style.drawControl(QStyle.CE_ItemViewItem, opt, painter, opt.widget)
+
+        text_rect = style.subElementRect(
+            QStyle.SE_ItemViewItemText, opt, opt.widget)
+        if text_rect.width() <= 0:
+            return
+
+        fm = QFontMetrics(opt.font)
+        text = str(name)
+        idx = text.lower().find(keyword.lower())
+        selected = bool(opt.state & QStyle.State_Selected)
+        if selected:
+            base_color = opt.palette.color(QPalette.HighlightedText)
+            hit_color = base_color
+        else:
+            base_color = opt.palette.color(QPalette.Text)
+            # 与全局交互主色（#339af0）保持一致；深色背景用更亮的同色阶
+            hit_color = (QColor("#4dabf7") if self.dark
+                         else QColor("#339af0"))
+
+        painter.save()
+        painter.setClipRect(text_rect)
+        painter.setFont(opt.font)
+
+        if fm.horizontalAdvance(text) <= text_rect.width():
+            segments = []
+            if idx < 0:
+                segments.append((text, base_color))
+            else:
+                if idx > 0:
+                    segments.append((text[:idx], base_color))
+                segments.append((text[idx:idx + len(keyword)], hit_color))
+                if idx + len(keyword) < len(text):
+                    segments.append((text[idx + len(keyword):], base_color))
+
+            x = text_rect.left()
+            y = (text_rect.top()
+                 + (text_rect.height() + fm.ascent() - fm.descent()) // 2)
+            for segment, color in segments:
+                painter.setPen(color)
+                painter.drawText(x, y, segment)
+                x += fm.horizontalAdvance(segment)
+        else:
+            painter.setPen(base_color)
+            painter.drawText(
+                text_rect, Qt.AlignVCenter | Qt.AlignLeft,
+                fm.elidedText(text, Qt.ElideMiddle, text_rect.width()))
+
+        painter.restore()
+
+
 class FileListWidget(QWidget):
     """文件列表组件"""
 
@@ -842,6 +948,19 @@ class FileListWidget(QWidget):
         
         # 标记是否正在接收远程文件（刷新文件列表时不触发同步）
         self._receiving_remote = False
+
+        # ========== 搜索模式状态 ==========
+        self._search_mode = False
+        self._search_generation = 0        # 代际号：只接受最新一次搜索的结果
+        self._search_keyword = ""
+        self._search_results = []
+        self._search_summary = ""
+        self._search_worker = None
+        self._search_workers = []          # 在途 worker，关闭时逐个取消
+        self._search_debounce = QTimer(self)
+        self._search_debounce.setSingleShot(True)
+        self._search_debounce.setInterval(250)
+        self._search_debounce.timeout.connect(self._run_search)
 
         # 顶部悬浮提示的停留时长（毫秒），演示/测试时可调慢
         self._toast_hold_ms = 1500
@@ -932,6 +1051,14 @@ class FileListWidget(QWidget):
     
     def init_ui(self):
         """初始化界面"""
+        # 主题适配图标颜色（与表格选中色同一套亮度判定）
+        # 提前计算：工具栏搜索按钮与下方快捷操作栏共用同一套图标色
+        _win = self.palette().color(self.palette().ColorRole.Window)
+        _lum = 0.299 * _win.red() + 0.587 * _win.green() + 0.114 * _win.blue()
+        self._act_icon = "#212529" if _lum > 128 else "#e9ecef"
+        self._act_icon_disabled = "#b9bec6" if _lum > 128 else "#4f545b"
+        self._act_hover = "rgba(0, 0, 0, 0.06)" if _lum > 128 else "rgba(255, 255, 255, 0.09)"
+
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(5)
@@ -958,6 +1085,24 @@ class FileListWidget(QWidget):
         _bar_h = self.path_edit.sizeHint().height()
         self.back_btn.setFixedHeight(_bar_h)
         self.path_edit.setFixedHeight(_bar_h)
+
+        # 搜索按钮（路径框右侧）：点击进入/退出搜索模式
+        self.search_btn = QPushButton(self)
+        self.search_btn.setToolTip(I18n.tr('search'))
+        self.search_btn.setFixedSize(30, _bar_h)
+        self.search_btn.setCursor(Qt.PointingHandCursor)
+        self.search_btn.setIcon(self._render_svg_icon(_SVG_SEARCH))
+        self.search_btn.setIconSize(QSize(16, 16))
+        self.search_btn.setStyleSheet(f"""
+            QPushButton {{ background: transparent; border: none; border-radius: 6px; }}
+            QPushButton:hover {{ background: {self._act_hover}; }}
+        """)
+        self.search_btn.clicked.connect(self.toggle_search_mode)
+        toolbar_layout.addWidget(self.search_btn)
+
+        # 搜索输入：路径框在搜索态切换为可编辑；回车立即搜索、Esc 退出
+        self.path_edit.installEventFilter(self)
+        self.path_edit.textChanged.connect(self._on_search_text_changed)
         
         # 刷新按钮（已注释：远程/本地变化均有自动刷新，此手动按钮冗余，暂不删除、保留逻辑）
         # refresh_btn = QPushButton(I18n.tr('refresh'))
@@ -972,13 +1117,6 @@ class FileListWidget(QWidget):
         action_bar_layout = QHBoxLayout(action_bar)
         action_bar_layout.setContentsMargins(6, 2, 6, 2)
         action_bar_layout.setSpacing(2)
-
-        # 主题适配图标颜色（与表格选中色同一套亮度判定）
-        _win = self.palette().color(self.palette().ColorRole.Window)
-        _lum = 0.299 * _win.red() + 0.587 * _win.green() + 0.114 * _win.blue()
-        self._act_icon = "#212529" if _lum > 128 else "#e9ecef"
-        self._act_icon_disabled = "#b9bec6" if _lum > 128 else "#4f545b"
-        self._act_hover = "rgba(0, 0, 0, 0.06)" if _lum > 128 else "rgba(255, 255, 255, 0.09)"
 
         self._new_folder_btn = self._make_action_btn(
             _SVG_NEW_FOLDER, I18n.tr('new_folder'), self.on_new_folder)
@@ -1089,6 +1227,31 @@ class FileListWidget(QWidget):
         self.drag_hint_label.setParent(self.table)  # 设置父控件为表格
         self.drag_hint_label.hide()  # 默认隐藏
 
+        # 搜索空态覆盖层（父控件为表格，透明鼠标，不拦截选择/拖拽）
+        self._search_overlay = QWidget(self.table)
+        self._search_overlay.setAttribute(Qt.WA_TransparentForMouseEvents)
+        overlay_layout = QVBoxLayout(self._search_overlay)
+        overlay_layout.setContentsMargins(20, 20, 20, 20)
+        overlay_layout.setSpacing(6)
+        self._search_title = QLabel()
+        self._search_title.setAlignment(Qt.AlignCenter)
+        self._search_subtitle = QLabel()
+        self._search_subtitle.setAlignment(Qt.AlignCenter)
+        title_color = self.palette().color(QPalette.Text).name()
+        subtitle_color = self.palette().color(QPalette.PlaceholderText).name()
+        self._search_title.setStyleSheet(
+            f"color: {title_color}; font-size: 16px; font-weight: 600;")
+        self._search_subtitle.setStyleSheet(
+            f"color: {subtitle_color}; font-size: 12px;")
+        overlay_layout.addWidget(self._search_title)
+        overlay_layout.addWidget(self._search_subtitle)
+        self._search_overlay.hide()
+
+        # 名称列委托：搜索态高亮命中片段，普通列表走默认绘制
+        self._name_delegate = _SearchNameDelegate(
+            self.table, dark=_lum <= 128)
+        self.table.setItemDelegateForColumn(0, self._name_delegate)
+
         # 更新路径显示
         self.update_path_display()
 
@@ -1114,11 +1277,17 @@ class FileListWidget(QWidget):
         btn.clicked.connect(slot)
         return btn
 
-    def _render_svg_icon(self, svg: str) -> QIcon:
-        """将线条 SVG 渲染为带 Normal/Disabled 双模式的 QIcon（2 倍尺寸，高分屏清晰）。"""
+    def _render_svg_icon(self, svg: str, normal: str = None,
+                         disabled: str = None) -> QIcon:
+        """将线条 SVG 渲染为带 Normal/Disabled 双模式的 QIcon（2 倍尺寸，高分屏清晰）。
+
+        normal / disabled 省略时沿用操作栏的主题图标色；搜索按钮的红色叉号单独指定。
+        """
         icon = QIcon()
-        for mode, color in ((QIcon.Normal, self._act_icon),
-                            (QIcon.Disabled, self._act_icon_disabled)):
+        for mode, color in (
+            (QIcon.Normal, normal or self._act_icon),
+            (QIcon.Disabled, disabled or self._act_icon_disabled),
+        ):
             renderer = QSvgRenderer(bytearray(svg.replace('%C%', color).encode('utf-8')))
             pix = QPixmap(36, 36)
             pix.fill(Qt.transparent)
@@ -1145,19 +1314,357 @@ class FileListWidget(QWidget):
             self._rename_btn.setEnabled(False)
             self._delete_btn.setEnabled(False)
         else:
-            self._new_folder_btn.setEnabled(not has_selection)
+            # 搜索态没有“当前目录”语义，新建与粘贴一律禁用
+            self._new_folder_btn.setEnabled(
+                not has_selection and not self._search_mode)
             self._copy_btn.setEnabled(has_selection)
             self._cut_btn.setEnabled(has_selection)
-            self._paste_btn.setEnabled(len(self.clipboard_files) > 0)
+            self._paste_btn.setEnabled(
+                not self._search_mode and len(self.clipboard_files) > 0)
             self._rename_btn.setEnabled(len(selected_rows) == 1)
             self._delete_btn.setEnabled(has_selection)
 
-        # 右侧状态指示：已选数量
-        self._sel_status_label.setText(
-            I18n.tr('selected_count', count=len(selected_rows)))
-    
+        # 右侧状态指示：有选中项时显示已选数量；搜索态未选中时回落到扫描结果
+        if self._search_mode and not selected_rows:
+            self._sel_status_label.setText(self._search_summary)
+        else:
+            self._sel_status_label.setText(
+                I18n.tr('selected_count', count=len(selected_rows)))
+
+    # ========== 搜索模式 ==========
+
+    def toggle_search_mode(self):
+        """搜索按钮：进入或退出搜索模式。"""
+        if self._search_mode:
+            self.exit_search_mode()
+        else:
+            self.enter_search_mode()
+
+    def enter_search_mode(self):
+        """进入搜索：路径框变为输入框，列表清空并显示「搜索模式」空态。"""
+        if self._search_mode:
+            return
+
+        self._search_mode = True
+        self._search_generation += 1
+        self._search_keyword = ""
+        self._search_results = []
+        self._search_summary = ""
+
+        self.table.setRowCount(0)
+        self.table.clearSelection()
+        self.table.drop_blocked = True
+        self.drag_hint_label.hide()
+        self.back_btn.setEnabled(False)
+        self.search_btn.setToolTip(I18n.tr('exit_search'))
+        self.search_btn.setIcon(
+            self._render_svg_icon(_SVG_SEARCH_CLOSE, "#e03131", "#e03131"))
+
+        self.path_edit.setReadOnly(False)
+        self.path_edit.setPlaceholderText(I18n.tr('search_placeholder'))
+        self.path_edit.clear()
+
+        self._update_action_states()
+        self._show_search_overlay(I18n.tr('search_mode'),
+                                  I18n.tr('search_hint'))
+        self._update_search_summary("")
+        self.path_edit.setFocus()
+
+    def exit_search_mode(self):
+        """退出搜索：恢复路径、列头、目录列表与按钮状态。"""
+        if not self._search_mode:
+            return
+
+        self._search_debounce.stop()
+        self._search_generation += 1
+        self._cancel_search_worker()
+
+        self._search_mode = False
+        self._search_keyword = ""
+        self._search_results = []
+        self._search_summary = ""
+        self._hide_search_overlay()
+
+        self.search_btn.setToolTip(I18n.tr('search'))
+        self.search_btn.setIcon(self._render_svg_icon(_SVG_SEARCH))
+        self.table.drop_blocked = False
+        self.path_edit.setReadOnly(True)
+        self.path_edit.setPlaceholderText("")
+        self.path_edit.blockSignals(True)
+        self.path_edit.clear()
+        self.path_edit.blockSignals(False)
+        self.update_path_display()
+
+        self.table.setHorizontalHeaderLabels([
+            I18n.tr('file_name'),
+            I18n.tr('file_size'),
+            I18n.tr('file_modified'),
+        ])
+        self._name_delegate.keyword = ""
+
+        self._refresh_after_mutation()
+        self._update_action_states()
+        self.table.setFocus()
+
+    def eventFilter(self, obj, event):
+        """搜索输入框的 Esc / Enter 处理。"""
+        if obj is self.path_edit and self._search_mode:
+            if event.type() == QEvent.KeyPress:
+                key = event.key()
+                if key == Qt.Key_Escape:
+                    self.exit_search_mode()
+                    return True
+                if key in (Qt.Key_Return, Qt.Key_Enter):
+                    self._search_debounce.stop()
+                    self._run_search()
+                    return True
+        return super().eventFilter(obj, event)
+
+    def _on_search_text_changed(self, text):
+        """关键词变化：空则回到搜索空态，非空则去抖后启动扫描。"""
+        if not self._search_mode:
+            return
+
+        # 每次输入变化立即作废旧任务与旧结果代际，避免迟到结果覆盖
+        self._search_generation += 1
+        self._search_debounce.stop()
+        self._cancel_search_worker()
+
+        keyword = (text or "").strip()
+        self._search_keyword = keyword
+
+        if not keyword:
+            self._search_results = []
+            self.table.setRowCount(0)
+            self._update_search_summary("")
+            self._show_search_overlay(I18n.tr('search_mode'),
+                                      I18n.tr('search_hint'))
+            self._update_action_states()
+            return
+
+        self._update_search_summary(I18n.tr('searching'))
+        if not self._search_results:
+            self._show_search_overlay(I18n.tr('searching'),
+                                      I18n.tr('searching_hint'))
+        self._search_debounce.start()
+
+    def _run_search(self):
+        """启动一次后台扫描（代际号保证只接受本次结果）。"""
+        if not self._search_mode or not self._search_keyword:
+            return
+
+        self._search_debounce.stop()
+        self._search_generation += 1
+        self._cancel_search_worker()
+
+        generation = self._search_generation
+        worker = FileSearchWorker(
+            self.current_path, self._search_keyword, generation, self)
+        self._search_worker = worker
+        self._search_workers.append(worker)
+        worker.results_ready.connect(self._on_search_results)
+        worker.finished.connect(
+            lambda w=worker: self._on_search_worker_finished(w))
+
+        self._search_started_at = time.monotonic()
+        self._update_search_summary(I18n.tr('searching'))
+        worker.start()
+
+    def _on_search_results(self, generation, results, scanned, truncated):
+        """接收后台扫描结果：代际不匹配直接丢弃。"""
+        if not self._search_mode or generation != self._search_generation:
+            return
+
+        self._search_results = results or []
+        started = getattr(self, '_search_started_at', time.monotonic())
+        elapsed = max(0.0, time.monotonic() - started)
+        self._populate_search_results(self._search_results, truncated, elapsed)
+
+    def _populate_search_results(self, results, truncated, elapsed):
+        """渲染版本 C 结果：目录分组 + 命中高亮 + 所在位置列。"""
+        self.table.setHorizontalHeaderLabels([
+            I18n.tr('file_name'),
+            I18n.tr('file_size'),
+            I18n.tr('search_location'),
+        ])
+        self._name_delegate.keyword = self._search_keyword
+
+        self.table.setUpdatesEnabled(False)
+        try:
+            self.table.clearContents()
+            self.table.setRowCount(0)
+
+            if not results:
+                self._show_search_overlay(
+                    I18n.tr('search_no_results'),
+                    I18n.tr('search_no_results_hint'))
+                self._update_search_summary(
+                    I18n.tr('search_count', count=0))
+                return
+
+            groups = []
+            for item_data in results:
+                parent = item_data.get('parent') or '.'
+                if not groups or groups[-1][0] != parent:
+                    groups.append((parent, []))
+                groups[-1][1].append(item_data)
+
+            header_color = self.palette().color(QPalette.PlaceholderText)
+            row = 0
+            for parent, group_items in groups:
+                display_parent = self._display_search_parent(parent)
+
+                header_item = QTableWidgetItem(
+                    f"{display_parent} · {len(group_items)} "
+                    f"{I18n.tr('search_items')}")
+                header_item.setFlags(Qt.NoItemFlags)
+                header_item.setForeground(QBrush(header_color))
+                header_font = header_item.font()
+                header_font.setBold(True)
+                header_item.setFont(header_font)
+                self.table.insertRow(row)
+                self.table.setItem(row, 0, header_item)
+                # 其余列也放入不可选中的空 item：否则框选会高亮组头行的
+                # 「大小」「所在位置」单元格（空单元格默认可选）
+                for col in (1, 2):
+                    filler = QTableWidgetItem("")
+                    filler.setFlags(Qt.NoItemFlags)
+                    self.table.setItem(row, col, filler)
+                row += 1
+
+                for item_data in group_items:
+                    is_dir = bool(item_data.get('is_dir'))
+                    abs_path = str(item_data.get('path') or '')
+                    name = str(item_data.get('name') or '')
+
+                    self.table.insertRow(row)
+                    name_item = QTableWidgetItem("")
+                    name_item.setIcon(QIcon.fromTheme(
+                        "folder" if is_dir else "text-x-generic"))
+                    name_item.setData(Qt.UserRole, abs_path)
+                    name_item.setData(SEARCH_NAME_ROLE, name)
+                    name_item.setToolTip(abs_path)
+                    self.table.setItem(row, 0, name_item)
+
+                    if is_dir:
+                        size_text = "—"
+                    else:
+                        size_text = self.format_size(
+                            int(item_data.get('size') or 0))
+                    size_item = QTableWidgetItem(size_text)
+                    size_item.setTextAlignment(Qt.AlignRight | Qt.AlignVCenter)
+                    self.table.setItem(row, 1, size_item)
+
+                    location_item = QTableWidgetItem(display_parent)
+                    self.table.setItem(row, 2, location_item)
+                    row += 1
+
+            self.table.clearSelection()
+            self._hide_search_overlay()
+
+            summary = I18n.tr('search_summary', count=len(results),
+                              seconds=f"{elapsed:.2f}")
+            if truncated:
+                summary = f"{summary} · {I18n.tr('search_truncated')}"
+            self._update_search_summary(summary)
+        finally:
+            self.table.setUpdatesEnabled(True)
+
+    @staticmethod
+    def _display_search_parent(parent: str) -> str:
+        """相对目录显示：根目录用 /。"""
+        return "/" if parent in ("", ".") else parent
+
+    def _show_search_overlay(self, title: str, subtitle: str):
+        """显示表格中央的搜索空态。"""
+        self._search_title.setText(title)
+        self._search_subtitle.setText(subtitle)
+        self._search_subtitle.setVisible(bool(subtitle))
+        self._search_overlay.show()
+        self._center_search_overlay()
+        self._search_overlay.raise_()
+
+    def _hide_search_overlay(self):
+        self._search_overlay.hide()
+
+    def _center_search_overlay(self):
+        """把搜索空态覆盖层居中于表格可视区域。"""
+        if self._search_overlay.isHidden():
+            return
+        hint = self._search_overlay.sizeHint()
+        width = min(max(hint.width(), 200), max(self.table.width() - 40, 200))
+        height = hint.height()
+        self._search_overlay.resize(width, height)
+        x = max(0, (self.table.width() - width) // 2)
+        y = max(0, (self.table.height() - height) // 2)
+        self._search_overlay.move(x, y)
+
+    def _update_search_summary(self, text: str):
+        self._search_summary = text or ""
+        # 有选中项时右上角显示已选数量，摘要只作后备，等取消选中后再呈现
+        if self._search_mode and not self.table.selectionModel().selectedRows():
+            self._sel_status_label.setText(self._search_summary)
+
+    def _refresh_after_mutation(self):
+        """本地增删改完成后刷新视图：搜索态重新扫描，普通态刷新当前目录。"""
+        if not self._search_mode:
+            self.load_files()
+            return
+        # 结果已失效：按当前关键词重新扫描（操作后的文件可能不再匹配而消失）
+        self._search_results = []
+        if self._search_keyword:
+            self._run_search()
+        else:
+            self.table.setRowCount(0)
+            self._show_search_overlay(I18n.tr('search_mode'),
+                                      I18n.tr('search_hint'))
+            self._update_search_summary("")
+        self._update_action_states()
+
+    def _cancel_search_worker(self):
+        """取消当前搜索任务（不阻塞等待）。"""
+        worker = self._search_worker
+        self._search_worker = None
+        if worker is not None:
+            try:
+                worker.cancel()
+            except Exception:
+                pass
+
+    def _on_search_worker_finished(self, worker):
+        """worker 结束后解除引用，避免 QThread 对象泄漏。"""
+        try:
+            if worker in self._search_workers:
+                self._search_workers.remove(worker)
+        except ValueError:
+            pass
+        if self._search_worker is worker:
+            self._search_worker = None
+        worker.deleteLater()
+
+    def shutdown_search(self):
+        """窗口关闭时取消并限时等待所有在途扫描。"""
+        self._search_debounce.stop()
+        workers = list(self._search_workers)
+        for worker in workers:
+            try:
+                worker.cancel()
+            except Exception:
+                pass
+        for worker in workers:
+            try:
+                if worker.isRunning():
+                    worker.wait(500)
+            except Exception:
+                pass
+        self._search_workers = []
+        self._search_worker = None
+
     def load_files(self):
         """加载文件列表"""
+        # 搜索态下远程刷新/本地刷新不打断搜索结果
+        if self._search_mode:
+            return
         self.table.setRowCount(0)
 
         # 当前目录可能已被远程删除/改名：自动回退到最近的仍存在的祖先目录
@@ -1371,6 +1878,9 @@ class FileListWidget(QWidget):
             self._center_toast()
         if self.drag_hint_label.isVisible():
             self._show_drag_hint()
+        if (getattr(self, '_search_overlay', None) is not None
+                and self._search_overlay.isVisible()):
+            self._center_search_overlay()
 
     def format_size(self, size: int) -> str:
         """格式化文件大小"""
@@ -1382,6 +1892,8 @@ class FileListWidget(QWidget):
     
     def update_path_display(self):
         """更新路径显示"""
+        if self._search_mode:
+            return
         try:
             relative_path = self.current_path.relative_to(self.folder_path)
             self.path_edit.setText(str(relative_path) if str(relative_path) != "." else "/")
@@ -1393,6 +1905,8 @@ class FileListWidget(QWidget):
     
     def go_back(self):
         """返回上级目录"""
+        if self._search_mode:
+            return
         if self.current_path != self.folder_path:
             self.current_path = self.current_path.parent
             self.load_files()
@@ -1403,14 +1917,23 @@ class FileListWidget(QWidget):
         item = self.table.item(row, 0)
         if not item:
             return
-        
-        path = Path(item.data(Qt.UserRole))
-        
+
+        raw_path = item.data(Qt.UserRole)
+        if not raw_path:
+            # 搜索结果的目录组头行，不参与打开/导航
+            return
+
+        path = Path(raw_path)
+
         if path.is_dir():
-            # 进入文件夹
-            self.current_path = path
-            self.load_files()
-            self.update_path_display()
+            # 进入文件夹：搜索态先退出，再导航到目标目录
+            if self._search_mode:
+                self.current_path = path
+                self.exit_search_mode()
+            else:
+                self.current_path = path
+                self.load_files()
+                self.update_path_display()
         else:
             # 双击文件：复制到预览目录后打开（只读预览模式）
             try:
@@ -1461,30 +1984,72 @@ class FileListWidget(QWidget):
     
     def show_context_menu(self, pos: QPoint):
         """显示右键菜单"""
+        self._select_row_at(pos)
+        menu = self._build_context_menu(pos)
+        menu.exec(self.table.viewport().mapToGlobal(pos))
+
+    def _select_row_at(self, pos: QPoint):
+        """右键落在条目行上时先选中该行（与资源管理器一致）；组头/空白不改变选中。"""
+        index = self.table.indexAt(pos)
+        if not index.isValid():
+            return
+        row_item = self.table.item(index.row(), 0)
+        if row_item is None or not row_item.data(Qt.UserRole):
+            return
+        if not self.table.selectionModel().isRowSelected(
+                index.row(), self.table.rootIndex()):
+            self.table.selectRow(index.row())
+            self._update_action_states()
+
+    def _build_context_menu(self, pos: QPoint) -> QMenu:
+        """构建右键菜单（不弹出）。"""
         menu = QMenu(self)
+
+        # 右键是否落在条目行上（结果组头行与空白区域均为 False）
+        index = self.table.indexAt(pos)
+        on_item = False
+        if index.isValid():
+            row_item = self.table.item(index.row(), 0)
+            on_item = row_item is not None and bool(row_item.data(Qt.UserRole))
 
         # 是否有选中的文件（用于控制菜单项的启用状态）
         has_selection = len(self.get_selected_files()) > 0
+        selected_rows = self.table.selectionModel().selectedRows()
         ro = self._readonly
+        # 搜索态禁止外部添加与粘贴：结果列表是筛选视图，写入会让结果与实际目录错位
+        search = self._search_mode
 
-        # 添加文件（选中文件时禁用；只读时禁用）
+        # 搜索态：条目行首项为「定位至此项」，空白区域首项为「退出搜索」
+        if search:
+            if on_item:
+                locate_action = QAction(I18n.tr('locate_item'), self)
+                locate_action.triggered.connect(self._locate_selected_item)
+                locate_action.setEnabled(len(selected_rows) == 1)
+                menu.addAction(locate_action)
+            else:
+                exit_action = QAction(I18n.tr('exit_search'), self)
+                exit_action.triggered.connect(self.exit_search_mode)
+                menu.addAction(exit_action)
+            menu.addSeparator()
+
+        # 添加文件（选中文件时禁用；只读或搜索态禁用）
         add_file_action = QAction(I18n.tr('drag_add'), self)
         add_file_action.triggered.connect(self.on_add_files)
-        add_file_action.setEnabled(not has_selection and not ro)
+        add_file_action.setEnabled(not has_selection and not ro and not search)
         menu.addAction(add_file_action)
 
-        # 添加文件夹（选中文件时禁用；只读时禁用）
+        # 添加文件夹（选中文件时禁用；只读或搜索态禁用）
         add_folder_action = QAction(I18n.tr('add_folder'), self)
         add_folder_action.triggered.connect(self.on_add_folder)
-        add_folder_action.setEnabled(not has_selection and not ro)
+        add_folder_action.setEnabled(not has_selection and not ro and not search)
         menu.addAction(add_folder_action)
 
         menu.addSeparator()
 
-        # 新建文件夹（选中文件时禁用；只读时禁用）
+        # 新建文件夹（选中文件时禁用；只读或搜索态禁用）
         new_folder_action = QAction(I18n.tr('new_folder'), self)
         new_folder_action.triggered.connect(self.on_new_folder)
-        new_folder_action.setEnabled(not has_selection and not ro)
+        new_folder_action.setEnabled(not has_selection and not ro and not search)
         menu.addAction(new_folder_action)
 
         menu.addSeparator()
@@ -1501,10 +2066,11 @@ class FileListWidget(QWidget):
         cut_action.setEnabled(has_selection and not ro)
         menu.addAction(cut_action)
 
-        # 粘贴（只读时禁用）
+        # 粘贴（只读或搜索态禁用）
         paste_action = QAction(I18n.tr('paste'), self)
         paste_action.triggered.connect(self.paste_files)
-        paste_action.setEnabled(len(self.clipboard_files) > 0 and not ro)
+        paste_action.setEnabled(len(self.clipboard_files) > 0 and not ro
+                                and not search)
         menu.addAction(paste_action)
 
         menu.addSeparator()
@@ -1526,12 +2092,38 @@ class FileListWidget(QWidget):
         # 重命名（只读时禁用） - 检查选中的行数
         rename_action = QAction(I18n.tr('rename'), self)
         rename_action.triggered.connect(self.rename_file)
-        selected_rows = self.table.selectionModel().selectedRows()
         rename_action.setEnabled(len(selected_rows) == 1 and not ro)
         menu.addAction(rename_action)
-        
-        menu.exec(self.table.viewport().mapToGlobal(pos))
-    
+
+        return menu
+
+    def _locate_selected_item(self):
+        """搜索态：退出搜索并跳转到选中项所在目录，选中该项。
+
+        与结果中的「所在位置」列一致，定位目标是该项的父目录（文件夹亦然），
+        因此文件与文件夹都按“在列表中选中”处理，而不是进入文件夹。
+        """
+        if not self._search_mode:
+            return
+        files = self.get_selected_files()
+        if len(files) != 1:
+            return
+
+        target = files[0]
+        self.current_path = target.parent
+        # exit_search_mode 内部会 load_files() 重建父目录列表
+        self.exit_search_mode()
+
+        for row in range(self.table.rowCount()):
+            item = self.table.item(row, 0)
+            if item is not None and item.data(Qt.UserRole) == str(target):
+                self.table.selectRow(row)
+                self.table.scrollToItem(item,
+                                        QAbstractItemView.PositionAtCenter)
+                self.table.setFocus()
+                break
+        self._update_action_states()
+
     def get_selected_files(self) -> List[Path]:
         """获取选中的文件列表"""
         files = []
@@ -1557,8 +2149,13 @@ class FileListWidget(QWidget):
         """粘贴文件（使用进度对话框避免界面卡死）"""
         if not self.clipboard_files:
             return
+        # 搜索态是筛选视图，没有明确的“当前目录”，禁止粘贴
+        if self._search_mode:
+            return
         if self._reject_readonly():
             return
+
+        target_dir = self.current_path
 
         # 同目录粘贴或复制进源自身子树（自嵌套）无实际意义，且 copytree 自递归会崩溃：
         # 直接提示“无效操作”并返回，不弹替换确认、不复制。
@@ -1570,7 +2167,7 @@ class FileListWidget(QWidget):
             any_src = True
             try:
                 s = src_file.resolve()
-                d = (self.current_path / src_file.name).resolve()
+                d = (target_dir / src_file.name).resolve()
             except Exception:
                 all_self = False
                 break
@@ -1590,7 +2187,7 @@ class FileListWidget(QWidget):
             if not src_file.exists():
                 continue
 
-            dst_file = self.current_path / src_file.name
+            dst_file = target_dir / src_file.name
 
             # 检查目标文件是否存在
             if dst_file.exists():
@@ -1642,14 +2239,14 @@ class FileListWidget(QWidget):
             same_drive = True
             for src_file in files_to_paste:
                 src_drive = os.path.splitdrive(str(src_file))[0]
-                dst_drive = os.path.splitdrive(str(self.current_path))[0]
+                dst_drive = os.path.splitdrive(str(target_dir))[0]
                 if src_drive != dst_drive:
                     same_drive = False
                     break
 
             # 如果都在同一分区，使用快速移动（类似拖拽移动）
             if same_drive:
-                self._fast_move_files(files_to_paste)
+                self._fast_move_files(files_to_paste, target_dir)
                 return
 
         # 创建进度对话框
@@ -1659,7 +2256,7 @@ class FileListWidget(QWidget):
         progress_dialog.show()
 
         # 创建工作线程
-        self._paste_worker = FileCopyWorker([str(f) for f in files_to_paste], self.current_path)
+        self._paste_worker = FileCopyWorker([str(f) for f in files_to_paste], target_dir)
 
         # 连接信号
         self._paste_worker.file_started.connect(
@@ -1728,7 +2325,7 @@ class FileListWidget(QWidget):
         if self.clipboard_is_cut:
             self.clipboard_files = []
             self.clipboard_is_cut = False
-        self.load_files()
+        self._refresh_after_mutation()
         self._update_action_states()
 
     def _on_paste_finished(self, dialog):
@@ -1739,10 +2336,10 @@ class FileListWidget(QWidget):
         if self.clipboard_is_cut:
             self.clipboard_files = []
             self.clipboard_is_cut = False
-        self.load_files()
+        self._refresh_after_mutation()
         self._update_action_states()
 
-    def _fast_move_files(self, files: List[Path]):
+    def _fast_move_files(self, files: List[Path], target_dir: Path):
         """快速移动文件（同分区内使用 rename）"""
         success_count = 0
 
@@ -1750,14 +2347,14 @@ class FileListWidget(QWidget):
             if not src_file.exists():
                 continue
 
-            dst_file = self.current_path / src_file.name
+            dst_file = target_dir / src_file.name
 
             # 检查是否在同一目录
-            if src_file.parent == self.current_path:
+            if src_file.parent == target_dir:
                 continue
 
             # 检查是否移动到自己的子文件夹
-            if src_file.is_dir() and self.current_path.is_relative_to(src_file):
+            if src_file.is_dir() and target_dir.is_relative_to(src_file):
                 self._show_error("不能将文件夹移动到自己的子文件夹中")
                 continue
 
@@ -1787,7 +2384,7 @@ class FileListWidget(QWidget):
         self.clipboard_is_cut = False
 
         # 刷新文件列表
-        self.load_files()
+        self._refresh_after_mutation()
         self._update_action_states()
     
     def delete_files(self):
@@ -1869,10 +2466,12 @@ class FileListWidget(QWidget):
 
                     msg_box.exec()
 
-            self.load_files()
+            self._refresh_after_mutation()
 
     def on_add_via_double_click(self):
         """双击空白区域：在鼠标位置弹出"添加文件/文件夹"选择菜单"""
+        if self._search_mode:
+            return
         menu = QMenu(self)
         file_action = menu.addAction(I18n.tr('drag_add'))
         folder_action = menu.addAction(I18n.tr('add_folder'))
@@ -1891,6 +2490,8 @@ class FileListWidget(QWidget):
 
     def on_add_files(self):
         """添加文件：打开系统文件选择对话框（支持多选），调用 add_files 同步"""
+        if self._search_mode:
+            return
         files, _ = QFileDialog.getOpenFileNames(
             self,
             I18n.tr('drag_add'),
@@ -1903,6 +2504,8 @@ class FileListWidget(QWidget):
 
     def on_add_folder(self):
         """添加文件夹：打开系统文件夹选择对话框，调用 add_files 同步"""
+        if self._search_mode:
+            return
         folder = QFileDialog.getExistingDirectory(
             self,
             I18n.tr('add_folder'),
@@ -1919,6 +2522,9 @@ class FileListWidget(QWidget):
         流程：弹出重命名对话框（预填默认名）→ 确认名称后正式创建并触发同步；
         对话框阶段按 ESC 或取消则不创建任何文件夹。
         """
+        # 搜索态是筛选视图，没有明确的“当前目录”，禁止新建
+        if self._search_mode:
+            return
         if self._reject_readonly():
             return
         from PySide6.QtWidgets import QDialog, QVBoxLayout, QLabel, QDialogButtonBox
@@ -1995,7 +2601,7 @@ class FileListWidget(QWidget):
             self.dir_created.emit(str(new_path))
 
             # 刷新文件列表
-            self.load_files()
+            self._refresh_after_mutation()
         except Exception as e:
             msg_box = QMessageBox(self)
             msg_box.setWindowTitle("错误")
@@ -2126,7 +2732,7 @@ class FileListWidget(QWidget):
                     # 只有本地操作才触发同步信号
                     if not self.is_syncing(str(old_path)):
                         self.file_renamed.emit(str(old_path), str(new_path))
-                    self.load_files()
+                    self._refresh_after_mutation()
                 except Exception as e:
                     # 创建自定义错误框
                     msg_box = QMessageBox(self)
@@ -2255,6 +2861,9 @@ class FileListWidget(QWidget):
 
     def _handle_files_dragged(self, files: List[str], target_path: str, is_internal: bool):
         """处理拖拽的文件"""
+        # 搜索态禁止拖入（表格层已拦截，这里兜底）
+        if self._search_mode:
+            return
         if is_internal:
             # 内部拖拽：移动或复制文件
             # 检查是否按住Ctrl键
@@ -2431,7 +3040,7 @@ class FileListWidget(QWidget):
                 self._show_error(f"操作失败: {str(e)}")
         
         # 刷新文件列表
-        self.load_files()
+        self._refresh_after_mutation()
     
     def add_files(self, file_paths: List[str], target_dir: Path = None) -> bool:
         """添加文件到指定目录。
@@ -2440,6 +3049,9 @@ class FileListWidget(QWidget):
         （替换确认/复制进度/完成动画持续展开），放置条不随即收起；
         否则（对话框流程或未启用胶囊）返回 False，放置条正常收起。
         """
+        # 搜索态：结果为筛选视图，禁止从外部添加文件
+        if self._search_mode:
+            return False
         # 只读：禁止添加（右键/顶部快捷/拖入窗口均汇聚到此）
         if self._reject_readonly():
             return False
@@ -2595,20 +3207,20 @@ class FileListWidget(QWidget):
 
     def _on_capsule_copy_finished(self):
         self._capsule_copying = False
-        self.load_files()
+        self._refresh_after_mutation()
         if self._drop_zone is not None:
             # 完成对勾动画，结束后放置条自动收起（done_finished→_collapse）
             self._drop_zone.finish_done()
 
     def _on_capsule_copy_cancelled(self):
         self._capsule_copying = False
-        self.load_files()
+        self._refresh_after_mutation()
         if self._drop_zone is not None:
             self._drop_zone.dismiss()
 
     def _on_capsule_copy_error(self, message: str):
         self._capsule_copying = False
-        self.load_files()
+        self._refresh_after_mutation()
         if self._drop_zone is not None:
             self._drop_zone.dismiss()
         self._show_error(message)
@@ -2654,7 +3266,7 @@ class FileListWidget(QWidget):
         dialog.allow_close()
         dialog.close()
         # 刷新文件列表（取消时部分文件已被清理）
-        self.load_files()
+        self._refresh_after_mutation()
 
     def _on_copy_finished(self, dialog):
         """所有文件复制完成回调"""
@@ -2662,7 +3274,7 @@ class FileListWidget(QWidget):
         dialog.allow_close()
         dialog.close()
         # 刷新文件列表
-        self.load_files()
+        self._refresh_after_mutation()
     
     def _show_error(self, message: str):
         """显示错误消息（在主线程中调用）"""

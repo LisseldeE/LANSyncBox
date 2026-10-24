@@ -4119,6 +4119,12 @@ class SyncWindow(QMainWindow):
 
         self._close_confirmed = True
 
+        # 搜索任务收尾：取消并限时等待后台扫描，避免 QThread 运行中销毁
+        try:
+            self.file_list.shutdown_search()
+        except Exception:
+            pass
+
         # 清理传输队列
         self.transfer_queue.clear()
         # 清理局域网剪切板：远程文件拉取队列、目录服务、可用远程文件状态
