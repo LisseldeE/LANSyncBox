@@ -9,12 +9,13 @@ import ctypes
 import threading
 import traceback
 
-from PySide6.QtWidgets import QApplication
+from PySide6.QtWidgets import QApplication, QDialog
 from PySide6.QtCore import Qt
 from PySide6.QtGui import QIcon, QFont, QPalette, QGuiApplication
 from PySide6.QtNetwork import QLocalSocket, QLocalServer
 
 from ui.main_window import MainWindow
+from ui.eula_dialog import EulaDialog
 from i18n import I18n
 from config import Config, UserConfig
 
@@ -160,8 +161,15 @@ def main():
     if Config.IS_LINUX:
         QGuiApplication.setDesktopFileName(f"{Config.APP_NAME}.desktop")
     
+    # 首次启动按系统语言初始化一次界面语言（保证协议弹窗等文案与系统语言一致）
+    UserConfig.ensure_first_run_language()
     # 设置默认语言（从 config.json 加载用户偏好）
     I18n.set_language(UserConfig.get_language())
+
+    # 首次启动 / 协议版本变更：确认用户协议与隐私政策（未同意则不进入主界面）
+    if EulaDialog.needs_consent():
+        if EulaDialog().exec() != QDialog.Accepted:
+            return 0
 
     # 创建主窗口
     window = MainWindow()

@@ -23,6 +23,27 @@ _PLATFORM = _detect_platform()
 _PLATFORM_LETTER = {"w": "W", "l": "L", "m": "M"}.get(_PLATFORM, "W")
 
 
+def _detect_system_language() -> str:
+    """按系统语言返回界面语言代码（仅支持 zh_CN / en_US，其余语言回退英文）"""
+    import locale
+    name = ""
+    try:
+        name = locale.getlocale()[0] or ""
+    except (ValueError, TypeError):
+        pass
+    if not name:
+        try:
+            name = locale.getdefaultlocale()[0] or ""
+        except (ValueError, TypeError):
+            name = ""
+    if not name:
+        name = os.environ.get("LANG", "")
+    lowered = name.lower()
+    if lowered.startswith("zh") or "chinese" in lowered:
+        return "zh_CN"
+    return "en_US"
+
+
 class Config:
     """应用配置"""
 
@@ -54,6 +75,12 @@ class Config:
 
     # 版本号托管于 GitHub Pages 纯文本文件，避免 raw 外链滥用/API tags 频率限制
     UPDATE_URL = "https://lisseldee.github.io/version/lansyncboxpro"
+    # 用户协议与隐私政策（官网托管页面）
+    TERMS_URL = "https://lansyncbox.com/terms.html?ver=pro"
+    PRIVACY_URL = "https://lansyncbox.com/privacy.html?ver=pro"
+    # 条款版本号：协议内容有实质变更时同步修改（客户端据此判断是否需要重新确认）
+    TERMS_VERSION = "2026-10-25"
+    PRIVACY_VERSION = "2026-10-25"
     # 公告文件（v2 版本定向投递）：首行批次号（如 26.9.15.2），其后为 "# 目标：正文" 指令行。
     # 文件改为 lansyncboxprov2：旧版不升级仍读旧文件，避免解析新格式出错而导致公告显示异常。
     ANNOUNCEMENT_URL = "https://lisseldee.github.io/announcement/lansyncboxprov2"
@@ -304,7 +331,9 @@ class UserConfig:
             "end_id": "",
             "room_history": [],
             "default_perm": "rw",
-            "room_perm": {}  # 每房间最近一次主机下发的本端权限档位（主机离线期间保持只读不放松）
+            "room_perm": {},  # 每房间最近一次主机下发的本端权限档位（主机离线期间保持只读不放松）
+            "terms_accepted_version": "",
+            "privacy_accepted_version": ""
         }
 
         # 首次加载时尝试从旧路径迁移配置
@@ -457,6 +486,44 @@ class UserConfig:
     def set_language(cls, lang: str):
         """设置语言"""
         cls.set("language", lang)
+
+    @classmethod
+    def ensure_first_run_language(cls) -> str:
+        """首次启动时按系统语言初始化一次界面语言，之后以用户选择为准。
+
+        config.json 不存在，或存在但缺少 language 键（旧版升级）时视为首次启动；
+        返回最终使用的语言代码（zh_CN / en）。
+        """
+        path = cls._get_config_path()
+        if path.exists():
+            try:
+                with open(path, 'r', encoding='utf-8') as f:
+                    raw = json.load(f)
+                if isinstance(raw, dict) and raw.get("language"):
+                    return cls.get_language()
+            except (json.JSONDecodeError, IOError, OSError):
+                pass
+        lang = _detect_system_language()
+        cls.set_language(lang)
+        return lang
+
+    @classmethod
+    def get_terms_accepted_version(cls) -> str:
+        """获取用户已同意的《用户协议》版本（空串表示从未确认）"""
+        return str(cls.get("terms_accepted_version", ""))
+
+    @classmethod
+    def get_privacy_accepted_version(cls) -> str:
+        """获取用户已同意的《隐私政策》版本（空串表示从未确认）"""
+        return str(cls.get("privacy_accepted_version", ""))
+
+    @classmethod
+    def set_accepted_legal_versions(cls, terms_version: str, privacy_version: str):
+        """记录用户当前同意的两个协议版本（一次写入，避免两次落盘）"""
+        data = cls.load()
+        data["terms_accepted_version"] = str(terms_version)
+        data["privacy_accepted_version"] = str(privacy_version)
+        cls.save()
 
     @classmethod
     def get_fixed_room_code_enabled(cls) -> bool:

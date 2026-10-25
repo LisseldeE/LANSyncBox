@@ -57,7 +57,7 @@ class AboutDialog(QDialog):
         # 明确设置窗口标志，确保包含关闭按钮
         flags = Qt.Dialog | Qt.WindowCloseButtonHint
         self.setWindowFlags(flags)
-        self.setFixedSize(400, 260)  # 更紧凑的高度
+        self.setFixedSize(400, 284)  # 增加一行协议链接后的紧凑高度
 
         self._init_ui()
 
@@ -151,6 +151,35 @@ class AboutDialog(QDialog):
         link_layout.addStretch()
         layout.addLayout(link_layout)
 
+        # 法律条款链接（用户协议 / 隐私政策，与上方功能链接分行居中）
+        legal_layout = QHBoxLayout()
+        legal_layout.addStretch()
+
+        terms_label = ClickableLabel(
+            I18n.tr('about_terms'),
+            normal_color="#339af0",
+            hover_color="#228be6",
+            underline_on_hover=True
+        )
+        terms_label.set_click_callback(self._open_terms)
+        legal_layout.addWidget(terms_label)
+
+        legal_sep = QLabel("·")
+        legal_sep.setStyleSheet("font-size: 11px; color: #adb5bd;")
+        legal_layout.addWidget(legal_sep)
+
+        privacy_label = ClickableLabel(
+            I18n.tr('about_privacy'),
+            normal_color="#339af0",
+            hover_color="#228be6",
+            underline_on_hover=True
+        )
+        privacy_label.set_click_callback(self._open_privacy)
+        legal_layout.addWidget(privacy_label)
+
+        legal_layout.addStretch()
+        layout.addLayout(legal_layout)
+
         # 按钮区域
         btn_layout = QHBoxLayout()
         btn_layout.addStretch()
@@ -192,6 +221,14 @@ class AboutDialog(QDialog):
     def _open_support(self, event):
         """打开爱发电赞助页（支持作者）"""
         QDesktopServices.openUrl(QUrl("https://ifdian.net/a/lisseldee"))
+
+    def _open_terms(self, event):
+        """打开用户协议页面"""
+        QDesktopServices.openUrl(QUrl(Config.TERMS_URL))
+
+    def _open_privacy(self, event):
+        """打开隐私政策页面"""
+        QDesktopServices.openUrl(QUrl(Config.PRIVACY_URL))
 
     def _show_styled_message(self, title: str, text: str, icon_type=QMessageBox.Information):
         """显示统一风格的提示框"""
