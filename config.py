@@ -73,31 +73,27 @@ class Config:
     GITHUB_REPO = "LisseldeE/LANSyncBox"
     GITEE_REPO = "Lisselde_E/LANSyncBox"
 
-    # 版本号托管于 GitHub Pages 纯文本文件，避免 raw 外链滥用/API tags 频率限制
-    UPDATE_URL = "https://lisseldee.github.io/version/lansyncboxpro"
+    # 版本号托管于官网纯文本文件（GitHub Pages 在部分网络下不可达）
+    UPDATE_URL = "https://lansyncbox.com/version/lansyncboxpro"
     # 用户协议与隐私政策（官网托管页面）
     TERMS_URL = "https://lansyncbox.com/terms.html?ver=pro"
     PRIVACY_URL = "https://lansyncbox.com/privacy.html?ver=pro"
     # 条款版本号：协议内容有实质变更时同步修改（客户端据此判断是否需要重新确认）
     TERMS_VERSION = "2026-10-25"
-    PRIVACY_VERSION = "2026-10-25"
+    PRIVACY_VERSION = "2026-10-26"
     # 公告文件（v2 版本定向投递）：首行批次号（如 26.9.15.2），其后为 "# 目标：正文" 指令行。
     # 文件改为 lansyncboxprov2：旧版不升级仍读旧文件，避免解析新格式出错而导致公告显示异常。
-    ANNOUNCEMENT_URL = "https://lisseldee.github.io/announcement/lansyncboxprov2"
+    ANNOUNCEMENT_URL = "https://lansyncbox.com/announcement/lansyncboxprov2"
     # 下载落地页（按语言区分，保持不变）
     GITHUB_RELEASES = f"https://github.com/{GITHUB_REPO}/releases"
     GITEE_RELEASES = f"https://gitee.com/{GITEE_REPO}/releases"
-    # 下载向导页（Pro 版检查更新跳转目标），按语言分中文/英文文件
-    DOWNLOAD_WIZARD_URL_ZH = (
-        f"https://github.com/{GITHUB_REPO}/blob/pro/downloadwizard/zh_cn.md#LANSyncBox-pro"
-    )
-    DOWNLOAD_WIZARD_URL_EN = (
-        f"https://github.com/{GITHUB_REPO}/blob/pro/downloadwizard/en.md#LANSyncBox-pro"
-    )
+    # 官网下载区（Pro 版检查更新跳转目标），按语言区分
+    DOWNLOAD_WIZARD_URL_ZH = "https://lansyncbox.com/?ver=pro#download"
+    DOWNLOAD_WIZARD_URL_EN = "https://lansyncbox.com/?lang=en&ver=pro#download"
 
     @staticmethod
     def get_download_wizard_url(language: str) -> str:
-        """按语言返回下载向导页 URL（中文 zh_cn.md，其他 en.md）。
+        """按语言返回官网下载区 URL（中文版，其他英文版）。
 
         调用方传入 I18n.get_language()（'zh_CN'/'en' 等）；config 不依赖 I18n，避免循环导入。
         """

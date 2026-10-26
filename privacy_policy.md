@@ -1,6 +1,6 @@
 # LANSyncBox Pro 隐私政策
 
-最后更新日期：2026-09-15
+最后更新日期：2026-10-26
 
 ## 引言
 
@@ -30,9 +30,11 @@ LANSyncBox Pro（以下简称"本应用"）是一款局域网文件实时同步�
 
 本应用仅在以下场景发起网络请求：
 
-1. **公告推送功能**：程序启动后，本应用会请求 GitHub Pages 上的公开纯文本公告文件（https://lisseldee.github.io/announcement/lansyncboxpro），读取公告版本号与正文用于界面展示。此请求仅下载公告内容，**不包含任何用户身份信息或本机数据**。您可在「设置 → 系统」中关闭"接收推送公告"以完全禁用此请求。
-2. **检查更新功能**：当用户主动点击"检查更新"按钮，或开启"自动检查更新"时，应用会请求 GitHub Pages 上的公开纯文本版本文件（https://lisseldee.github.io/version/lansyncboxpro）获取最新版本号。此请求仅查询版本号，不包含任何用户身份信息。该功能仅存在于 GitHub / Gitee 开源版本中，**微软商店版本不提供检查更新逻辑，也不会发起任何更新检查请求**。
+1. **公告推送功能**：程序启动后，本应用会请求官方网站上的公开纯文本公告文件（https://lansyncbox.com/announcement/lansyncboxprov2），读取公告版本号与正文用于界面展示。此请求仅下载公告内容，**不包含任何用户身份信息或本机数据**。您可在「设置 → 系统」中关闭"接收推送公告"以完全禁用此请求。
+2. **检查更新功能**：当用户主动点击"检查更新"按钮，或开启"自动检查更新"时，应用会请求官方网站上的公开纯文本版本文件（https://lansyncbox.com/version/lansyncboxpro）获取最新版本号。此请求仅查询版本号，不包含任何用户身份信息。该功能仅存在于 GitHub / Gitee 开源版本中，**微软商店版本不提供检查更新逻辑，也不会发起任何更新检查请求**。
 3. **用户主动打开的网页链接**：点击"查看详情""问题反馈""支持作者"等链接时，系统浏览器会打开对应网页。
+
+> 注：自 R1.2.1.0 版本起，上述公告与检查更新请求指向官方网站 `lansyncbox.com`；此前的版本请求 GitHub Pages（`lisseldee.github.io`），旧版本客户端仍可能访问该地址。
 
 除此之外，本应用不会主动发起任何网络请求。
 
@@ -59,7 +61,7 @@ LANSyncBox Pro（以下简称"本应用"）是一款局域网文件实时同步�
 
 本应用不集成任何第三方分析、广告或追踪服务。
 
-检查更新功能访问的 GitHub Pages 与下载落地页（GitHub / Gitee Releases）受各自平台的隐私政策约束：
+公告推送与检查更新访问的官方网站由开发者自行运营，适用本政策；下载落地页（GitHub / Gitee Releases）受各自平台的隐私政策约束：
 
 - GitHub 隐私政策：https://docs.github.com/zh/site-policy/privacy-policies
 - Gitee 隐私政策：https://gitee.com/help/articles/4186

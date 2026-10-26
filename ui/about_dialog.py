@@ -4,13 +4,14 @@ Copyright (c) 2026 Lisselde_E <Lisselde.E@outlook.com>.
 Licensed under the GNU General Public License v3.0.
 """
 import re
+import threading
 import urllib.request
 import ssl
 from PySide6.QtWidgets import (
     QDialog, QVBoxLayout, QHBoxLayout, QLabel,
     QPushButton, QMessageBox, QApplication
 )
-from PySide6.QtCore import Qt, QUrl
+from PySide6.QtCore import Qt, QUrl, Signal
 from PySide6.QtGui import QDesktopServices
 
 from i18n import I18n
@@ -38,7 +39,7 @@ def fetch_latest_version():
     req.add_header('User-Agent', Config.APP_NAME)
 
     try:
-        with urllib.request.urlopen(req, timeout=15, context=ssl_context) as response:
+        with urllib.request.urlopen(req, timeout=6, context=ssl_context) as response:
             body = response.read().decode('utf-8').strip()
         # io 文件为 R 前缀四段（如 R7.1.1.0），校验后直接返回。
         if not re.match(r'R\d+(\.\d+){0,3}', body):
@@ -51,6 +52,8 @@ def fetch_latest_version():
 class AboutDialog(QDialog):
     """关于弹窗"""
 
+    update_checked = Signal(str, str)  # 后台检查更新结果（版本号, 错误信息）
+
     def __init__(self, parent=None):
         super().__init__(parent)
         self.setWindowTitle(I18n.tr('about_title'))
@@ -59,7 +62,11 @@ class AboutDialog(QDialog):
         self.setWindowFlags(flags)
         self.setFixedSize(400, 284)  # 增加一行协议链接后的紧凑高度
 
+        self._check_update_btn = None
+        self._update_check_pending = False
+
         self._init_ui()
+        self.update_checked.connect(self._on_update_checked)
 
     def _init_ui(self):
         layout = QVBoxLayout()
@@ -191,6 +198,7 @@ class AboutDialog(QDialog):
             check_update_btn.setStyleSheet(BUTTON_STYLES['primary'])
             check_update_btn.clicked.connect(self._check_update)
             btn_layout.addWidget(check_update_btn)
+            self._check_update_btn = check_update_btn
 
             btn_layout.addSpacing(8)  # 更紧凑的按钮间距
 
@@ -245,9 +253,39 @@ class AboutDialog(QDialog):
         return fetch_latest_version()
 
     def _check_update(self):
-        """检查更新（从 github.io 拉取版本号，下载落地页按语言区分）"""
-        # 拉取远程最新版本
-        latest, err = self._get_latest_version()
+        """检查更新：网络请求放后台线程，避免 UI 线程被最长 15 秒的超时阻塞"""
+        if self._update_check_pending or self._check_update_btn is None:
+            return
+        self._update_check_pending = True
+        button = self._check_update_btn
+        button.setEnabled(False)
+        button.setText(I18n.tr('about_checking'))
+
+        def _fetch():
+            try:
+                latest, err = self._get_latest_version()
+            except Exception as exc:  # 兜底：线程内异常也要回到 UI 线程收尾
+                latest, err = None, str(exc)
+            try:
+                self.update_checked.emit(latest or "", err or "")
+            except RuntimeError:
+                pass  # 窗口已随程序退出被销毁
+
+        threading.Thread(target=_fetch, daemon=True,
+                         name="about-update-check").start()
+
+    def _on_update_checked(self, latest: str, err: str):
+        """后台检查完成：恢复按钮并展示结果（窗口已关闭时只恢复状态）"""
+        self._update_check_pending = False
+        if self._check_update_btn is not None:
+            self._check_update_btn.setText(I18n.tr('about_check_update'))
+            self._check_update_btn.setEnabled(True)
+        if not self.isVisible():
+            return
+        self._show_update_result(latest, err)
+
+    def _show_update_result(self, latest: str, err: str):
+        """按检查结果弹出提示（发现新版本 / 已是最新 / 失败）"""
         if not latest:
             self._show_styled_message(
                 I18n.tr('about_check_update'),
