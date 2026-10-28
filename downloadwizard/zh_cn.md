@@ -92,9 +92,20 @@
   <img src="https://lisseldee.github.io/assets/images/webp/1-c1.webp" width="100%" alt="LANSyncBox">
 </p>
 
-### [R1.2.0.0](https://github.com/LisseldeE/LANSyncBox/releases/tag/pro-R1.2.0.0)
+### [R1.2.1.0](https://github.com/LisseldeE/LANSyncBox/releases/tag/pro-R1.2.1.0)
 
 > 最新构建
+
+| 支持系统 | 支持架构 | 获取方式 | 链接 |
+|:---|:---|:---|:---|
+| Windows | x64 | GitHub | [**下载**](https://github.com/LisseldeE/LANSyncBox/releases/download/pro-R1.2.1.0/LANSyncBoxPro_Setup.exe) |
+| Linux | x64 | GitHub | [**下载**](https://github.com/LisseldeE/LANSyncBox/releases/download/pro-R1.2.1.0/lansyncboxpro_amd64.deb) |
+| macOS | arm64 | GitHub | [**下载**](https://github.com/LisseldeE/LANSyncBox/releases/download/pro-R1.2.1.0/LANSyncBoxPro_arm64.dmg) |
+
+<details>
+<summary>历史版本（点击展开）</summary>
+
+### [R1.2.0.0](https://github.com/LisseldeE/LANSyncBox/releases/tag/pro-R1.2.0.0)
 
 [![从 Microsoft Store 获取](https://get.microsoft.com/images/zh-cn%20dark.svg)](https://apps.microsoft.com/detail/9n4g6w3rm3q6?referrer=appbadge&mode=full)
 
@@ -102,10 +113,8 @@
 |:---|:---|:---|:---|
 | Windows | x64 | GitHub | [**下载**](https://github.com/LisseldeE/LANSyncBox/releases/download/pro-R1.2.0.0/LANSyncBoxPro_Setup.exe) |
 | Linux | x64 | GitHub | [**下载**](https://github.com/LisseldeE/LANSyncBox/releases/download/pro-R1.2.0.0/lansyncboxpro_amd64.deb) |
-| macOS | arm64 | GitHub | [**下载**](https://github.com/LisseldeE/LANSyncBox/releases/download/pro-R1.2.0.0/LANSyncBoxPro_arm64.dmg.deb) |
+| macOS | arm64 | GitHub | [**下载**](https://github.com/LisseldeE/LANSyncBox/releases/download/pro-R1.2.0.0/LANSyncBoxPro_arm64.dmg) |
 
-<details>
-<summary>历史版本（点击展开）</summary>
 
 ### [R1.1.1.0](https://github.com/LisseldeE/LANSyncBox/releases/tag/pro-R1.1.1.0)
 

@@ -92,9 +92,20 @@ For a detailed feature comparison, please refer to each edition's project page. 
   <img src="https://lisseldee.github.io/assets/images/webp/1-e1.webp" width="100%" alt="LANSyncBox">
 </p>
 
-### [R1.2.0.0](https://github.com/LisseldeE/LANSyncBox/releases/tag/pro-R1.2.0.0)
+### [R1.2.1.0](https://github.com/LisseldeE/LANSyncBox/releases/tag/pro-R1.2.1.0)
 
 > Latest build
+
+| OS | Architecture | Mirror | Link |
+|:---|:---|:---|:---|
+| Windows | x64 | GitHub | [**Download**](https://github.com/LisseldeE/LANSyncBox/releases/download/pro-R1.2.1.0/LANSyncBoxPro_Setup.exe) |
+| Linux | x64 | GitHub | [**Download**](https://github.com/LisseldeE/LANSyncBox/releases/download/pro-R1.2.1.0/lansyncboxpro_amd64.deb) |
+| macOS | arm64 | GitHub | [**Download**](https://github.com/LisseldeE/LANSyncBox/releases/download/pro-R1.2.1.0/LANSyncBoxPro_arm64.dmg) |
+
+<details>
+<summary>Older releases (click to expand)</summary>
+
+### [R1.2.0.0](https://github.com/LisseldeE/LANSyncBox/releases/tag/pro-R1.2.0.0)
 
 [![从 Microsoft Store 获取](https://get.microsoft.com/images/en-us%20dark.svg)](https://apps.microsoft.com/detail/9n4g6w3rm3q6?referrer=appbadge&mode=full)
 
@@ -102,10 +113,7 @@ For a detailed feature comparison, please refer to each edition's project page. 
 |:---|:---|:---|:---|
 | Windows | x64 | GitHub | [**Download**](https://github.com/LisseldeE/LANSyncBox/releases/download/pro-R1.2.0.0/LANSyncBoxPro_Setup.exe) |
 | Linux | x64 | GitHub | [**Download**](https://github.com/LisseldeE/LANSyncBox/releases/download/pro-R1.2.0.0/lansyncboxpro_amd64.deb) |
-| macOS | arm64 | GitHub | [**Download**](https://github.com/LisseldeE/LANSyncBox/releases/download/pro-R1.2.0.0/LANSyncBoxPro_arm64.dmg.deb) |
-
-<details>
-<summary>Older releases (click to expand)</summary>
+| macOS | arm64 | GitHub | [**Download**](https://github.com/LisseldeE/LANSyncBox/releases/download/pro-R1.2.0.0/LANSyncBoxPro_arm64.dmg) |
 
 ### [R1.1.1.0](https://github.com/LisseldeE/LANSyncBox/releases/tag/pro-R1.1.1.0)
 
