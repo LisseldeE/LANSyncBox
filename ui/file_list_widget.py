@@ -37,6 +37,20 @@ from ui.widgets import BUTTON_STYLES, UnderlineEdit
 from ui.file_search import FileSearchWorker
 
 
+# 关窗时仍未结束的扫描线程：从控件父级脱离后暂存于此，线程结束后自行释放。
+# QThread 在运行中被销毁会让 Qt 直接 abort，故不能只靠 wait(超时) + 丢引用。
+_DETACHED_SEARCH_WORKERS = []
+
+
+def _reap_detached_search_worker(worker):
+    """线程结束后移出暂存列表并延迟销毁。"""
+    try:
+        _DETACHED_SEARCH_WORKERS.remove(worker)
+    except ValueError:
+        pass
+    worker.deleteLater()
+
+
 # 快捷操作栏图标（轻量线条风格 SVG，%C% 占位符在渲染时替换为实际颜色）
 _SVG_NEW_FOLDER = (
     '<svg viewBox="0 0 24 24" fill="none" stroke="%C%" stroke-width="1.8" '
@@ -1613,6 +1627,11 @@ class FileListWidget(QWidget):
         # 结果已失效：按当前关键词重新扫描（操作后的文件可能不再匹配而消失）
         self._search_results = []
         if self._search_keyword:
+            # 立即清掉旧行并显示"搜索中"，不让重扫完成前的残留行仍可被双击/删除
+            self.table.clearContents()
+            self.table.setRowCount(0)
+            self._show_search_overlay(I18n.tr('searching'),
+                                      I18n.tr('searching_hint'))
             self._run_search()
         else:
             self.table.setRowCount(0)
@@ -1643,7 +1662,12 @@ class FileListWidget(QWidget):
         worker.deleteLater()
 
     def shutdown_search(self):
-        """窗口关闭时取消并限时等待所有在途扫描。"""
+        """窗口关闭时取消所有在途扫描。
+
+        已结束的线程直接释放；仍在运行线程先断开信号、脱离控件父级并暂存到
+        模块级列表，由其 finished 信号自行回收——避免 QThread 运行中被销毁导致
+        进程 abort，也不再让关窗阻塞等待慢盘扫描。
+        """
         self._search_debounce.stop()
         workers = list(self._search_workers)
         for worker in workers:
@@ -1653,8 +1677,28 @@ class FileListWidget(QWidget):
                 pass
         for worker in workers:
             try:
+                if not worker.isRunning():
+                    worker.deleteLater()
+                    continue
+                # 断开 results_ready / finished 上原有的槽，防止控件销毁后仍有回调
+                for sig in (worker.results_ready, worker.finished):
+                    try:
+                        sig.disconnect()
+                    except Exception:
+                        pass
+                worker.setParent(None)
+                _DETACHED_SEARCH_WORKERS.append(worker)
+                worker.finished.connect(
+                    lambda w=worker: _reap_detached_search_worker(w))
+                # 竞态：刚连上信号线程已结束，finished 不会再发，立即回收
+                if not worker.isRunning():
+                    _reap_detached_search_worker(worker)
+            except Exception:
+                pass
+        for worker in workers:
+            try:
                 if worker.isRunning():
-                    worker.wait(500)
+                    worker.wait(200)
             except Exception:
                 pass
         self._search_workers = []

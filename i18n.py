@@ -58,6 +58,7 @@ class I18n:
             "delivery_text": "文本剪切板",
             "delivery_file": "文件",
             "settings_clear": "清空",
+            "settings_clearing": "清理中…",
             "settings_cache_empty": "暂无缓存目录",
             "settings_clear_confirm": "确定清空该目录？",
             "settings_clear_done": "已清空",
@@ -213,6 +214,16 @@ class I18n:
             "clipboard_deliver_send": "发送",
             "clipboard_deliver_sent": "投递完成",
             "clipboard_deliver_send_fail": "投递失败",
+            # 胶囊通知栏可用态：标题 / 接收按钮 / 提示（Linux、macOS 走按钮，Windows 走热键）
+            "capsule_available_title": "有可用的远程文件  {name}  {size}",
+            "capsule_receive_btn": "接收",
+            "capsule_replace_btn": "替换",
+            "capsule_receive_hint": "点击 接收 选择保存位置",
+            "capsule_paste_hint": "按 Ctrl+V 粘贴到此设备",
+            # 胶囊通知栏状态文案：投递标签 / 传输提示 / 排队等待数
+            "capsule_tag_delivery": "投递",
+            "capsule_delivering": "正在投递  {size}",
+            "capsule_waiting_count": "{count} 等待",
             # 自同步传输（发送端）动作与状态文本
             "sync_action": "同步",
             "sync_transfer_done": "完成",
@@ -450,6 +461,7 @@ class I18n:
             "delivery_text": "Text clipboard",
             "delivery_file": "Files",
             "settings_clear": "Clear",
+            "settings_clearing": "Clearing…",
             "settings_cache_empty": "No cache folders",
             "settings_clear_confirm": "Clear this folder?",
             "settings_clear_done": "Cleared",
@@ -605,6 +617,16 @@ class I18n:
             "clipboard_deliver_send": "Sending",
             "clipboard_deliver_sent": "Delivered",
             "clipboard_deliver_send_fail": "Deliver failed",
+            # Capsule notification available state: title / receive button / hint
+            "capsule_available_title": "Remote file available  {name}  {size}",
+            "capsule_receive_btn": "Receive",
+            "capsule_replace_btn": "Replace",
+            "capsule_receive_hint": "Click Receive to choose a save location",
+            "capsule_paste_hint": "Press Ctrl+V to paste to this device",
+            # Capsule notification state text: delivery tag / transfer hint / queue
+            "capsule_tag_delivery": "Delivery",
+            "capsule_delivering": "Delivering  {size}",
+            "capsule_waiting_count": "{count} waiting",
             # Sync transfer (sender side) action & status text
             "sync_action": "Sync",
             "sync_transfer_done": "Done",

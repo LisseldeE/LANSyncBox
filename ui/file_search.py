@@ -128,6 +128,10 @@ class FileSearchWorker(QThread):
                         if len(results) >= self._max_results:
                             truncated = True
                             break
+                except OSError:
+                    # 目录迭代中途失败（网络盘掉线、权限变化）：跳过本目录剩余项，
+                    # 继续扫描栈内其他目录，不能让异常穿出 run() 导致界面永远"搜索中"
+                    continue
                 finally:
                     try:
                         iterator.close()
@@ -136,6 +140,9 @@ class FileSearchWorker(QThread):
 
                 if truncated:
                     break
+        except Exception:
+            # 兜底：任何未预期异常都不阻断结果回传，避免界面卡在"搜索中…"
+            pass
         finally:
             if self._cancel.is_set():
                 return

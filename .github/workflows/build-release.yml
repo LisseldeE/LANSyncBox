@@ -39,15 +39,40 @@ jobs:
 
       - name: 安装依赖
         shell: pwsh
-        run: python -m pip install --upgrade pip; pip install PySide6 certifi comtypes pyinstaller
+        run: python -m pip install --upgrade pip; pip install "nuitka==4.3.1" "PySide6==6.12.0" certifi comtypes
 
-      - name: 生成版本资源
+      - name: Nuitka 打包（目录版）
         shell: pwsh
-        run: python .github/ci/gen_version_info.py
-
-      - name: PyInstaller 打包
-        shell: pwsh
-        run: pyinstaller --noconfirm --onefile --windowed --icon icon.ico --version-file ".github/ci/version_info.txt" --add-data "icon.ico;." --distpath dist "${{ env.ENTRY }}"
+        run: |
+          $ver = $env:GITHUB_REF_NAME -replace '^pro-R', ''
+          $na = @(
+            '-m', 'nuitka',
+            '--standalone',
+            '--assume-yes-for-downloads',
+            '--windows-console-mode=disable',
+            '--noinclude-pytest-mode=nofollow',
+            '--noinclude-setuptools-mode=nofollow',
+            '--noinclude-unittest-mode=nofollow',
+            '--enable-plugin=pyside6',
+            '--include-package=certifi',
+            '--include-package-data=certifi',
+            '--include-package=comtypes',
+            '--msvc=latest',
+            '--jobs=4',
+            '--remove-output',
+            '--output-dir=build\nuitka',
+            '--windows-icon-from-ico=icon.ico',
+            '--company-name=Lisselde_E',
+            '--product-name=LANSyncBox Pro',
+            '--file-description=LANSyncBox Pro',
+            "--file-version=$ver",
+            "--product-version=$ver",
+            '--copyright=Copyright (c) 2026 Lisselde_E',
+            '--include-data-file=icon.ico=icon.ico',
+            $env:ENTRY
+          )
+          python @na
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
       - name: Inno Setup 编译安装包
         shell: pwsh
@@ -61,9 +86,10 @@ jobs:
             "/DEdition=pro" `
             "/DAppVersion=$ver" `
             "/DSourceDir=$src" `
+            "/DDistDir=$env:GITHUB_WORKSPACE\build\nuitka\LANSyncBox Pro.dist" `
             "/DOutputDir=$out" `
             "/DSetupIcon=$env:GITHUB_WORKSPACE\icon.ico" `
-            "/DLicenseFile=$env:GITHUB_WORKSPACE\LICENSE.txt" `
+            "/DLicenseFile=$env:GITHUB_WORKSPACE\.github\ci\windows\LICENSE.txt" `
             ".github\ci\windows\app.iss"
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
@@ -120,7 +146,14 @@ jobs:
         run: pip install PySide6 certifi pyinstaller
 
       - name: PyInstaller 打包
-        run: pyinstaller --noconfirm --windowed --icon icon.icns --add-data "icon.icns:." --name "${{ env.APP_NAME }}" "${{ env.ENTRY }}"
+        run: |
+          pyinstaller --noconfirm --windowed --icon icon.icns --add-data "icon.icns:." --name "${{ env.APP_NAME }}" "${{ env.ENTRY }}"
+          # .app 的版本号注入（PyInstaller 的 BUNDLE 默认写 0.0.0，CLI 无法指定）
+          VER="${GITHUB_REF_NAME#pro-R}"
+          PLIST="dist/${{ env.APP_NAME }}.app/Contents/Info.plist"
+          /usr/libexec/PlistBuddy -c "Set :CFBundleShortVersionString $VER" "$PLIST"
+          /usr/libexec/PlistBuddy -c "Add :CFBundleVersion string $VER" "$PLIST" 2>/dev/null || /usr/libexec/PlistBuddy -c "Set :CFBundleVersion $VER" "$PLIST"
+          /usr/libexec/PlistBuddy -c "Print :CFBundleShortVersionString" "$PLIST"
 
       - name: 生成 .dmg（拖拽安装布局）
         run: |

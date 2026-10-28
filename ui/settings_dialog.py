@@ -12,7 +12,7 @@ from PySide6.QtWidgets import (
     QScrollArea, QFrame, QApplication, QMessageBox, QStackedWidget,
     QGraphicsOpacityEffect
 )
-from PySide6.QtCore import Qt, Signal, QRectF, QVariantAnimation, QAbstractAnimation, QEasingCurve, QUrl
+from PySide6.QtCore import Qt, Signal, QRectF, QVariantAnimation, QAbstractAnimation, QEasingCurve, QUrl, QThread
 from PySide6.QtGui import QPainter, QColor, QFont, QPalette, QDesktopServices
 
 from config import Config, UserConfig
@@ -27,6 +27,53 @@ def _is_dark(widget=None) -> bool:
     pal = win.palette() if win is not None else QApplication.palette()
     bg = pal.color(QPalette.Window)
     return (bg.red() * 0.299 + bg.green() * 0.587 + bg.blue() * 0.114) < 128
+
+
+def _dir_size(path: Path) -> int:
+    """计算单个目录占用大小（字节），失败项跳过（供后台线程调用）"""
+    total = 0
+    try:
+        for dirpath, _dirnames, filenames in os.walk(str(path)):
+            for fn in filenames:
+                try:
+                    total += os.path.getsize(os.path.join(dirpath, fn))
+                except (OSError, PermissionError):
+                    pass
+    except (OSError, PermissionError):
+        pass
+    return total
+
+
+class _CacheClearWorker(QThread):
+    """后台删除缓存目录：大目录递归删除时不再阻塞界面"""
+    cleared = Signal(str)  # 目录名
+
+    def __init__(self, path: Path, parent=None):
+        super().__init__(parent)
+        self._path = path
+
+    def run(self):
+        try:
+            safe_rmtree(str(self._path))
+        except Exception:
+            pass
+        self.cleared.emit(self._path.name)
+
+
+class _CacheSizeWorker(QThread):
+    """后台统计目录占用，逐个目录回传，避免大量 stat 调用卡住界面"""
+    size_ready = Signal(int, str, int)  # 批次号, 目录名, 字节
+
+    def __init__(self, paths, generation: int, parent=None):
+        super().__init__(parent)
+        self._paths = list(paths)
+        self._generation = generation
+
+    def run(self):
+        for p in self._paths:
+            if self.isInterruptionRequested():
+                return
+            self.size_ready.emit(self._generation, p.name, _dir_size(p))
 
 
 class _CategoryList(QWidget):
@@ -157,10 +204,17 @@ class SettingsDialog(QDialog):
         self._auto_update_row = None
         self._toggles = {}
         self._cache_rows = {}          # 目录名 -> 行 widget
+        self._cache_size_labels = {}   # 目录名 -> 占用文本 label
+        self._cache_clear_buttons = {} # 目录名 -> 清空按钮
+        self._cache_sizes = {}         # 目录名 -> 已统计字节数（跨重建复用，避免重复扫描）
         self._cache_rows_layout = None
         self._cache_empty_label = None
         self._cache_watcher = None
         self._cache_refresh_timer = None
+        self._size_workers = []        # 持有后台统计线程引用，防止运行中就被回收
+        self._size_generation = 0      # 统计批次号：重建列表后旧批次结果作废
+        self._clear_workers = []       # 持有后台删除线程引用
+        self._clearing = set()         # 正在后台删除的目录名
 
         self._init_ui()
         self._setup_cache_watcher()
@@ -290,8 +344,15 @@ class SettingsDialog(QDialog):
         top.setAlignment(sec_label, Qt.AlignVCenter)
         top.addStretch()
         manage_btn = AnimatedButton(I18n.tr('settings_manage_folders'))
-        manage_btn.setFixedSize(110, 32)
-        manage_btn.setStyleSheet(BUTTON_STYLES['secondary'])
+        manage_btn.setCursor(Qt.PointingHandCursor)
+        # 与 11px 分组标题同一层级：文字链接式按钮，不再用 32px 高的实心色块
+        dark = _is_dark(self)
+        manage_btn.setStyleSheet(
+            "QPushButton { padding: 4px 6px; font-size: 12px; border: none;"
+            f" background: transparent; color: {'#4dabf7' if dark else '#228be6'}; }}"
+            f"QPushButton:hover {{ color: {'#74c0fc' if dark else '#339af0'}; }}"
+            f"QPushButton:pressed {{ color: {'#a5d8ff' if dark else '#1c7ed6'}; }}"
+        )
         manage_btn.clicked.connect(self._on_manage_folders)
         top.addWidget(manage_btn)
         lay.addLayout(top)
@@ -435,6 +496,8 @@ class SettingsDialog(QDialog):
             self._cache_rows_layout.removeWidget(row)
             row.deleteLater()
         self._cache_rows = {}
+        self._cache_size_labels = {}
+        self._cache_clear_buttons = {}
 
         sync_folder = Config.get_sync_folder()
         dirs = []
@@ -443,6 +506,10 @@ class SettingsDialog(QDialog):
                 if d.is_dir() and d.name != "preview":
                     dirs.append(d)
         dirs.sort(key=lambda p: p.name)
+
+        # 丢弃已不存在目录的历史统计值
+        names = {d.name for d in dirs}
+        self._cache_sizes = {k: v for k, v in self._cache_sizes.items() if k in names}
 
         for d in dirs:
             self._add_cache_row(d)
@@ -459,6 +526,7 @@ class SettingsDialog(QDialog):
         self._cache_empty_label.setVisible(empty)
 
         self._refresh_watcher()
+        self._start_size_scan(dirs)
 
     def _add_cache_row(self, path: Path):
         row = QWidget()
@@ -474,30 +542,92 @@ class SettingsDialog(QDialog):
 
         lay.addStretch()
 
-        size_label = QLabel(self._format_size(self._dir_size(path)))
+        cached_size = self._cache_sizes.get(path.name)
+        size_label = QLabel(self._format_size(cached_size) if cached_size is not None else "…")
         size_label.setStyleSheet(
             f"font-size: 11px; color: {'#a0a0a0' if dark else '#868e96'};"
         )
         lay.addWidget(size_label)
+        self._cache_size_labels[path.name] = size_label
 
         clear_btn = AnimatedButton(I18n.tr('settings_clear'))
         clear_btn.setCursor(Qt.PointingHandCursor)
         clear_btn.setFixedSize(64, 30)
         clear_btn.setStyleSheet(BUTTON_STYLES['danger'])
         clear_btn.clicked.connect(lambda _, p=path: self._on_clear_dir(p))
+        # 后台删除中的目录保持禁用，避免重复点击
+        if path.name in self._clearing:
+            clear_btn.setEnabled(False)
+            clear_btn.setText(I18n.tr('settings_clearing'))
         lay.addWidget(clear_btn)
+        self._cache_clear_buttons[path.name] = clear_btn
 
         self._cache_rows[path.name] = row
         self._cache_rows_layout.insertWidget(self._cache_rows_layout.count() - 1, row)
 
     def _on_clear_dir(self, path: Path):
-        """清空一个缓存目录：直接删除整个目录（非仅内容），无需二次确认"""
-        try:
-            safe_rmtree(str(path))
-        except Exception:
-            pass
+        """清空一个缓存目录：后台删除整个目录（非仅内容），无需二次确认"""
+        name = path.name
+        if name in self._clearing:
+            return
+        self._clearing.add(name)
+        btn = self._cache_clear_buttons.get(name)
+        if btn is not None:
+            btn.setEnabled(False)
+            btn.setText(I18n.tr('settings_clearing'))
+        worker = _CacheClearWorker(path, self)
+        worker.cleared.connect(self._on_cleared)
+        worker.finished.connect(lambda w=worker: self._forget_worker(self._clear_workers, w))
+        self._clear_workers.append(worker)
+        worker.start()
+
+    def _on_cleared(self, name: str):
+        """后台删除完成：刷新列表并通知主窗"""
+        self._clearing.discard(name)
+        self._cache_sizes.pop(name, None)
         self._rebuild_cache_rows()
         self.cache_changed.emit()
+
+    def _start_size_scan(self, dirs):
+        """后台统计各目录占用，逐目录回填；未统计过的目录显示省略号"""
+        for w in self._size_workers:
+            w.requestInterruption()
+        self._size_workers = [w for w in self._size_workers if w.isRunning()]
+        pending = [d for d in dirs if d.name not in self._cache_sizes]
+        if not pending:
+            return
+        self._size_generation += 1
+        worker = _CacheSizeWorker(pending, self._size_generation, self)
+        worker.size_ready.connect(self._on_size_ready)
+        worker.finished.connect(lambda w=worker: self._forget_worker(self._size_workers, w))
+        self._size_workers.append(worker)
+        worker.start()
+
+    def _on_size_ready(self, generation: int, name: str, size: int):
+        if generation != self._size_generation:
+            return  # 过期批次（期间列表已重建）
+        self._cache_sizes[name] = size
+        label = self._cache_size_labels.get(name)
+        if label is not None:
+            label.setText(self._format_size(size))
+
+    @staticmethod
+    def _forget_worker(workers, worker):
+        """线程结束后从引用列表移除（保留引用只为防止运行中被回收）"""
+        try:
+            workers.remove(worker)
+        except ValueError:
+            pass
+
+    def closeEvent(self, event):
+        """关闭前先收尾后台线程，避免线程随对话框销毁导致 Qt 崩溃"""
+        for w in self._size_workers + self._clear_workers:
+            try:
+                w.requestInterruption()
+                w.wait()
+            except RuntimeError:
+                pass
+        super().closeEvent(event)
 
     def _on_manage_folders(self):
         """打开 SyncFolder 根目录（原主界面「管理缓存」逻辑）"""
@@ -508,23 +638,6 @@ class SettingsDialog(QDialog):
         url = QUrl.fromLocalFile(str(sync_folder))
         if not QDesktopServices.openUrl(url):
             QMessageBox.warning(self, I18n.tr('manage_cache'), I18n.tr('manage_cache_error'))
-
-    @staticmethod
-    def _dir_size(path: Path) -> int:
-        """计算单个目录占用大小（字节），失败项跳过"""
-        total = 0
-        try:
-            for dirpath, dirnames, filenames in os.walk(str(path)):
-                for fn in filenames:
-                    fp = os.path.join(dirpath, fn)
-                    if os.path.isfile(fp):
-                        try:
-                            total += os.path.getsize(fp)
-                        except (OSError, PermissionError):
-                            pass
-        except (OSError, PermissionError):
-            pass
-        return total
 
     @staticmethod
     def _format_size(size_bytes: int) -> str:

@@ -2136,9 +2136,17 @@ class SyncWindow(QMainWindow):
         act = I18n.tr('sync_transfer_send') if sync else I18n.tr('clipboard_deliver_send')
         color = "#51cf66" if sync else "#74c0fc"
         key = f"{session_id}:{name}:{conn_id}"
-        if sync and key not in self._sync_active_sends:
-            self._sync_active_sends.add(key)
-            self._refresh_sync_state()
+        if sync:
+            # 断点续传接管：同文件的新连接会接管旧连接，而旧连接（superseded）
+            # 按设计不上报 send_finished，其 conn_id 键会永久残留、总体状态卡在
+            # "同步中"。这里按"会话:文件名"清理同文件的旧连接键。
+            prefix = f"{session_id}:{name}:"
+            for stale in [k for k in self._sync_active_sends
+                          if k != key and k.startswith(prefix)]:
+                self._sync_active_sends.discard(stale)
+            if key not in self._sync_active_sends:
+                self._sync_active_sends.add(key)
+                self._refresh_sync_state()
         # 连接标识 = "对端IP:端口"：进度条带 IP 前缀区分不同接收端（防互串），
         # 与旧版"转发进度含目标 IP"同款；IPv6 用 rsplit 取 IP 段
         peer_ip = conn_id.rsplit(':', 1)[0]

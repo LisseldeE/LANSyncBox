@@ -582,6 +582,8 @@ class SyncServer(QObject):
                     if os.path.exists(temp_file_path):
                         os.remove(temp_file_path)
                     del client_info['receiving_files'][filename]
+                    # 与断连/取消路径一致：上报取消，避免接收进度行与总体状态残留
+                    self.file_receive_cancelled.emit(filename)
                     return
 
                 # 重命名临时文件为正式文件（收集模式下落到连接端 IP 文件夹）
@@ -592,6 +594,7 @@ class SyncServer(QObject):
                     if os.path.exists(temp_file_path):
                         os.remove(temp_file_path)
                     del client_info['receiving_files'][filename]
+                    self.file_receive_cancelled.emit(filename)
                     return
 
                 try:
@@ -619,6 +622,8 @@ class SyncServer(QObject):
                     # 删除临时文件
                     if os.path.exists(temp_file_path):
                         os.remove(temp_file_path)
+                    # 落盘失败等同接收失败：上报取消，避免进度行/总体状态残留
+                    self.file_receive_cancelled.emit(filename)
 
                 # 清理状态
                 del client_info['receiving_files'][filename]

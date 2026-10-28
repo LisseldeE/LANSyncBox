@@ -1,0 +1,18 @@
+﻿LANSyncBox Pro
+Copyright (c) 2026 Lisselde_E <Lisselde.E@outlook.com>
+
+《用户协议》: https://lansyncbox.com/terms.html?ver=pro
+《隐私政策》: https://lansyncbox.com/privacy.html?ver=pro
+
+本软件基于 GNU General Public License v3.0 (GPL-3.0) 授权发布。
+完整的许可证文本见：
+    https://www.gnu.org/licenses/gpl-3.0.txt
+
+This program is free software: you can redistribute it and/or modify
+it under the terms of the GNU General Public License as published by
+the Free Software Foundation, version 3 of the License.
+
+本软件按"原样"提供，不附任何明示或默示担保。更多条款见上方链接的
+GPL-3.0 完整文本。
+
+安装或使用本软件，即表示您已阅读并同意上述用户协议、隐私政策与许可条款。

@@ -3,6 +3,7 @@ __pycache__/
 .vs/
 .md/
 output/
+nuitka/
 SyncFolder/
 wiki/
 old/

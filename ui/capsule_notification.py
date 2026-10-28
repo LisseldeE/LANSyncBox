@@ -14,6 +14,7 @@ from PySide6.QtWidgets import (
     QProgressBar, QPushButton, QSizePolicy, QGraphicsOpacityEffect,
 )
 from config import Config
+from i18n import I18n
 
 
 def format_bytes(num: int) -> str:
@@ -284,7 +285,7 @@ class _CapsuleItem(QFrame):
 
         # 系列标签：左侧“投递”标识（所有投递相关胶囊共有，常驻显示，
         # 与进度条同色系，一眼识别这是投递系列的通知胶囊）
-        self._tag = QLabel("投递")
+        self._tag = QLabel(I18n.tr('capsule_tag_delivery'))
         self._tag.setAlignment(Qt.AlignCenter)
         self._tag.setFixedHeight(20)
         # Fixed：横向永不拉伸——接管短名文件后胶囊内出现多余空间时，
@@ -326,7 +327,7 @@ class _CapsuleItem(QFrame):
         # 默认隐藏，仅可用态展示，点击发射 receive_requested。
         self._receive_btn = None
         if Config.IS_LINUX or Config.IS_MACOS:
-            self._receive_btn = QPushButton("接收", self._content)
+            self._receive_btn = QPushButton(I18n.tr('capsule_receive_btn'), self._content)
             self._receive_btn.setFixedHeight(22)
             self._receive_btn.setCursor(Qt.PointingHandCursor)
             self._receive_btn.setFocusPolicy(Qt.NoFocus)
@@ -353,7 +354,7 @@ class _CapsuleItem(QFrame):
         inner.addWidget(self._bar, 0, Qt.AlignVCenter)
 
         # 冲突询问按钮（"替换"/"取消"）：仅询问态显示，与进度条同槽位
-        self._confirm_btn = QPushButton("替换", self._content)
+        self._confirm_btn = QPushButton(I18n.tr('capsule_replace_btn'), self._content)
         self._confirm_btn.setFixedHeight(22)
         self._confirm_btn.setCursor(Qt.PointingHandCursor)
         self._confirm_btn.setFocusPolicy(Qt.NoFocus)
@@ -361,7 +362,7 @@ class _CapsuleItem(QFrame):
         self._confirm_btn.setVisible(False)
         inner.addWidget(self._confirm_btn, 0, Qt.AlignVCenter)
 
-        self._cancel_btn = QPushButton("取消", self._content)
+        self._cancel_btn = QPushButton(I18n.tr('cancel'), self._content)
         self._cancel_btn.setFixedHeight(22)
         self._cancel_btn.setCursor(Qt.PointingHandCursor)
         self._cancel_btn.setFocusPolicy(Qt.NoFocus)
@@ -371,7 +372,7 @@ class _CapsuleItem(QFrame):
 
         # 传输"取消"按钮（接收进度条旁的最右侧，红色白字）：仅传输态展示，
         # 点击请求取消当前投递（接收）任务。独立于上面的询问"取消"按钮（询问态）。
-        self._fetch_cancel_btn = QPushButton("取消", self._content)
+        self._fetch_cancel_btn = QPushButton(I18n.tr('cancel'), self._content)
         self._fetch_cancel_btn.setFixedHeight(22)
         self._fetch_cancel_btn.setCursor(Qt.PointingHandCursor)
         self._fetch_cancel_btn.setFocusPolicy(Qt.NoFocus)
@@ -392,14 +393,16 @@ class _CapsuleItem(QFrame):
         self._stop_all()
         self._refresh_theme()
         self._hint_mode = False
-        self._title.setText(f"有可用的远程文件  {file_name}  {format_bytes(total_bytes)}")
+        self._title.setText(I18n.tr('capsule_available_title',
+                                    name=file_name, size=format_bytes(total_bytes)))
         # Windows：提示按 Ctrl+V 粘贴；Linux/macOS：无可靠全局热键，
         # 展示"接收"按钮引导选择保存位置，胶囊外观其余部分保持不变。
         if (Config.IS_LINUX or Config.IS_MACOS) and self._receive_btn is not None:
-            self._hint.setText("点击 接收 选择保存位置")
+            self._receive_btn.setText(I18n.tr('capsule_receive_btn'))
+            self._hint.setText(I18n.tr('capsule_receive_hint'))
             self._receive_btn.setVisible(True)
         else:
-            self._hint.setText("按 Ctrl+V 粘贴到此设备")
+            self._hint.setText(I18n.tr('capsule_paste_hint'))
             if self._receive_btn is not None:
                 self._receive_btn.setVisible(False)
         self._hint.setVisible(True)
@@ -462,7 +465,7 @@ class _CapsuleItem(QFrame):
         self._stop_all()
         self._refresh_theme()
         self._hint_mode = True
-        self._tag.setText("公告")
+        self._tag.setText(I18n.tr('announcement'))
         self._tag.setVisible(True)
         # 全量显示：解除标题 320px 宽度上限（超出屏幕宽时才由 _screen_max_w 兜底省略）
         self._title.set_max_width(100000)
@@ -492,6 +495,9 @@ class _CapsuleItem(QFrame):
         self._icon.setVisible(False)
         self._queue_waiting = 0
         self._transferring = False
+        # 文案随当前界面语言刷新（胶囊实例被复用，语言切换后仍显示正确文案）
+        self._confirm_btn.setText(I18n.tr('capsule_replace_btn'))
+        self._cancel_btn.setText(I18n.tr('cancel'))
         self._confirm_btn.setVisible(True)
         self._cancel_btn.setVisible(True)
         self._present()
@@ -507,7 +513,8 @@ class _CapsuleItem(QFrame):
         self._hint_mode = False
         self._total_bytes = int(total_bytes)
         self._title.setText(file_name)
-        self._hint.setText(f"正在投递  {format_bytes(self._total_bytes)}")
+        self._hint.setText(I18n.tr('capsule_delivering',
+                                   size=format_bytes(self._total_bytes)))
         self._hint.setVisible(True)
         self._bar.setVisible(True)
         self._bar.setEnabled(True)
@@ -515,9 +522,11 @@ class _CapsuleItem(QFrame):
         self._bar.setFormat(f"0%  ·  0 B / {format_bytes(self._total_bytes)}")
         self._icon.setVisible(False)
         self._queue_waiting = 0
-        self._transfer_hint = f"正在投递  {format_bytes(self._total_bytes)}"
+        self._transfer_hint = I18n.tr('capsule_delivering',
+                                      size=format_bytes(self._total_bytes))
         self._transferring = True
         # 传输态展示红色"取消"按钮（最右侧，随进度条一起出现）
+        self._fetch_cancel_btn.setText(I18n.tr('cancel'))
         self._fetch_cancel_btn.setVisible(True)
         self._present()
         self._sync_bar_visibility()
@@ -539,7 +548,8 @@ class _CapsuleItem(QFrame):
         # 学到比锁定的元数据更大的真实总量：分母跟进，并同步刷新"正在投递 X"
         if denominator > self._total_bytes:
             self._total_bytes = denominator
-            self._transfer_hint = f"正在投递  {format_bytes(denominator)}"
+            self._transfer_hint = I18n.tr('capsule_delivering',
+                                          size=format_bytes(denominator))
             if self._queue_waiting == 0:
                 self._hint.setText(self._transfer_hint)
         percent = int(received / denominator * 100) if denominator > 0 else 0
@@ -567,7 +577,8 @@ class _CapsuleItem(QFrame):
             return
         self._queue_waiting = count
         self._hint.setText(self._transfer_hint if count == 0
-                           else f"{self._transfer_hint}  ·  {count} 等待")
+                           else f"{self._transfer_hint}  ·  "
+                                f"{I18n.tr('capsule_waiting_count', count=count)}")
         if self._expand >= 0.99:
             self._present()
         else:
@@ -611,7 +622,7 @@ class _CapsuleItem(QFrame):
         self._fetch_cancel_btn.setVisible(False)
         self._queue_waiting = 0
         self._transferring = False
-        self._title.setText("投递已取消")
+        self._title.setText(I18n.tr('clipboard_deliver_cancelled'))
         self._icon.set_color("#f03e3e")
         self._icon.setVisible(True)
         self._present(keep_height=True)
@@ -868,7 +879,7 @@ class _CapsuleItem(QFrame):
         self._resize_group.stop()
         # 公告提示态会换用“公告”标签并放开标题宽度上限；其余任何状态进入时
         # 一律复位为“投递”标签 + 标题 320px 省略上限
-        self._tag.setText("投递")
+        self._tag.setText(I18n.tr('capsule_tag_delivery'))
         self._tag.setVisible(True)
         self._title.set_max_width(320)
         # Linux"接收"按钮仅在可用态展示：进入提示/错误/公告/询问/传输态前隐藏

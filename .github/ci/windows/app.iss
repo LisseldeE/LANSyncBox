@@ -8,6 +8,10 @@
 #ifndef SourceDir
   #define SourceDir "."
 #endif
+; 打包来源目录：Nuitka --standalone 的 .dist 目录（目录版），默认回落到 SourceDir
+#ifndef DistDir
+  #define DistDir SourceDir
+#endif
 #ifndef OutputDir
   #define OutputDir SourceDir
 #endif
@@ -71,7 +75,8 @@ chinesesimp.LaunchProgram=运行 %1
 Name: "desktopicon"; Description: "{cm:CreateDesktopIcon}"; GroupDescription: "{cm:AdditionalIcons}"; Flags: checkedonce
 
 [Files]
-Source: "{#SourceDir}\{#ExeName}"; DestDir: "{app}"; Flags: ignoreversion
+; 目录版：整个 standalone 目录递归安装（含 PySide6\qt-plugins 等全部依赖）
+Source: "{#DistDir}\*"; DestDir: "{app}"; Flags: ignoreversion recursesubdirs createallsubdirs
 
 [Icons]
 Name: "{group}\{#AppName}"; Filename: "{app}\{#ExeName}"
