@@ -24,7 +24,11 @@ def build(args) -> None:
     staging = Path(tempfile.mkdtemp(prefix="deb-"))
     try:
         lib_dir = staging / INSTALL_ROOT.lstrip("/") / args.package
-        shutil.copytree(source_dir, lib_dir)
+        # PyInstaller 在 Linux 上把 Qt 库放在 _internal/PySide6/Qt/lib/，
+        # 并在 _internal 根目录建相对符号链接指向它们。copytree 默认
+        # symlinks=False 会把链接解引用成实体副本，导致每份 Qt/ICU 库
+        # 在包里存两遍（payload 近翻倍），必须保留符号链接。
+        shutil.copytree(source_dir, lib_dir, symlinks=True)
         (lib_dir / args.package).chmod(0o755)
 
         bin_dir = staging / "usr/bin"
@@ -48,7 +52,9 @@ def build(args) -> None:
         icon_dir.mkdir(parents=True)
         shutil.copy2(icon, icon_dir / f"{args.package}.png")
 
-        installed_size = sum(f.stat().st_size for f in staging.rglob("*") if f.is_file()) // 1024
+        # 用 lstat 且跳过符号链接：否则链接会按目标大小重复计入 Installed-Size
+        installed_size = sum(f.lstat().st_size for f in staging.rglob("*")
+                             if f.is_file() and not f.is_symlink()) // 1024
         debian = staging / "DEBIAN"
         debian.mkdir()
         (debian / "control").write_text(
