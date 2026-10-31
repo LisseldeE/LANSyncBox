@@ -9,11 +9,16 @@
 </div>
 
 <p align="center">
-  <a href="https://github.com/LisseldeE/LANSyncBox/releases/tag/pro-R1.2.0.0"><img src="https://img.shields.io/badge/releases-R1.2.0.0-3b82f6" alt="releases R1.2.0.0"></a>
+  <a href="https://github.com/LisseldeE/LANSyncBox/releases/tag/pro-R1.2.1.0"><img src="https://img.shields.io/badge/releases-R1.2.1.0-3b82f6" alt="releases R1.2.1.0"></a>
   <a href="LICENSE"><img src="https://img.shields.io/github/license/LisseldeE/LANSyncBox" alt="License"></a>
   <img src="https://img.shields.io/badge/platform-Windows-blue?logo=windows" alt="Platform">
   <img src="https://img.shields.io/badge/platform-Linux-orange?logo=linux" alt="Platform">
   <img src="https://img.shields.io/badge/platform-macOS-black?logo=apple" alt="Platform">
+</p>
+
+<p align="center">
+  <a href="#feedback"><img src="https://img.shields.io/badge/QQ%20Group-1074184946-12B7F5?logo=tencentqq&logoColor=white" alt="QQ Group"></a>
+  <a href="https://space.bilibili.com/3546562137426810"><img src="https://img.shields.io/badge/Bilibili-Follow-FB7299?logo=bilibili&logoColor=white" alt="Bilibili"></a>
 </p>
 
 <p align="center">
@@ -236,8 +241,10 @@ This project is open-sourced under the GPL-3.0 license. If you wish to use it in
 
 **In Beta testing — if you have any questions or new ideas, feel free to contact me!**
 
+- QQ Group: 1074184946
+- Email: Lisselde.E@outlook.com
+
 Issues and Pull Requests are welcome!
-Email: Lisselde.E@outlook.com
 
 ## Support Me
 

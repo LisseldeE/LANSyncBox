@@ -9,11 +9,16 @@
 </div>
 
 <p align="center">
-  <a href="https://github.com/LisseldeE/LANSyncBox/releases/tag/pro-R1.2.0.0"><img src="https://img.shields.io/badge/releases-R1.2.0.0-3b82f6" alt="releases R1.2.0.0"></a>
+  <a href="https://github.com/LisseldeE/LANSyncBox/releases/tag/pro-R1.2.1.0"><img src="https://img.shields.io/badge/releases-R1.2.1.0-3b82f6" alt="releases R1.2.1.0"></a>
   <a href="LICENSE"><img src="https://img.shields.io/github/license/LisseldeE/LANSyncBox" alt="开源协议"></a>
   <img src="https://img.shields.io/badge/platform-Windows-blue?logo=windows" alt="支持平台">
   <img src="https://img.shields.io/badge/platform-Linux-orange?logo=linux" alt="支持平台">
   <img src="https://img.shields.io/badge/platform-macOS-black?logo=apple" alt="支持平台">
+</p>
+
+<p align="center">
+  <a href="#反馈"><img src="https://img.shields.io/badge/QQ群-1074184946-12B7F5?logo=tencentqq&logoColor=white" alt="QQ 交流群"></a>
+  <a href="https://space.bilibili.com/3546562137426810"><img src="https://img.shields.io/badge/Bilibili-关注-FB7299?logo=bilibili&logoColor=white" alt="Bilibili"></a>
 </p>
 
 <p align="center">
@@ -237,8 +242,10 @@ LANSyncBox Pro 是一款跨平台、专注局域网多人协作的文件实时�
 
 **公开测试中，如有问题或新的创意欢迎和我联系！**
 
+- QQ 交流群：1074184946
+- 邮箱：Lisselde.E@outlook.com
+
 欢迎提交 Issue 和 Pull Request！
-邮箱：Lisselde.E@outlook.com
 
 ## 支持我
 
