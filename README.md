@@ -1,12 +1,17 @@
 <p align="center">
-  <img src="https://lisseldee.github.io/assets/images/webp/1-c1.webp" width="100%" alt="LANSyncBox">
+  <img src="https://lisseldee.github.io/assets/images/webp/1-c.webp" width="100%" alt="LANSyncBox">
 </p>
 
 <div align="center">
 
-[![](https://img.shields.io/badge/-简体中文-3b82f6?style=flat)](https://github.com/LisseldeE/LANSyncBox/blob/pro/README.md) [![](https://img.shields.io/badge/-English-555555?style=flat)](https://github.com/LisseldeE/LANSyncBox/blob/pro/README_EN.md)
+[![](https://img.shields.io/badge/-简体中文-3b82f6?style=flat)](https://github.com/LisseldeE/LANSyncBox/blob/main/README.md) [![](https://img.shields.io/badge/-English-555555?style=flat)](https://github.com/LisseldeE/LANSyncBox/blob/main/README_EN.md)
 
 </div>
+
+> [!NOTE]
+> 仓库结构调整：原 `pro` 分支已成为 `main`；原 `main`（标准版）已归档为 `old` 分支，停止维护、后续删除。
+> 产品命名同步调整为 `LANSyncBox`（原 `LANSyncBox Pro`）。
+
 
 <p align="center">
   <a href="https://github.com/LisseldeE/LANSyncBox/releases/tag/pro-R1.2.1.0"><img src="https://img.shields.io/badge/releases-R1.2.1.0-3b82f6" alt="releases R1.2.1.0"></a>
@@ -71,7 +76,7 @@ LANSyncBox Pro 是一款跨平台、专注局域网多人协作的文件实时�
 - **项目作者**: Lisselde_E
 - **开源协议**: GNU General Public License v3.0
 - **官方网站**: https://lansyncbox.com
-- **项目仓库**: https://github.com/LisseldeE/LANSyncBox/tree/pro
+- **项目仓库**: https://github.com/LisseldeE/LANSyncBox/tree/main
 
 
 ## 演示
@@ -134,7 +139,7 @@ LANSyncBox Pro 是一款跨平台、专注局域网多人协作的文件实时�
 </p>
 
 <p align="center">
-  <a href="https://github.com/LisseldeE/LANSyncBox/blob/pro/downloadwizard/zh_cn.md#LANSyncBox-Pro">
+  <a href="https://github.com/LisseldeE/LANSyncBox/blob/main/downloadwizard/zh_cn.md#LANSyncBox-Pro">
     <img src="https://img.shields.io/badge/GitHub%20Releases-Download-181717?style=for-the-badge&logo=github&logoColor=white" alt="GitHub Releases"/>
   </a>
 </p>
@@ -181,7 +186,7 @@ LANSyncBox Pro 是一款跨平台、专注局域网多人协作的文件实时�
 
 ## 更新日志
 
-详见 [更新日志](https://github.com/LisseldeE/LANSyncBox/blob/pro/CHANGELOG.md)
+详见 [更新日志](https://github.com/LisseldeE/LANSyncBox/blob/main/CHANGELOG.md)
 
 ## 技术栈
 
@@ -216,11 +221,11 @@ LANSyncBox Pro 是一款跨平台、专注局域网多人协作的文件实时�
 
 ## 开源声明
 
-本项目采用 GNU General Public License v3.0 开源协议，详见 [LICENSE](https://github.com/LisseldeE/LANSyncBox/blob/pro/LICENSE) 文件。
+本项目采用 GNU General Public License v3.0 开源协议，详见 [LICENSE](https://github.com/LisseldeE/LANSyncBox/blob/main/LICENSE) 文件。
 
 ## 隐私政策
 
-本项目不收集任何用户数据，详见 [隐私政策](https://github.com/LisseldeE/LANSyncBox/blob/pro/privacy_policy.md) 文件。
+本项目不收集任何用户数据，详见 [隐私政策](https://github.com/LisseldeE/LANSyncBox/blob/main/privacy_policy.md) 文件。
 
 ## 商业合作
 本项目采用 GPL-3.0 协议开源。如果你希望在闭源商业场景中使用，或需要定制开发与技术支持，欢迎通过以下方式联系：

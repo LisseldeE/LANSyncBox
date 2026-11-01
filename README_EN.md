@@ -1,12 +1,17 @@
 <p align="center">
-  <img src="https://lisseldee.github.io/assets/images/webp/1-e1.webp" width="100%" alt="LANSyncBox">
+  <img src="https://lisseldee.github.io/assets/images/webp/1-e.webp" width="100%" alt="LANSyncBox">
 </p>
 
 <div align="center">
 
-[![](https://img.shields.io/badge/-简体中文-555555?style=flat)](https://github.com/LisseldeE/LANSyncBox/blob/pro/README.md) [![](https://img.shields.io/badge/-English-3b82f6?style=flat)](https://github.com/LisseldeE/LANSyncBox/blob/pro/README_EN.md)
+[![](https://img.shields.io/badge/-简体中文-555555?style=flat)](https://github.com/LisseldeE/LANSyncBox/blob/main/README.md) [![](https://img.shields.io/badge/-English-3b82f6?style=flat)](https://github.com/LisseldeE/LANSyncBox/blob/main/README_EN.md)
 
 </div>
+
+> [!NOTE]
+> Repository change: the `pro` branch is now `main`; the previous `main` (standard edition) is archived as the `old` branch, unmaintained and slated for deletion.
+> The product is being renamed to `LANSyncBox` (formerly `LANSyncBox Pro`).
+
 
 <p align="center">
   <a href="https://github.com/LisseldeE/LANSyncBox/releases/tag/pro-R1.2.1.0"><img src="https://img.shields.io/badge/releases-R1.2.1.0-3b82f6" alt="releases R1.2.1.0"></a>
@@ -70,7 +75,7 @@ LANSyncBox Pro is a cross-platform, LAN-focused real-time file synchronization t
 - **Project Author**: Lisselde_E
 - **License**: GNU General Public License v3.0
 - **Official Website**: https://lansyncbox.com
-- **Project Repository**: https://github.com/LisseldeE/LANSyncBox/tree/pro
+- **Project Repository**: https://github.com/LisseldeE/LANSyncBox/tree/main
 
 ## Feature Demos
 
@@ -132,7 +137,7 @@ Peer-to-peer, one-to-one private messaging inside a room — **text** and **file
 </p>
 
 <p align="center">
-  <a href="https://github.com/LisseldeE/LANSyncBox/blob/pro/downloadwizard/en.md#LANSyncBox-Pro">
+  <a href="https://github.com/LisseldeE/LANSyncBox/blob/main/downloadwizard/en.md#LANSyncBox-Pro">
     <img src="https://img.shields.io/badge/GitHub%20Releases-Download-181717?style=for-the-badge&logo=github&logoColor=white" alt="GitHub Releases"/>
   </a>
 </p>
@@ -179,7 +184,7 @@ Peer-to-peer, one-to-one private messaging inside a room — **text** and **file
 
 ## Change Log
 
-See [Changelog](https://github.com/LisseldeE/LANSyncBox/blob/pro/CHANGELOG.md)
+See [Changelog](https://github.com/LisseldeE/LANSyncBox/blob/main/CHANGELOG.md)
 
 ## Tech Stack
 
@@ -214,11 +219,11 @@ See [Changelog](https://github.com/LisseldeE/LANSyncBox/blob/pro/CHANGELOG.md)
 
 ## Open Source License
 
-This project uses the GNU General Public License v3.0, see [LICENSE](https://github.com/LisseldeE/LANSyncBox/blob/pro/LICENSE) file for details.
+This project uses the GNU General Public License v3.0, see [LICENSE](https://github.com/LisseldeE/LANSyncBox/blob/main/LICENSE) file for details.
 
 ## Privacy Policy
 
-This project does not collect any user data, see [Privacy Policy](https://github.com/LisseldeE/LANSyncBox/blob/pro/privacy_policy.md) file for details.
+This project does not collect any user data, see [Privacy Policy](https://github.com/LisseldeE/LANSyncBox/blob/main/privacy_policy.md) file for details.
 
 ## Commercial Cooperation
 

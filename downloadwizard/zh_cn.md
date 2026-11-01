@@ -2,7 +2,7 @@
 
 <div align="center">
 
-[![](https://img.shields.io/badge/-简体中文-3b82f6?style=flat)](https://github.com/LisseldeE/LANSyncBox/blob/pro/downloadwizard/zh_cn.md) [![](https://img.shields.io/badge/-English-555555?style=flat)](https://github.com/LisseldeE/LANSyncBox/blob/pro/downloadwizard/en.md)
+[![](https://img.shields.io/badge/-简体中文-3b82f6?style=flat)](https://github.com/LisseldeE/LANSyncBox/blob/main/downloadwizard/zh_cn.md) [![](https://img.shields.io/badge/-English-555555?style=flat)](https://github.com/LisseldeE/LANSyncBox/blob/main/downloadwizard/en.md)
 
 </div>
 
