@@ -1,20 +1,20 @@
-name: Build & Release (Pro)
+name: Build & Release
 
 on:
   push:
     tags:
-      - 'pro-R*'
+      - 'R*'
 
 permissions:
   contents: write
 
 env:
-  APP_NAME: LANSyncBox Pro
-  ENTRY: LANSyncBox Pro.py
-  WIN_ASSET: LANSyncBoxPro_Setup.exe
-  LINUX_ASSET: lansyncboxpro_amd64.deb
-  LINUX_PKG: lansyncboxpro
-  MAC_ASSET: LANSyncBoxPro_arm64.dmg
+  APP_NAME: LANSyncBox
+  ENTRY: LANSyncBox.py
+  WIN_ASSET: LANSyncBox_Setup.exe
+  LINUX_ASSET: lansyncbox_amd64.deb
+  LINUX_PKG: lansyncbox
+  MAC_ASSET: LANSyncBox_arm64.dmg
 
 jobs:
   build-windows:
@@ -44,7 +44,7 @@ jobs:
       - name: Nuitka 打包（目录版）
         shell: pwsh
         run: |
-          $ver = $env:GITHUB_REF_NAME -replace '^pro-R', ''
+          $ver = $env:GITHUB_REF_NAME -replace '^R', ''
           $na = @(
             '-m', 'nuitka',
             '--standalone',
@@ -63,8 +63,8 @@ jobs:
             '--output-dir=build\nuitka',
             '--windows-icon-from-ico=icon.ico',
             '--company-name=Lisselde_E',
-            '--product-name=LANSyncBox Pro',
-            '--file-description=LANSyncBox Pro',
+            '--product-name=LANSyncBox',
+            '--file-description=LANSyncBox',
             "--file-version=$ver",
             "--product-version=$ver",
             '--copyright=Copyright (c) 2026 Lisselde_E',
@@ -78,15 +78,14 @@ jobs:
         shell: pwsh
         run: |
           $iscc = "C:\Program Files (x86)\Inno Setup 6\ISCC.exe"
-          $ver  = $env:GITHUB_REF_NAME -replace '^pro-R', ''
+          $ver  = $env:GITHUB_REF_NAME -replace '^R', ''
           $src  = Join-Path $env:GITHUB_WORKSPACE "dist"
           $out  = Join-Path $env:GITHUB_WORKSPACE "out"
           New-Item -ItemType Directory -Force -Path $out | Out-Null
           & $iscc `
-            "/DEdition=pro" `
             "/DAppVersion=$ver" `
             "/DSourceDir=$src" `
-            "/DDistDir=$env:GITHUB_WORKSPACE\build\nuitka\LANSyncBox Pro.dist" `
+            "/DDistDir=$env:GITHUB_WORKSPACE\build\nuitka\LANSyncBox.dist" `
             "/DOutputDir=$out" `
             "/DSetupIcon=$env:GITHUB_WORKSPACE\icon.ico" `
             "/DLicenseFile=$env:GITHUB_WORKSPACE\.github\ci\windows\LICENSE.txt" `
@@ -120,7 +119,7 @@ jobs:
         run: |
           python .github/ci/linux/build_deb.py \
             --app-name "${{ env.APP_NAME }}" \
-            --version "${GITHUB_REF_NAME#pro-R}" \
+            --version "${GITHUB_REF_NAME#R}" \
             --source-dir "dist/${{ env.LINUX_PKG }}" \
             --icon icon.png \
             --package "${{ env.LINUX_PKG }}" \
@@ -149,7 +148,7 @@ jobs:
         run: |
           pyinstaller --noconfirm --windowed --icon icon.icns --add-data "icon.icns:." --name "${{ env.APP_NAME }}" "${{ env.ENTRY }}"
           # .app 的版本号注入（PyInstaller 的 BUNDLE 默认写 0.0.0，CLI 无法指定）
-          VER="${GITHUB_REF_NAME#pro-R}"
+          VER="${GITHUB_REF_NAME#R}"
           PLIST="dist/${{ env.APP_NAME }}.app/Contents/Info.plist"
           /usr/libexec/PlistBuddy -c "Set :CFBundleShortVersionString $VER" "$PLIST"
           /usr/libexec/PlistBuddy -c "Add :CFBundleVersion string $VER" "$PLIST" 2>/dev/null || /usr/libexec/PlistBuddy -c "Set :CFBundleVersion $VER" "$PLIST"
@@ -214,7 +213,7 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           TAG: ${{ github.ref_name }}
         run: |
-          TITLE="${APP_NAME}_R${GITHUB_REF_NAME#pro-R}"
+          TITLE="${APP_NAME}_R${GITHUB_REF_NAME#R}"
           ls -l dist
           if gh release view "$TAG" >/dev/null 2>&1; then
             gh release upload "$TAG" dist/* --clobber

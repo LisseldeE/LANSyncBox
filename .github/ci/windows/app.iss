@@ -1,7 +1,3 @@
-#ifndef Edition
-  #define Edition "standard"
-#endif
-
 #ifndef AppVersion
   #define AppVersion "0.0.0.0"
 #endif
@@ -22,17 +18,11 @@
   #define LicenseFile SourceDir + "\LICENSE.txt"
 #endif
 
-#if Edition == "pro"
-  #define AppName "LANSyncBox Pro"
-  #define ExeName "LANSyncBox Pro.exe"
-  #define AppId "{{EE2BE98A-9E6F-4B94-A0EC-5646B8700116}"
-  #define OutputBaseFilename "LANSyncBoxPro_Setup"
-#else
-  #define AppName "LANSyncBox"
-  #define ExeName "LANSyncBox.exe"
-  #define AppId "{{B7F3A1C2-4D5E-4F60-8A91-2C3D4E5F6A70}"
-  #define OutputBaseFilename "LANSyncBox_Setup"
-#endif
+; AppId 沿用历史 Pro 版的 GUID，保证已安装旧版本可被本安装包覆盖升级
+#define AppName "LANSyncBox"
+#define ExeName "LANSyncBox.exe"
+#define AppId "{{EE2BE98A-9E6F-4B94-A0EC-5646B8700116}"
+#define OutputBaseFilename "LANSyncBox_Setup"
 
 [Setup]
 AppId={#AppId}

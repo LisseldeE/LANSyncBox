@@ -17,7 +17,7 @@ class I18n:
     _translations: Dict[str, Dict[str, str]] = {
         "zh_CN": {
             # 应用名称
-            "app_name": "LANSyncBox Pro",
+            "app_name": "LANSyncBox",
             "app_title": "局域网文件同步工具",
             
             # 主界面
@@ -383,7 +383,7 @@ class I18n:
             "online_count": "在线",
             
             # 关于对话框
-            "about_title": "关于 LANSyncBox Pro",
+            "about_title": "关于 LANSyncBox",
             "about_version": "版本: {version}",
             "about_version_label": "版本",
             "cache_size": "缓存占用: {size}",
@@ -420,7 +420,7 @@ class I18n:
         },
         "en_US": {
             # App name
-            "app_name": "LANSyncBox Pro",
+            "app_name": "LANSyncBox",
             "app_title": "LAN File Sync Tool",
             
             # Main window

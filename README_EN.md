@@ -9,9 +9,7 @@
 </div>
 
 > [!NOTE]
-> Repository change: the `pro` branch is now `main`; the previous `main` (standard edition) is archived as the `old` branch, unmaintained and slated for deletion.
-> The product is being renamed to `LANSyncBox` (formerly `LANSyncBox Pro`).
-
+> Project update: the LANSyncBox Standard and Pro editions have begun merging. The project is now named LANSyncBox. The merge will be officially complete with the R1.2.2.0 release, after which the Standard edition will be delisted and retired.
 
 <p align="center">
   <a href="https://github.com/LisseldeE/LANSyncBox/releases/tag/pro-R1.2.1.0"><img src="https://img.shields.io/badge/releases-R1.2.1.0-3b82f6" alt="releases R1.2.1.0"></a>
@@ -39,29 +37,9 @@
   <a href="#open-source-license">License</a>
 </p>
 
-> **Version Note**: This branch is the **Pro** edition of [**LANSyncBox**](https://github.com/LisseldeE/LANSyncBox/tree/main). The decentralized refactor has been completed and, after multiple rounds of internal testing, the features are largely complete. If you encounter any issues while using it, please report them in a timely manner.
-
 ## Project Introduction
 
-LANSyncBox Pro is a cross-platform, LAN-focused real-time file synchronization tool for multiplayer collaboration. It requires no public network: it supports large-file streaming transfer, serialized sending, and broken-transfer resumption, ensuring reliable data and stable transfer under multi-connection, high-concurrency scenarios. Compared to the legacy version, Pro adopts a new decentralized distributed architecture, eliminating the single-point-of-failure that affects the entire link. It also introduces several new capabilities: **Delivery** (cross-device copy & paste), top-edge drag-and-drop **quick-add**, peer-to-peer **Chat**, **endpoint nicknames**, Collect mode, permission management, and more.
-
-## Version Comparison
-
-| Feature | Standard | Pro |
-| :--- | :---: | :---: |
-| Real-time file sync | ✔ | ✔ |
-| Room sharing (6-digit code · password check) | ✔ | ✔ |
-| Large file transfer (streaming · resume) | ✔ | ✔ |
-| File operations (add/edit/delete · read-only preview) | ✔ | ✔ |
-| Chinese / English UI switching | ✔ | ✔ |
-| **Endpoint nickname (replaces IP)** | — | ✔ |
-| **Delivery · cross-device copy & paste** | — | ✔ |
-| **Text clipboard broadcast** | — | ✔ |
-| **Image / file peer-to-peer delivery** | — | ✔ |
-| **Chat · peer-to-peer private transfer** | — | ✔ |
-| **Top quick-add** | — | ✔ |
-| **Sync / Collect modes** | — | ✔ |
-| **Decentralized mesh sync** | — | ✔ |
+LANSyncBox is a cross-platform, LAN-focused real-time file synchronization tool for multiplayer collaboration. It requires no public network: it supports large-file streaming transfer, serialized sending, and broken-transfer resumption, ensuring reliable data and stable transfer under multi-connection, high-concurrency scenarios. It adopts a decentralized distributed architecture, eliminating the single-point-of-failure that affects the entire link. It also offers several capabilities: **Delivery** (cross-device copy & paste), top-edge drag-and-drop **quick-add**, peer-to-peer **Chat**, **endpoint nicknames**, Collect mode, permission management, and more.
 
 ## Screenshots
 
@@ -71,7 +49,7 @@ LANSyncBox Pro is a cross-platform, LAN-focused real-time file synchronization t
 
 ## Project Information
 
-- **Project Name**: LANSyncBox Pro
+- **Project Name**: LANSyncBox
 - **Project Author**: Lisselde_E
 - **License**: GNU General Public License v3.0
 - **Official Website**: https://lansyncbox.com
@@ -99,7 +77,7 @@ LANSyncBox Pro is a cross-platform, LAN-focused real-time file synchronization t
 - **File Operations**: add, create, copy, cut, paste, delete, rename; double-click for read-only preview
 - **Interface**: smooth Qt6 UI, real-time Chinese/English switching, visible transfer progress
 
-## New in Pro
+## Feature Highlights
 
 ### Endpoint Nickname
 
@@ -137,7 +115,7 @@ Peer-to-peer, one-to-one private messaging inside a room — **text** and **file
 </p>
 
 <p align="center">
-  <a href="https://github.com/LisseldeE/LANSyncBox/blob/main/downloadwizard/en.md#LANSyncBox-Pro">
+  <a href="https://github.com/LisseldeE/LANSyncBox/blob/main/downloadwizard/en.md#lansyncbox">
     <img src="https://img.shields.io/badge/GitHub%20Releases-Download-181717?style=for-the-badge&logo=github&logoColor=white" alt="GitHub Releases"/>
   </a>
 </p>
@@ -205,12 +183,12 @@ See [Changelog](https://github.com/LisseldeE/LANSyncBox/blob/main/CHANGELOG.md)
   ```bash
   sudo apt install -y ./lansyncbox_*.deb
   ```
-- **macOS (dmg)**: Download `LANSyncBoxPro_arm64.dmg` from [GitHub Releases](https://github.com/LisseldeE/LANSyncBox/releases), open it, and drag `LANSyncBox Pro.app` into the Applications folder. The app is not signed or notarized by Apple, so macOS blocks it on first launch — allow it as follows:
-  1. In Applications, **right-click** (or Control-click) LANSyncBox Pro, choose "Open", then click "Open" again in the dialog; or
+- **macOS (dmg)**: Download `LANSyncBox_arm64.dmg` from [GitHub Releases](https://github.com/LisseldeE/LANSyncBox/releases), open it, and drag `LANSyncBox.app` into the Applications folder. The app is not signed or notarized by Apple, so macOS blocks it on first launch — allow it as follows:
+  1. In Applications, **right-click** (or Control-click) LANSyncBox, choose "Open", then click "Open" again in the dialog; or
   2. If it has already been blocked, open System Settings → Privacy & Security and click "Open Anyway" in the Security section.
 
 ### Running
-- **Windows**: After installation, launch LANSyncBox Pro from the Start menu or desktop shortcut
+- **Windows**: After installation, launch LANSyncBox from the Start menu or desktop shortcut
 - **Linux**: Launch LANSyncBox from the app menu (Activities); if it reports missing system dependencies at runtime, run:
   ```bash
   sudo apt install -y libxcb-cursor0 libgl1 libxkbcommon-x11-0

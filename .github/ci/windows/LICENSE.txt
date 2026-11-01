@@ -1,4 +1,4 @@
-﻿LANSyncBox Pro
+﻿LANSyncBox
 Copyright (c) 2026 Lisselde_E <Lisselde.E@outlook.com>
 
 《用户协议》: https://lansyncbox.com/terms.html?ver=pro
