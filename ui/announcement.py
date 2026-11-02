@@ -16,6 +16,9 @@ _VERSION_RE = re.compile(r'^(\d{2})\.(\d{1,2})\.(\d{1,2})\.(\d+)$')
 # 版本定向指令行：普通公告正文也可能含冒号，仅锚定行首 "# 版本：正文" 形式
 _TARGETED_RE = re.compile(r'^#\s*([^：:]+?)\s*[：:]\s*(.*)$')
 
+# 定向目标的语言后缀（与 I18n.set_language 的取值一致）
+_LANG_SUFFIXES = ("zh_CN", "en_US")
+
 
 def _parse_version(ver: str):
     """解析公告批次号 '26.9.15.2' → (26, 9, 15, 2)；非法格式返回 None"""
@@ -42,15 +45,29 @@ def is_newer(remote: str, stored: str) -> bool:
     return r > s
 
 
-def _select_for_version(body: str, local_version: str) -> str:
-    """按本端程序版本号从公告正文中选取唯一显示文本。
+def _split_target(target: str):
+    """拆分定向目标为 (基础目标, 语言后缀)；无语言后缀时语言为 None。
+
+    'R1.2.1.0_zh_CN' → ('R1.2.1.0', 'zh_CN')；'ALL' → ('ALL', None)
+    """
+    for lang in _LANG_SUFFIXES:
+        if target.endswith("_" + lang):
+            return target[:-(len(lang) + 1)], lang
+    return target, None
+
+
+def _select_for_version(body: str, local_version: str, lang: str = "") -> str:
+    """按本端程序版本号与界面语言从公告正文中选取唯一显示文本。
 
     公告正文从第二行起，可含若干行版本的定向指令行，形如：
-        # ALL：所有人可见的正式内容
-        # R1.0.0.0：仅该版本可见的专属内容
-    - 若存在与本端 APP_VERSION 完全一致的定向行，则只返回该专属正文；
-    - 否则返回 ALL 行正文；
-    - 两者绝不拼接；失效行（无匹配版本、无 ALL）直接丢弃。
+        # ALL_zh_CN：所有人可见的中文正式内容
+        # ALL_en_US：英文正式内容
+        # R1.0.0.0_zh_CN：仅该版本可见的中文专属内容
+        # R1.0.0.0：不带语言后缀时对所有语言生效
+    - 按以下优先级返回第一条命中：本端版本+当前语言 → 本端版本（无后缀）
+      → ALL+当前语言 → ALL（无后缀）；
+    - 命中的行只返回该行正文，多行绝不拼接；
+    - 全部未命中则返回空串（本端不该显示内容）。
 
     兼容无定向行的旧式正文：整体不是 "# 版本：" 形式时，原样返回全部正文。
     """
@@ -67,14 +84,19 @@ def _select_for_version(body: str, local_version: str) -> str:
         else:
             raw_lines.append(ln)
 
-    # 存在定向行视为 v2 定向格式：精确匹配本端版本，否则回退 ALL，绝不拼接
+    # 存在定向行视为 v2 定向格式：按版本+语言优先级精确匹配，绝不拼接
     if targeted:
-        for target, text in targeted:
-            if target == local_version:
-                return text
-        for target, text in targeted:
-            if target == 'ALL':
-                return text
+        wanted = [
+            (local_version, lang or None),
+            (local_version, None),
+            ('ALL', lang or None),
+            ('ALL', None),
+        ]
+        for want_base, want_lang in wanted:
+            for target, text in targeted:
+                base, target_lang = _split_target(target)
+                if base == want_base and target_lang == want_lang:
+                    return text
         return ""  # 无匹配专属、也无 ALL：本端不该显示内容
 
     # 无定向行：兼容老格式，返回全部正文
@@ -82,15 +104,17 @@ def _select_for_version(body: str, local_version: str) -> str:
 
 
 def fetch_announcement():
-    """从远程拉取公告文件，并按本端版本选取应显示的唯一正文。
+    """从远程拉取公告文件，并按本端版本分别解析各语言的正文。
 
     文件格式（v2 定向投递）：
         第一行：公告批次号（如 26.9.15.2）
-        其后若干行：版本定向指令行 "# 版本：正文"，其中 "# ALL：" 为通用正文
-    返回: (批次号字符串, 本端应显示的正文) 元组
-        成功: ("26.9.15.2", "正文（专属或 ALL）")
+        其后若干行：版本定向指令行 "# 目标：正文"，目标可带语言后缀
+                     （如 "# ALL_zh_CN：…"、"# R1.2.1.0_en_US：…"）
+    返回: (批次号字符串, 各语言正文 dict) 元组
+        成功: ("26.9.15.2", {"zh_CN": "中文正文", "en_US": "英文正文"})
         失败: (None, "错误描述")；格式非法: (None, None)
-        本端无匹配内容: ("26.9.15.2", "")——批次号已更新但本端无正文可显示
+        本端该语言无内容: ("26.9.15.2", {"zh_CN": "", "en_US": ""})
+                          —— 批次号已更新但本端无正文可显示
     """
     # 优先使用 certifi 自带 CA 根证书（macOS 及打包环境的系统证书库常缺失，
     # 会导致 CERTIFICATE_VERIFY_FAILED）；certifi 缺失时回退默认上下文。
@@ -114,5 +138,9 @@ def fetch_announcement():
     if not lines or _parse_version(lines[0].strip()) is None:
         return None, None
     version = lines[0].strip()
-    text = _select_for_version('\n'.join(lines[1:]), Config.APP_VERSION)
-    return version, text
+    body_text = '\n'.join(lines[1:])
+    texts = {
+        lang: _select_for_version(body_text, Config.APP_VERSION, lang)
+        for lang in _LANG_SUFFIXES
+    }
+    return version, texts

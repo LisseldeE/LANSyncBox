@@ -40,6 +40,7 @@ class I18n:
             "settings_category_cache": "缓存",
             "settings_subtitle": "个性化偏好与本地存储",
             "settings_section_general": "通用",
+            "settings_section_aux": "辅助",
             "settings_section_notify": "通知",
             "settings_section_delivery": "投递",
             "settings_section_cache": "缓存目录",
@@ -47,6 +48,7 @@ class I18n:
             "settings_auto_check_update": "自动检查更新",
             "settings_receive_announcements": "接收推送公告",
             "settings_capsule_announcements": "新公告通过胶囊栏显示",
+            "settings_drop_zone": "屏幕顶部快捷添加",
             "settings_manage_folders": "管理文件夹",
             # 投递设置
             "delivery_settings": "投递设置",
@@ -443,6 +445,7 @@ class I18n:
             "settings_category_cache": "Cache",
             "settings_subtitle": "Preferences & local storage",
             "settings_section_general": "General",
+            "settings_section_aux": "Auxiliary",
             "settings_section_notify": "Notifications",
             "settings_section_delivery": "Delivery",
             "settings_section_cache": "Cache folders",
@@ -450,6 +453,7 @@ class I18n:
             "settings_auto_check_update": "Auto-check for updates",
             "settings_receive_announcements": "Receive announcements",
             "settings_capsule_announcements": "Show new announcements in the capsule bar",
+            "settings_drop_zone": "Quick add from screen top",
             "settings_manage_folders": "Manage Folders",
             # Delivery settings
             "delivery_settings": "Delivery Settings",

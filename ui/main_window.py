@@ -148,7 +148,7 @@ class MainWindow(QMainWindow):
     """主窗口"""
 
     _update_fetched = Signal(str)  # 自动检查更新结果（新版本号；空串=无需提醒）
-    _announcement_fetched = Signal(str, str)  # 公告拉取结果（版本号, 正文；失败为空串）
+    _announcement_fetched = Signal(str, object)  # 公告拉取结果（版本号, 各语言正文 dict）
 
     def __init__(self):
         super().__init__()
@@ -160,7 +160,7 @@ class MainWindow(QMainWindow):
         self._cache_watcher = None  # 文件系统监控器
         self._cache_refresh_timer = None  # 缓存刷新延迟定时器
         self._announce_capsule = CapsuleNotification()  # 公告提示胶囊
-        self._announcement = None  # 当前公告 (版本, 正文)，主界面入口持久显示直到新公告
+        self._announcement = None  # 当前公告 (版本, 各语言正文 dict)，入口按当前语言实时显示
         
         self.init_ui()
         self._setup_cache_watcher()
@@ -445,6 +445,7 @@ class MainWindow(QMainWindow):
         self._settings_dialog = SettingsDialog(self)
         self._settings_dialog.cache_changed.connect(self._refresh_cache_size)
         self._settings_dialog.announcements_toggled.connect(self._on_announcements_toggled)
+        self._settings_dialog.drop_zone_toggled.connect(self._on_drop_zone_toggled)
         self._settings_dialog.show()
     
     def _get_language_text(self) -> str:
@@ -549,24 +550,24 @@ class MainWindow(QMainWindow):
         self._restore_announcement_entry()
 
         def _fetch():
-            version, text = fetch_announcement()
-            self._announcement_fetched.emit(version or "", text or "")
+            version, texts = fetch_announcement()
+            self._announcement_fetched.emit(version or "", texts or {})
 
         threading.Thread(target=_fetch, daemon=True).start()
 
     def _restore_announcement_entry(self):
         """从 config.json 恢复已接收公告（入口持久显示，不重播胶囊）。
 
-        若只有版本号而无正文（旧版本逻辑或异常中断的残留），视为未接收：
+        若只有版本号而无任何语言正文（旧版本逻辑或异常中断的残留），视为未接收：
         清空版本号，让本次拉取把服务器公告当新公告处理并补齐正文。
         """
         version = UserConfig.get_last_announcement()
-        text = UserConfig.get_last_announcement_text()
-        if version and not text:
+        texts = UserConfig.get_last_announcement_texts()
+        if version and not any(texts.values()):
             UserConfig.set_last_announcement("")
             return
-        if version and text:
-            self._announcement = (version, text)
+        if version and texts:
+            self._announcement = (version, texts)
             self._refresh_announcement_entry()
 
     def _on_announcements_toggled(self, enabled: bool):
@@ -577,35 +578,48 @@ class MainWindow(QMainWindow):
             self._announcement = None
             self._announce_entry.clear_announcement()
 
-    def _on_announcement_fetched(self, version: str, text: str):
+    def _on_drop_zone_toggled(self, enabled: bool):
+        """「屏幕顶部快捷添加」开关：同步窗口存在且房间就绪时立即生效"""
+        if self._sync_window is not None:
+            self._sync_window.apply_drop_zone_enabled(enabled)
+
+    def _on_announcement_fetched(self, version: str, texts: dict):
         """公告拉取结果：仅当版本新于已记录值时播放胶囊并显示主界面持久入口（静默失败）"""
-        if not version or not text:
+        if not version or not isinstance(texts, dict) or not any(texts.values()):
             return
         if not is_newer(version, UserConfig.get_last_announcement()):
             return
-        self._announcement = (version, text)
+        self._announcement = (version, texts)
         # 「新公告通过胶囊栏显示」关闭时跳过胶囊播放，公告仅在主界面入口显示
+        # 胶囊按时播放时的语言取正文快照，之后切换语言不重播/不改写已播内容
         if UserConfig.get_capsule_announcements():
-            self._announce_capsule.show_announcement(text)
+            self._announce_capsule.show_announcement(self._announcement_text())
         UserConfig.set_last_announcement(version)
-        UserConfig.set_last_announcement_text(text)
+        UserConfig.set_last_announcement_texts(texts)
         self._refresh_announcement_entry()
+
+    def _announcement_text(self) -> str:
+        """按当前界面语言取公告正文；该语言缺失时回退另一语言，避免入口空白"""
+        if not self._announcement:
+            return ""
+        texts = self._announcement[1]
+        lang = I18n.get_language()
+        return texts.get(lang) or texts.get("zh_CN") or texts.get("en_US") or ""
 
     def _refresh_announcement_entry(self):
         """按当前语言刷新公告入口预览（持久显示，直到收到新公告才更新）"""
         if not self._announcement:
             return
-        version, text = self._announcement
+        text = self._announcement_text()
         prefix = f"{I18n.tr('announcement')}：" if I18n.get_language() == "zh_CN" \
             else f"{I18n.tr('announcement')}: "
         self._announce_entry.set_announcement(prefix + text)
 
     def _on_announcement_clicked(self):
-        """点击公告入口：弹出完整公告详情窗口"""
+        """点击公告入口：弹出完整公告详情窗口（正文按当前语言取）"""
         if not self._announcement:
             return
-        version, text = self._announcement
-        dialog = AnnouncementDialog(text, self)
+        dialog = AnnouncementDialog(self._announcement_text(), self)
         dialog.exec()
 
     def _on_update_clicked(self, event):

@@ -215,8 +215,8 @@ class AboutDialog(QDialog):
         self.setLayout(layout)
 
     def _open_github(self, event):
-        """打开 GitHub 仓库链接（当前版本位于 pro 分支）"""
-        QDesktopServices.openUrl(QUrl(f"https://github.com/{Config.GITHUB_REPO}/tree/pro"))
+        """打开 GitHub 仓库链接"""
+        QDesktopServices.openUrl(QUrl(f"https://github.com/{Config.GITHUB_REPO}"))
 
     def _open_issues(self, event):
         """打开 GitHub Issues 页面（问题反馈）"""
@@ -336,7 +336,7 @@ class AboutDialog(QDialog):
 
             msg_box.exec_()
 
-            # 处理用户选择：直达下载向导页（标准版/Pro 分流，最新的 Pro 安装包在向导页获取）
+            # 处理用户选择：直达官网下载向导页（最新安装包在该页获取）
             if msg_box.clickedButton() == yes_btn:
                 QDesktopServices.openUrl(QUrl(releases_url))
         else:

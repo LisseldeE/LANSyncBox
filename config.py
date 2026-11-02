@@ -49,11 +49,11 @@ class Config:
 
     # 应用信息
     APP_NAME = "LANSyncBox"
-    APP_VERSION = "R1.2.1.0"
+    APP_VERSION = "R1.2.2.0"
     # 同步逻辑版本号
     SYNC_LOGIC_VERSION = "26.9C2"
-    # 序列号：P(Pro 固定) + 构建年月 YYMM(发布时手改) + . + 平台字母(自动识别) + H(GitHub 发布源固定)
-    APP_SERIAL_DATE = "2610"
+    # 序列号：P(历史沿用前缀) + 构建年月 YYMM(发布时手改) + . + 平台字母(自动识别) + H(GitHub 发布源固定)
+    APP_SERIAL_DATE = "2611"
     APP_SERIAL = f"P{APP_SERIAL_DATE}.{_PLATFORM_LETTER}H"
     APP_SERIAL_FULL = ".".join(x for x in (APP_NAME, APP_VERSION, APP_SERIAL) if x)
     APP_VERSION_SERIAL = ".".join(x for x in (APP_VERSION, APP_SERIAL) if x)
@@ -76,20 +76,18 @@ class Config:
     # 版本号托管于官网纯文本文件（GitHub Pages 在部分网络下不可达）
     UPDATE_URL = "https://lansyncbox.com/version/lansyncboxpro"
     # 用户协议与隐私政策（官网托管页面）
-    TERMS_URL = "https://lansyncbox.com/terms.html?ver=pro"
-    PRIVACY_URL = "https://lansyncbox.com/privacy.html?ver=pro"
+    TERMS_URL = "https://lansyncbox.com/terms"
+    PRIVACY_URL = "https://lansyncbox.com/privacy"
     # 条款版本号：协议内容有实质变更时同步修改（客户端据此判断是否需要重新确认）
     TERMS_VERSION = "2026-10-25"
     PRIVACY_VERSION = "2026-10-26"
-    # 公告文件（v2 版本定向投递）：首行批次号（如 26.9.15.2），其后为 "# 目标：正文" 指令行。
-    # 文件改为 lansyncboxprov2：旧版不升级仍读旧文件，避免解析新格式出错而导致公告显示异常。
-    ANNOUNCEMENT_URL = "https://lansyncbox.com/announcement/lansyncboxprov2"
+    ANNOUNCEMENT_URL = "https://lansyncbox.com/announcement/lansyncbox"
     # 下载落地页（按语言区分，保持不变）
     GITHUB_RELEASES = f"https://github.com/{GITHUB_REPO}/releases"
     GITEE_RELEASES = f"https://gitee.com/{GITEE_REPO}/releases"
-    # 官网下载区（Pro 版检查更新跳转目标），按语言区分
-    DOWNLOAD_WIZARD_URL_ZH = "https://lansyncbox.com/?ver=pro#download"
-    DOWNLOAD_WIZARD_URL_EN = "https://lansyncbox.com/?lang=en&ver=pro#download"
+    # 官网下载区（检查更新跳转目标），按语言区分
+    DOWNLOAD_WIZARD_URL_ZH = "https://lansyncbox.com/#download"
+    DOWNLOAD_WIZARD_URL_EN = "https://lansyncbox.com/?lang=en#download"
 
     @staticmethod
     def get_download_wizard_url(language: str) -> str:
@@ -591,6 +589,16 @@ class UserConfig:
         """设置「新公告通过胶囊栏显示」并持久化"""
         cls.set("capsule_announcements", bool(enabled))
 
+    @classmethod
+    def get_drop_zone_enabled(cls) -> bool:
+        """获取「屏幕顶部快捷添加」状态（默认开启）"""
+        return bool(cls.get("drop_zone_enabled", True))
+
+    @classmethod
+    def set_drop_zone_enabled(cls, enabled: bool):
+        """设置「屏幕顶部快捷添加」并持久化"""
+        cls.set("drop_zone_enabled", bool(enabled))
+
     # ---------- 投递设置 ----------
 
     @classmethod
@@ -646,14 +654,26 @@ class UserConfig:
         cls.set("last_announcement", str(version))
 
     @classmethod
-    def get_last_announcement_text(cls) -> str:
-        """获取已接收公告的正文（config.json 中的记录，空串表示从未接收）"""
-        return str(cls.get("last_announcement_text", ""))
+    def get_last_announcement_texts(cls) -> dict:
+        """获取已接收公告的正文（按语言分别保存，config.json 中以 JSON 字符串存储）。
+
+        旧版本仅存单一语言纯文本：解析失败时按中英文各一份返回，切换语言不丢失内容。
+        """
+        raw = cls.get("last_announcement_text", "")
+        if not raw or not isinstance(raw, str):
+            return {}
+        try:
+            data = json.loads(raw)
+        except ValueError:
+            return {"zh_CN": raw, "en_US": raw}
+        if not isinstance(data, dict):
+            return {}
+        return {str(k): str(v) for k, v in data.items()}
 
     @classmethod
-    def set_last_announcement_text(cls, text: str):
-        """记录已接收公告的正文，供主界面入口启动时持久显示"""
-        cls.set("last_announcement_text", str(text))
+    def set_last_announcement_texts(cls, texts: dict):
+        """记录已接收公告的各语言正文，供主界面入口启动时按语言持久显示"""
+        cls.set("last_announcement_text", json.dumps(texts, ensure_ascii=False))
 
     @classmethod
     def update_reference_info(cls, exe_path: str):
@@ -679,9 +699,9 @@ class UserConfig:
 
         cls.save()
 
-    # Pro 版专属历史房间号键。与标准版共用同一 config.json 文件，但历史用独立命名空间：
-    # 标准版只解析它认识的 "room_history"(room_code+ip)，天然忽略本键 → 互不污染、不读崩。
-    # Pro 的历史以房间号为主键；ip 只在"用户手动指定主机 IP 且连接成功"时记录，作为
+    # 历史房间号键（键名沿用旧版，保证已有 config.json 数据可直接读取）：
+    # 旧标准版只解析 "room_history"(room_code+ip)，天然忽略本键 → 互不污染、不读崩。
+    # 历史以房间号为主键；ip 只在"用户手动指定主机 IP 且连接成功"时记录，作为
     # 下次扫描的定向探活线索（UDP 摸不到时用），广播发现仍是主路径。
     PRO_ROOM_HISTORY_KEY = "pro_room_history"
 
@@ -695,7 +715,7 @@ class UserConfig:
                 if c and c not in codes:
                     codes.append(c)
             data[cls.PRO_ROOM_HISTORY_KEY] = [{"room_code": c} for c in codes[:3]]
-            # 清理旧版里无 IP 的 Pro 遗留条目（保留带 IP 的，那仍属标准版可用数据）
+            # 清理旧版里无 IP 的遗留条目（保留带 IP 的，那仍属旧标准版可用数据）
             cleaned = [
                 h for h in legacy
                 if not (isinstance(h, dict) and h.get("room_code") and not h.get("ip"))
@@ -708,7 +728,7 @@ class UserConfig:
 
     @classmethod
     def get_room_history_entries(cls) -> list:
-        """获取 Pro 版历史条目（最新在前，去重，容量 3）
+        """获取历史房间条目（最新在前，去重，容量 3）
 
         Returns:
             [{"room_code": str, "ip": str}, ...]（ip 为空串表示未记录定向线索）
@@ -731,11 +751,11 @@ class UserConfig:
 
     @classmethod
     def add_room_history(cls, room_code: str, ip: str = ""):
-        """记录一条成功加入的 Pro 房间历史（上限 3 条，超出丢弃最旧）
+        """记录一条成功加入的房间历史（上限 3 条，超出丢弃最旧）
 
         房间号始终记录；ip 仅在"用户手动指定主机 IP 且连接成功"时传入，作为定向探活
         线索。未传 ip 时不覆盖该房间已有的旧线索（旧 IP 仍可能有效）。
-        写入 Pro 专属命名空间，不影响标准版 history。
+        写入历史专用命名空间，不影响旧标准版 history。
         Args:
             room_code: 房间号
             ip: 上次手动指定的主机 IP（非手动输入模式传空串）
@@ -764,7 +784,7 @@ class UserConfig:
 
     @classmethod
     def remove_room_history(cls, room_code: str):
-        """从 Pro 版历史记录中移除指定房间号"""
+        """从历史记录中移除指定房间号"""
         data = cls.load()
         history, _ = cls._ensure_pro_history(data)
         # 兼容脏数据：仅保留 dict 条目

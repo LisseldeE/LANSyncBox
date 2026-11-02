@@ -1,8 +1,8 @@
 ﻿LANSyncBox
 Copyright (c) 2026 Lisselde_E <Lisselde.E@outlook.com>
 
-《用户协议》: https://lansyncbox.com/terms.html?ver=pro
-《隐私政策》: https://lansyncbox.com/privacy.html?ver=pro
+《用户协议》: https://lansyncbox.com/terms
+《隐私政策》: https://lansyncbox.com/privacy
 
 本软件基于 GNU General Public License v3.0 (GPL-3.0) 授权发布。
 完整的许可证文本见：

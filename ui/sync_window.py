@@ -2872,7 +2872,10 @@ class SyncWindow(QMainWindow):
         放置条是独立置顶的 OLE drop-target：用户把文件拖到屏幕顶部时，系统派发
         dragEnterEvent，放置条随即展开 visible 胶囊；在胶囊上松手即加入同步列表
         （根目录即房间目录）。不依赖任何全局钩子。
+        设置中关闭该功能后不再创建；已在显示时由 apply_drop_zone_enabled 移除。
         """
+        if not UserConfig.get_drop_zone_enabled():
+            return
         if self._drop_zone is not None:
             return
         from ui.drop_zone import DropZone
@@ -2883,6 +2886,17 @@ class SyncWindow(QMainWindow):
         capsule = getattr(self, "_capsule", None)
         self._drop_zone.set_capsule(capsule)
         self._drop_zone.show()
+
+    def apply_drop_zone_enabled(self, enabled: bool):
+        """应用「屏幕顶部快捷添加」开关：关闭时立即移除放置条，开启时在房间就绪后重建"""
+        if not enabled:
+            if self._drop_zone is not None:
+                self._drop_zone.close()
+                self._drop_zone = None
+                self.file_list.set_drop_zone(None)
+            return
+        if self._room_ready:
+            self._init_drop_zone()
 
     def _perform_full_sync(self):
         """连接端执行一次全量差异同步：上报本地文件列表给主机端仲裁

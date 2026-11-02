@@ -176,9 +176,9 @@ class _CategoryList(QWidget):
 class SettingsDialog(QDialog):
     """设置对话框
 
-    左侧分类菜单（常规/系统/缓存）+ 右侧内容区，分类切换带淡出淡入过渡。
-    - 常规：退出房间询问（= confirm_leave_no_ask 取反）、自动检查更新
-      （Config.ENABLE_CHECK_UPDATE=False 时整行隐藏）
+    左侧分类菜单（常规/系统/投递/缓存）+ 右侧内容区，分类切换带淡出淡入过渡。
+    - 常规：子分类「通用」= 退出房间询问（confirm_leave_no_ask 取反）、自动检查更新
+      （Config.ENABLE_CHECK_UPDATE=False 时整行隐藏）；子分类「辅助」= 屏幕顶部快捷添加
     - 系统：接收推送公告、新公告通过胶囊栏显示
     - 缓存：列出 SyncFolder 下全部一级子目录（排除 preview，含空目录与
       非房间号干扰目录），每项显示名称/占用/「清空」按钮（删除整个目录），
@@ -187,6 +187,7 @@ class SettingsDialog(QDialog):
 
     cache_changed = Signal()  # 缓存目录被清空，通知主窗刷新缓存占用
     announcements_toggled = Signal(bool)  # 「接收推送公告」开关变化（True=开启）
+    drop_zone_toggled = Signal(bool)  # 「屏幕顶部快捷添加」开关变化（True=开启）
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -253,7 +254,7 @@ class SettingsDialog(QDialog):
     def _build_general_page(self):
         page = QWidget()
         lay = QVBoxLayout(page)
-        lay.setContentsMargins(0, 0, 0, 0)
+        lay.setContentsMargins(0, 14, 0, 0)
         lay.setSpacing(12)
 
         # 分组小标题（与创建/加入对话框的字段标签一致：灰色小字）
@@ -280,13 +281,25 @@ class SettingsDialog(QDialog):
             self._auto_update_row.setVisible(False)
         lay.addWidget(self._auto_update_row)
 
+        # 子分类「辅助」：屏幕顶部快捷添加等辅助能力
+        lay.addSpacing(8)
+        lay.addWidget(self._make_section_label(I18n.tr('settings_section_aux')))
+        lay.addWidget(self._make_divider())
+        drop_row, drop_sw = self._make_switch_row(
+            I18n.tr('settings_drop_zone'),
+            UserConfig.get_drop_zone_enabled(),
+            lambda checked: UserConfig.set_drop_zone_enabled(checked),
+        )
+        drop_sw.stateChanged.connect(self.drop_zone_toggled.emit)
+        lay.addWidget(drop_row)
+
         lay.addStretch()
         return page
 
     def _build_system_page(self):
         page = QWidget()
         lay = QVBoxLayout(page)
-        lay.setContentsMargins(0, 0, 0, 0)
+        lay.setContentsMargins(0, 14, 0, 0)
         lay.setSpacing(12)
 
         lay.addWidget(self._make_section_label(I18n.tr('settings_section_notify')))
@@ -317,7 +330,7 @@ class SettingsDialog(QDialog):
     def _build_delivery_page(self):
         page = QWidget()
         lay = QVBoxLayout(page)
-        lay.setContentsMargins(0, 0, 0, 0)
+        lay.setContentsMargins(0, 14, 0, 0)
         lay.setSpacing(12)
 
         lay.addWidget(self._make_section_label(I18n.tr('settings_section_delivery')))
@@ -333,7 +346,7 @@ class SettingsDialog(QDialog):
     def _build_cache_page(self):
         page = QWidget()
         lay = QVBoxLayout(page)
-        lay.setContentsMargins(0, 0, 0, 0)
+        lay.setContentsMargins(0, 14, 0, 0)
         lay.setSpacing(12)
 
         # 缓存目录标题 + 管理文件夹按钮同一行（标题居左，按钮居右）
@@ -381,16 +394,16 @@ class SettingsDialog(QDialog):
         )
         return lbl
 
-    def _make_divider(self) -> QFrame:
+    def _make_divider(self) -> QWidget:
         """子分类下方的细分割线（落到整个子分类之下，而非每个选项下方）"""
         dark = _is_dark(self)
-        line = QFrame()
-        line.setFrameShape(QFrame.HLine)
-        line.setFrameShadow(QFrame.Plain)
+        line = QWidget()
         line.setFixedHeight(1)
+        # 用普通 QWidget 承载背景色：QFrame 的 HLine 会叠加 frame 绘制，
+        # 导致同类分割线在不同位置出现色差
+        line.setAttribute(Qt.WA_StyledBackground, True)
         line.setStyleSheet(
-            f"QFrame {{ background: "
-            f"{'rgba(255,255,255,32)' if dark else 'rgba(0,0,20,44)'}; }}"
+            f"background: {'rgba(255,255,255,32)' if dark else 'rgba(0,0,20,44)'};"
         )
         return line
 

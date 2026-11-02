@@ -35,6 +35,8 @@ VersionInfoProductName={#AppName}
 VersionInfoDescription={#AppName} 安装程序
 VersionInfoOriginalFilename={#OutputBaseFilename}.exe
 DefaultDirName={autopf}\{#AppName}
+; 升级时不沿用旧版安装目录：旧版被卸载后装到上面的 DefaultDirName（路径中不再含 Pro）
+UsePreviousAppDir=no
 DefaultGroupName={#AppName}
 DisableProgramGroupPage=yes
 LicenseFile={#LicenseFile}
