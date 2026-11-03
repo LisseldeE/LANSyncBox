@@ -11,6 +11,7 @@ import time
 
 from PySide6.QtCore import QObject, Signal
 
+from network import identity, tls_transport
 from network.protocol import Protocol, MessageType, MessageReceiver
 from utils.send_guard import SendLock
 
@@ -284,6 +285,17 @@ class FileProvider(QObject):
             return
         conn_socket = info['socket']
         receiver = info['receiver']
+        # 入向拉取连接在本线程内完成 TLS 握手，避免阻塞 accept 循环
+        try:
+            conn_socket = tls_transport.wrap_server(conn_socket)
+            # 每连接设备身份校验：拉取方必须证明设备私钥 + 指纹比对（仅校验，不固定）
+            peer_identity = identity.authenticate_acceptor(conn_socket, "pull")
+        except Exception:
+            self._close_conn(conn_id)
+            return
+        with self._lock:
+            info['socket'] = conn_socket
+            info['peer_identity'] = peer_identity
         conn_socket.settimeout(1.0)
         idle_since = time.time()  # 最后一次活动（收到数据）时刻，用于空闲回收
 
@@ -401,6 +413,17 @@ class FileProvider(QObject):
             with self._lock:
                 info['pull_done'] = True
             return
+
+        # 会话 token 校验通过：此时才固定对端设备指纹（首次 TOFU，之后必须一致）
+        peer = info.get('peer_identity')
+        if peer:
+            try:
+                identity.commit_pin(peer.end_id, peer.fingerprint)
+            except identity.IdentityConflict as e:
+                self.log_message.emit(f"设备身份冲突，拒绝拉取: {e}")
+                with self._lock:
+                    info['pull_done'] = True
+                return
 
         session = self._find_session(session_id, token)
         abs_path = session.resolve(name) if session else None
@@ -601,8 +624,11 @@ def _connect_provider(host: str, port: int, stop_event):
                 pass
             conn.settimeout(6.0)   # 单次建连超时：复制端刚广播过必然在线，6s 足够，重试兜底瞬断
             conn.connect((host, port))
-            return conn
-        except OSError:
+            # 全链路 TLS + 设备身份：握手/验签失败按建连失败重试，绝不回退明文
+            conn = tls_transport.wrap_client(conn, host)
+            peer = identity.authenticate_dialer(conn, "pull")
+            return conn, peer
+        except (OSError, identity.IdentityError):
             try:
                 conn.close()
             except Exception:
@@ -685,12 +711,14 @@ def pull_file(host: str, port: int, session_id: str, token: str, name: str, dest
                 if stop_event is not None and stop_event.is_set():
                     cancelled = True
                     break
-                conn = _connect_provider(host, port, stop_event)
-                if conn is None:
+                connected = _connect_provider(host, port, stop_event)
+                if connected is None:
                     if stop_event is not None and stop_event.is_set():
                         cancelled = True
                         break
                     break  # 建连 3 次全失败：非瞬时，放弃（同样不再续传）
+                conn, peer_identity = connected
+                peer_committed = False
                 try:
                     # recv 超时 1s 供 stop_event 轮询（弱网语义不变：timeout 后 continue
                     # 静默等待，发送端打开/读取慢时依然无限等待；仅新增取消与整体超时兜底）
@@ -724,6 +752,11 @@ def pull_file(host: str, port: int, session_id: str, token: str, name: str, dest
                         while receiver.has_complete_message():
                             mtype, fname, fsize, msg_mtime, _hide, content = receiver.get_message()
                             if mtype == MessageType.FILE_BEGIN:
+                                # 提供方已按本次会话 token 开流：此时才固定其设备指纹
+                                if not peer_committed and peer_identity:
+                                    identity.commit_pin(peer_identity.end_id,
+                                                        peer_identity.fingerprint)
+                                    peer_committed = True
                                 expected_total = fsize  # 发送端开流时的真实大小（进度分母，恒定）
                                 mtime = msg_mtime
                             elif mtype == MessageType.FILE_DATA:
@@ -757,6 +790,8 @@ def pull_file(host: str, port: int, session_id: str, token: str, name: str, dest
                             # stop_event 已置位（故不传入 _connect_provider，直接原始建连）。
                             try:
                                 _c2 = socket.create_connection((host, port), timeout=2)
+                                _c2 = tls_transport.wrap_client(_c2, host)
+                                identity.authenticate_dialer(_c2, "pull")
                                 try:
                                     _c2.sendall(Protocol.create_file_cancel_for_pull(
                                         session_id, name))

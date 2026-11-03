@@ -77,6 +77,11 @@ class MessageType:
                               #   文件字节仍由接收端直连发送端 FileProvider 拉取（复用 0x23 通道）
     CHAT_SESSION_CLOSE = 0x31 # 私信文件会话失效（端→端）：content=JSON {from_id, session_id, reason}
 
+    # ---- 设备身份校验（TLS 之后、业务消息之前；每条 TCP 连接独立执行） ----
+    IDENTITY_CHALLENGE = 0x32  # 接受方→拨号方：content=JSON {nonce, purpose}
+    IDENTITY_PROOF = 0x33      # 拨号方→接受方：content=JSON {end_id, cert, sig}
+    IDENTITY_OK = 0x34         # 接受方→拨号方：验签与指纹固定通过；content 为空
+
 
 class RoomProbeState:
     """房间探活状态码（ROOM_PROBE_RESP 的 content 取值）

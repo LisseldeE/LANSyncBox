@@ -188,6 +188,7 @@ class SettingsDialog(QDialog):
     cache_changed = Signal()  # 缓存目录被清空，通知主窗刷新缓存占用
     announcements_toggled = Signal(bool)  # 「接收推送公告」开关变化（True=开启）
     drop_zone_toggled = Signal(bool)  # 「屏幕顶部快捷添加」开关变化（True=开启）
+    clean_cache_toggled = Signal(bool)  # 「退出房间时清理缓存」开关变化（True=开启）
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -370,6 +371,16 @@ class SettingsDialog(QDialog):
         top.addWidget(manage_btn)
         lay.addLayout(top)
 
+        # 退出房间时清理缓存（与同步界面底部开关共用同一份配置）
+        clean_row, self._clean_cache_switch = self._make_switch_row(
+            I18n.tr('settings_clean_cache'),
+            UserConfig.get_clean_cache_enabled(),
+            lambda checked: UserConfig.set_clean_cache_enabled(checked),
+        )
+        self._clean_cache_switch.setToolTip(I18n.tr('clean_cache_tooltip'))
+        self._clean_cache_switch.stateChanged.connect(self.clean_cache_toggled.emit)
+        lay.addWidget(clean_row)
+
         # 缓存目录列表滚动区
         scroll = QScrollArea()
         scroll.setWidgetResizable(True)
@@ -423,6 +434,15 @@ class SettingsDialog(QDialog):
         sw.stateChanged.connect(on_changed)
         lay.addWidget(sw)
         return row, sw
+
+    def set_clean_cache_enabled(self, enabled: bool):
+        """同步界面开关变化时回填设置里的开关，避免两处状态不一致"""
+        sw = self._clean_cache_switch
+        if sw.isChecked() == enabled:
+            return
+        sw.blockSignals(True)
+        sw.setChecked(enabled, animate=False)
+        sw.blockSignals(False)
 
     # ---------- 分类切换动画 ----------
 

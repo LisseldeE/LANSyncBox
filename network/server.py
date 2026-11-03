@@ -14,6 +14,7 @@ from typing import Dict, Optional
 from PySide6.QtCore import QObject, Signal
 
 from config import Config, UserConfig
+from network import identity, tls_transport
 from network.protocol import Protocol, MessageType, MessageReceiver, RoomProbeState
 from network.mesh import MeshManager
 from sync.distributor import Distributor
@@ -400,9 +401,35 @@ class SyncServer(QObject):
             client_info = self.clients.get(client_id)
             if not client_info:
                 return
-            client_socket = client_info['socket']
+            raw_socket = client_info['socket']
             receiver = client_info['receiver']
-        
+
+        # TLS 握手放在每连接线程内完成，避免阻塞 accept 循环；失败静默移除
+        # （探活连接/不兼容旧端都会在此握手失败，不 emit 错误信号）
+        try:
+            client_socket = tls_transport.wrap_server(raw_socket)
+            # 每连接设备身份校验：nonce 签名 + 指纹比对，防"知道密码但无设备私钥"的冒充。
+            # 此处只校验不固定（避免未过密码的连接抢占 end_id），认证成功后再 commit。
+            peer_identity = identity.authenticate_acceptor(client_socket, "mgmt")
+        except identity.IdentityConflict as e:
+            self.log_message.emit(f"设备身份冲突，拒绝连接: {e}")
+            self._remove_client(client_id)
+            return
+        except Exception:
+            self._remove_client(client_id)
+            return
+        with self._lock:
+            info = self.clients.get(client_id)
+            if not info:
+                # 握手期间已被 stop/心跳移除
+                try:
+                    client_socket.close()
+                except Exception:
+                    pass
+                return
+            info['socket'] = client_socket
+            info['peer_identity'] = peer_identity
+
         client_socket.settimeout(1.0)
         
         while self.running:
@@ -861,6 +888,16 @@ class SyncServer(QObject):
                 self.log_message.emit(f"客户端 {client_id} 验证失败: {fail_msg}")
                 self._remove_client(client_id)
                 return
+
+            # 密码/房间/版本均已通过：此时才固定对端设备指纹（首次 TOFU，之后必须一致）
+            peer = self.clients[client_id].get('peer_identity')
+            if peer:
+                try:
+                    identity.commit_pin(peer.end_id, peer.fingerprint)
+                except identity.IdentityConflict as e:
+                    self.log_message.emit(f"设备身份冲突，拒绝连接: {e}")
+                    self._remove_client(client_id)
+                    return
 
             # ---- 连接端"复用管理监听"（_reuse=True，非真主机）——H1：控制面只连主机 ----
             # 接入端拨到的是本连接端的管理监听，并非真主机。不能让接入端把本端误当

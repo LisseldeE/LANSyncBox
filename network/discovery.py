@@ -12,6 +12,7 @@ from typing import Dict, Optional, List
 from PySide6.QtCore import QObject, Signal
 
 from config import Config, UserConfig
+from network import identity, tls_transport
 from network.protocol import Protocol, MessageType, MessageReceiver, RoomProbeState
 
 
@@ -697,6 +698,9 @@ class TcpRoomProbe(QObject):
             sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
             sock.settimeout(self.PROBE_TIMEOUT)
             sock.connect((ip, port))
+            # 探活也走 TLS：与正式链路一致，握手失败即视为未探到
+            sock = tls_transport.wrap_client(sock, ip)
+            identity.authenticate_dialer(sock, "mgmt")
             sock.sendall(Protocol.create_room_probe(Config.SYNC_LOGIC_VERSION, room_code))
 
             receiver = MessageReceiver()
@@ -750,6 +754,9 @@ def query_peers(ip: str, room_code: str, port: int = None,
         sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         sock.settimeout(timeout)
         sock.connect((ip, port or Config.DEFAULT_PORT))
+        sock = tls_transport.wrap_client(sock, ip)
+        identity.authenticate_dialer(sock, "mgmt")
+        sock.settimeout(timeout)
         sock.sendall(Protocol.create_room_peer_query(
             Config.SYNC_LOGIC_VERSION, room_code))
         receiver = MessageReceiver()

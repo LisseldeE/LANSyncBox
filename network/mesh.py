@@ -11,6 +11,7 @@ from typing import Optional
 from PySide6.QtCore import QObject, Signal
 
 from config import Config, UserConfig
+from network import identity, tls_transport
 from network.protocol import Protocol, MessageType, MessageReceiver
 from sync.vector import Endpoint
 from utils.send_guard import SendLock
@@ -56,6 +57,7 @@ class MeshManager(QObject):
         self._lock = threading.Lock()
         self.peers: dict = {}        # end_id -> Endpoint（地址线索/拨号缓存，非在线状态）
         self.conns: dict = {}        # end_id -> {socket, receiver, send_guard, role, name, endpoint, heartbeat_stop}
+        self._pending_sockets: set = set()  # 已 accept 但尚在 TLS 握手的入向 socket（stop 时须一并关闭）
         self._reconnect_threads: dict = {}   # end_id -> Thread
         self.host_ep: Optional[Endpoint] = None  # 房间主机端点线索（辐射清单置顶条目，带 is_host 标识）
         self.host_id = ''            # 主机权威身份，仅由管理面认证路径写入（wire 声明须与此一致）
@@ -191,8 +193,17 @@ class MeshManager(QObject):
             self.peers.clear()
             threads = list(self._reconnect_threads.values())
             self._reconnect_threads.clear()
+        with self._lock:
+            pending = list(self._pending_sockets)
+            self._pending_sockets.clear()
         for info in conns:
             self._close_conn_info(info)
+        # 握手期未注册的入向 socket：不关闭会一直占用监听端口直到握手超时
+        for s in pending:
+            try:
+                s.close()
+            except Exception:
+                pass
         for t in threads:
             try:
                 t.join(timeout=1.0)
@@ -284,6 +295,8 @@ class MeshManager(QObject):
                 pass
             sock.settimeout(5.0)  # 建连超时：本地局域网 5s 足够
             sock.connect((ep.ip, ep.mesh_port))
+            # 全链路 TLS：拨号方在此完成握手（对端在连接线程内握手）
+            sock = tls_transport.wrap_client(sock, ep.ip)
             sock.settimeout(1.0)
         except OSError:
             try:
@@ -312,6 +325,15 @@ class MeshManager(QObject):
                 conn_socket.setsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF, 4 * 1024 * 1024)
             except Exception:
                 pass
+            with self._lock:
+                if not self.running:
+                    try:
+                        conn_socket.close()
+                    except Exception:
+                        pass
+                    continue
+                # 登记为「握手期 socket」，stop 时可立即关闭，避免占住监听端口
+                self._pending_sockets.add(conn_socket)
             threading.Thread(target=self._handle_mesh_conn,
                              args=(conn_socket, None, 'in'), daemon=True).start()
 
@@ -322,6 +344,31 @@ class MeshManager(QObject):
         接受方都能在对端处理线程中识别彼此并校验准入；未通过者静默关闭。END_INFO
         与本连接后续所有发送共用同一把发送锁，避免并发写交错。
         """
+        # 入向连接在本线程内握手（拨号方已在 _dial 完成握手，wrap_server 幂等直接返回）
+        pending_socket = conn_socket
+        accepted_end_id = ''
+        peer_identity = None
+        try:
+            conn_socket = tls_transport.wrap_server(conn_socket)
+            # 每连接设备身份校验：拨号方验服务端证书；接受方验对端 nonce 签名 + 指纹。
+            # 此处只校验不固定；END_INFO 准入通过后再 commit，避免未准入连接抢占 end_id。
+            if role == 'out':
+                peer_identity = identity.authenticate_dialer(
+                    conn_socket, "mesh", self.end_id)
+            else:
+                peer_identity = identity.authenticate_acceptor(conn_socket, "mesh")
+                accepted_end_id = peer_identity.end_id
+        except identity.IdentityConflict as e:
+            self.log_message.emit(f"设备身份冲突，拒绝网状连接: {e}")
+            self._forget_pending_socket(pending_socket)
+            self._close_socket(pending_socket)
+            return
+        except Exception:
+            self._forget_pending_socket(pending_socket)
+            self._close_socket(pending_socket)
+            return
+        self._forget_pending_socket(pending_socket)
+
         send_guard = SendLock()
         receiver = MessageReceiver()
         pending = []
@@ -359,9 +406,19 @@ class MeshManager(QObject):
                             break  # 非法身份
                         if expected_end_id and peer_end_id != expected_end_id:
                             break  # 身份与拨号目标不符
+                        if accepted_end_id and peer_end_id != accepted_end_id:
+                            break  # END_INFO 身份与证书签名身份不一致
                         if not self._verify_peer(content):
                             rejected = True
                             break  # 房间/凭据不符 → 拒绝
+                        if peer_identity:
+                            try:
+                                identity.commit_pin(peer_identity.end_id,
+                                                    peer_identity.fingerprint)
+                            except identity.IdentityConflict as e:
+                                self.log_message.emit(f"设备身份冲突，拒绝网状连接: {e}")
+                                rejected = True
+                                break
                         peer_ep = Endpoint(
                             end_id=peer_end_id,
                             name=content.get('name', ''),
@@ -420,6 +477,13 @@ class MeshManager(QObject):
             if is_current:
                 self._close_socket(conn_socket)
                 self.peer_disconnected.emit(peer_ep.end_id)
+                # 重连守护线程可能早已退避到上限而退出；只要对端地址线索仍在，
+                # 就重新拉起，避免去重竞态导致该对端长期失联。
+                if self.running:
+                    with self._lock:
+                        still_known = peer_ep.end_id in self.peers
+                    if still_known:
+                        self._ensure_reconnect(peer_ep.end_id)
 
     def _verify_peer(self, content: dict) -> bool:
         """网状准入校验：房间号一致 + 准入凭据匹配，任一不符即拒。
@@ -580,6 +644,11 @@ class MeshManager(QObject):
             pass
 
     # ---- 工具 ----
+
+    def _forget_pending_socket(self, sock):
+        """握手完成后把 socket 从「握手期集合」移除（拨号侧 socket 本就不在集合内）。"""
+        with self._lock:
+            self._pending_sockets.discard(sock)
 
     @staticmethod
     def _close_socket(sock):

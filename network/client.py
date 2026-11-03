@@ -13,6 +13,7 @@ from typing import Optional
 from PySide6.QtCore import QObject, Signal
 
 from config import Config, UserConfig
+from network import identity, tls_transport
 from network.protocol import Protocol, MessageType, MessageReceiver
 from network.mesh import MeshManager
 from sync.distributor import Distributor
@@ -70,6 +71,7 @@ class SyncClient(QObject):
         self.socket: Optional[socket.socket] = None
         self.running = False
         self.authenticated = False
+        self._pending_server_identity = None  # 本次连接的已验服务端身份，认证成功后固定指纹
         self.receiver = MessageReceiver()
         self.host_ip: Optional[str] = None        # 主机地址（连接对端，END_INFO 记录用）
         self.mesh: Optional[MeshManager] = None   # 网状连接管理器（认证成功后启动）
@@ -183,6 +185,10 @@ class SyncClient(QObject):
                 pass
             self.socket.settimeout(2.0 if self._reconnect_active else 5.0)
             self.socket.connect((host, port))
+            # 全链路 TLS：建连后立即握手，失败即按建连失败处理（不回退明文）
+            self.socket = tls_transport.wrap_client(self.socket, host)
+            # 每连接身份校验：比对服务端证书 + 向主机证明本端设备私钥
+            self._pending_server_identity = identity.authenticate_dialer(self.socket, "mgmt")
             self.socket.settimeout(1.0)
             self.host_ip = host
 
@@ -545,8 +551,11 @@ class SyncClient(QObject):
             s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
             s.settimeout(2.0)
             s.connect((ip, mgmt_port))
+            # 与正式链路一致走 TLS + 身份校验：验证端口开放、加密可用、服务端证书指纹
+            s = tls_transport.wrap_client(s, ip)
+            identity.authenticate_dialer(s, "mgmt")
             return True
-        except OSError:
+        except Exception:
             return False
         finally:
             if s is not None:
@@ -1392,6 +1401,16 @@ class SyncClient(QObject):
                 return
             
             if success:
+                peer = self._pending_server_identity
+                if peer:
+                    try:
+                        identity.commit_pin(peer.end_id, peer.fingerprint)
+                    except identity.IdentityError as e:
+                        self._pending_server_identity = None
+                        self.log_message.emit(f"设备身份冲突，拒绝连接: {e}")
+                        self.disconnect()
+                        return
+                    self._pending_server_identity = None
                 self.authenticated = True
                 self._perm_auth_denied = False  # 重新认证成功，重置"永久拒绝"提示标记
                 # 通知试连方（_try_attach）认证结果

@@ -446,6 +446,7 @@ class MainWindow(QMainWindow):
         self._settings_dialog.cache_changed.connect(self._refresh_cache_size)
         self._settings_dialog.announcements_toggled.connect(self._on_announcements_toggled)
         self._settings_dialog.drop_zone_toggled.connect(self._on_drop_zone_toggled)
+        self._settings_dialog.clean_cache_toggled.connect(self._on_clean_cache_toggled)
         self._settings_dialog.show()
     
     def _get_language_text(self) -> str:
@@ -583,6 +584,16 @@ class MainWindow(QMainWindow):
         if self._sync_window is not None:
             self._sync_window.apply_drop_zone_enabled(enabled)
 
+    def _on_clean_cache_toggled(self, enabled: bool):
+        """「退出房间时清理缓存」开关：同步窗口存在时立即同步"""
+        if self._sync_window is not None:
+            self._sync_window.set_clean_cache_enabled(enabled)
+
+    def _on_sync_clean_cache_toggled(self, enabled: bool):
+        """同步界面里改动开关后回填设置面板"""
+        if self._settings_dialog is not None:
+            self._settings_dialog.set_clean_cache_enabled(enabled)
+
     def _on_announcement_fetched(self, version: str, texts: dict):
         """公告拉取结果：仅当版本新于已记录值时播放胶囊并显示主界面持久入口（静默失败）"""
         if not version or not isinstance(texts, dict) or not any(texts.values()):
@@ -653,6 +664,7 @@ class MainWindow(QMainWindow):
 
         # 窗口关闭时刷新缓存大小并显示主窗口
         self._sync_window.closed.connect(self._show_and_refresh_cache)
+        self._sync_window.clean_cache_toggled.connect(self._on_sync_clean_cache_toggled)
 
         self._sync_window.show()
 

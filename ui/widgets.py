@@ -905,7 +905,7 @@ class DeliveryModeControl(QWidget):
         m = self._MARGIN
 
         # 胶囊底板（中性玻璃）
-        bg = QColor(0, 0, 0, 12) if not dark else QColor(255, 255, 255, 26)
+        bg = QColor(15, 23, 42, 24) if not dark else QColor(255, 255, 255, 26)
         painter.setPen(Qt.NoPen)
         painter.setBrush(bg)
         painter.drawRoundedRect(QRectF(0, 0, w, h), r, r)
@@ -916,16 +916,27 @@ class DeliveryModeControl(QWidget):
             seg_w = w / float(n)
             hover_rect = QRectF(self._hover_side * seg_w + m, m,
                                 seg_w - 2 * m, h - 2 * m)
-            hcol = QColor(0, 0, 0, 22) if not dark else QColor(255, 255, 255, 30)
+            hcol = QColor(15, 23, 42, 32) if not dark else QColor(255, 255, 255, 30)
             painter.setBrush(hcol)
             painter.drawRoundedRect(hover_rect, (h - 2 * m) / 2.0, (h - 2 * m) / 2.0)
 
         # 焦点气泡（随 _pos 滑动）：按档位等分宽度居中，与文字中心严格对齐
         seg_w = w / float(n)
         bubble = QRectF(m + self._pos * seg_w, m, seg_w - 2 * m, h - 2 * m)
-        bcol = QColor("#e9eaee") if not dark else QColor("#eceef2")
+        radius = (h - 2 * m) / 2.0
+        # 浅色模式用纯白气泡 + 淡阴影/描边：浅灰轨道上边界清晰，不再与底板糊在一起
+        bcol = QColor("#ffffff") if not dark else QColor("#eceef2")
+        if not dark:
+            painter.setPen(Qt.NoPen)
+            painter.setBrush(QColor(15, 23, 42, 22))
+            painter.drawRoundedRect(
+                QRectF(bubble.x(), bubble.y() + 1, bubble.width(), bubble.height()),
+                radius, radius)
+            painter.setPen(QPen(QColor(15, 23, 42, 18), 1))
+        else:
+            painter.setPen(Qt.NoPen)
         painter.setBrush(bcol)
-        painter.drawRoundedRect(bubble, (h - 2 * m) / 2.0, (h - 2 * m) / 2.0)
+        painter.drawRoundedRect(bubble, radius, radius)
 
         # 档位文字：每个档位区域内水平垂直居中
         f = QFont(self.font())
@@ -934,7 +945,7 @@ class DeliveryModeControl(QWidget):
         painter.setFont(f)
         for i, label in enumerate(self._labels):
             painter.setPen(QColor("#1f2328") if i == active_i
-                           else QColor("#767d86" if not dark else "#a0a0a0"))
+                           else QColor("#6b7280" if not dark else "#a0a0a0"))
             painter.drawText(QRectF(i * seg_w, 0, seg_w, h),
                              Qt.AlignHCenter | Qt.AlignVCenter, label)
 

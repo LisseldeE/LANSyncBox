@@ -207,7 +207,7 @@ class ModeSegmentedControl(QWidget):
         r = h / 2.0
 
         # 胶囊底板（中性玻璃，悬浮效果不作用在此处）
-        bg = QColor(0, 0, 0, 12) if not dark else QColor(255, 255, 255, 26)
+        bg = QColor(15, 23, 42, 24) if not dark else QColor(255, 255, 255, 26)
         painter.setPen(Qt.NoPen)
         painter.setBrush(bg)
         painter.drawRoundedRect(QRectF(0, 0, w, h), r, r)
@@ -219,7 +219,7 @@ class ModeSegmentedControl(QWidget):
             m0 = self._MARGIN
             hx = self._hover_side * w / 2.0
             hover_rect = QRectF(hx + m0, m0, w / 2.0 - 2 * m0, h - 2 * m0)
-            hcol = QColor(0, 0, 0, 22) if not dark else QColor(255, 255, 255, 30)
+            hcol = QColor(15, 23, 42, 32) if not dark else QColor(255, 255, 255, 30)
             painter.setBrush(hcol)
             painter.drawRoundedRect(hover_rect, (h - 2 * m0) / 2.0, (h - 2 * m0) / 2.0)
 
@@ -229,19 +229,28 @@ class ModeSegmentedControl(QWidget):
         bw = (w - 2 * m) / 2.0
         bx = m + self._pos * bw
         bubble = QRectF(bx, m, bw, h - 2 * m)
-        bcol = QColor("#e9eaee") if not dark else QColor("#eceef2")
+        radius = (h - 2 * m) / 2.0
+        # 浅色模式用纯白气泡 + 淡阴影/描边：浅灰轨道上边界清晰，不再与底板糊在一起
+        bcol = QColor("#ffffff") if not dark else QColor("#eceef2")
         if (self._hovered and not self._switching
                 and self._hover_side == active_i):
-            bcol = QColor("#e2e5ea") if not dark else QColor("#f3f5f8")
+            bcol = QColor("#ffffff") if not dark else QColor("#f3f5f8")
+        if not dark:
+            painter.setPen(Qt.NoPen)
+            painter.setBrush(QColor(15, 23, 42, 22))
+            painter.drawRoundedRect(QRectF(bx, m + 1, bw, h - 2 * m), radius, radius)
+            painter.setPen(QPen(QColor(15, 23, 42, 18), 1))
+        else:
+            painter.setPen(Qt.NoPen)
         painter.setBrush(bcol)
-        painter.drawRoundedRect(bubble, (h - 2 * m) / 2.0, (h - 2 * m) / 2.0)
+        painter.drawRoundedRect(bubble, radius, radius)
 
         # 两个选项文字：激活侧深色（气泡为白系，深浅模式均易读），未激活侧灰
         for i, label in enumerate(self._labels):
             if i == active_i:
                 painter.setPen(QColor("#1f2328"))
             else:
-                painter.setPen(QColor("#767d86" if not dark else "#a0a0a0"))
+                painter.setPen(QColor("#6b7280" if not dark else "#a0a0a0"))
             painter.drawText(QRectF(i * w / 2.0, 0, w / 2.0, h),
                              Qt.AlignCenter, label)
 
@@ -610,6 +619,8 @@ class SyncWindow(QMainWindow):
     tcp_file_done = Signal(str, bool)     # (session_key, ok)
     # 会话内单个文件拉取失败（工作线程发射，供胶囊弹"远程文件不可用"错误提示）
     tcp_file_error = Signal(str, str, str)  # (session_key, 文件名, 错误消息)
+    # 退出时清理缓存开关变化（供设置面板回填，保持两处状态一致）
+    clean_cache_toggled = Signal(bool)
 
     # 共享剪贴板回环识别窗口（秒）：本端复制后窗口期内收到同指纹通知视为回声
     _OWN_COPY_WINDOW = 8.0
@@ -4080,6 +4091,15 @@ class SyncWindow(QMainWindow):
         """清理缓存开关状态改变"""
         # 保存状态到配置
         UserConfig.set_clean_cache_enabled(checked)
+        self.clean_cache_toggled.emit(checked)
+
+    def set_clean_cache_enabled(self, enabled: bool):
+        """设置面板改动开关后同步到本窗口，避免两处状态不一致"""
+        if self.clean_cache_switch.isChecked() == enabled:
+            return
+        self.clean_cache_switch.blockSignals(True)
+        self.clean_cache_switch.setChecked(enabled, animate=False)
+        self.clean_cache_switch.blockSignals(False)
 
     # ---------- 投递设置 ----------
 
