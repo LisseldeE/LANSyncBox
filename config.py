@@ -73,7 +73,8 @@ class Config:
     GITHUB_REPO = "LisseldeE/LANSyncBox"
     GITEE_REPO = "Lisselde_E/LANSyncBox"
 
-    # 版本号托管于官网纯文本文件（GitHub Pages 在部分网络下不可达）
+    # 更新清单托管于官网纯文本文件（版本号/哈希/下载地址/更新日志；
+    # GitHub Pages 在部分网络下不可达）。文件名保持不变，旧客户端仍按此路径拉取。
     UPDATE_URL = "https://lansyncbox.com/version/lansyncboxpro"
     # 用户协议与隐私政策（官网托管页面）
     TERMS_URL = "https://lansyncbox.com/terms"
@@ -171,6 +172,17 @@ class Config:
         注意：使用用户主目录下的独立文件夹（避开MSIX虚拟化），确保外部程序也能访问。
         """
         return Config.get_real_appdata()  # 已经是用户主目录下的LANSyncBox文件夹
+
+    @staticmethod
+    def get_updates_dir() -> Path:
+        """更新缓存目录（配置目录/updates）：存放下载的安装包与续传临时文件。
+
+        测试可用 LANSYNCBOX_UPDATES_DIR 环境变量隔离，避免污染真实缓存。
+        """
+        override = os.environ.get('LANSYNCBOX_UPDATES_DIR')
+        directory = Path(override) if override else Config.get_data_dir() / 'updates'
+        directory.mkdir(parents=True, exist_ok=True)
+        return directory
 
     @staticmethod
     def get_downloads_folder() -> Path:

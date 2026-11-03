@@ -10,15 +10,17 @@ from PySide6.QtWidgets import (
     QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
     QPushButton, QLabel, QFrame, QSpacerItem, QSizePolicy, QApplication
 )
-from PySide6.QtCore import Qt, QSize, QUrl, Signal, QFileSystemWatcher, QTimer, QRectF
-from PySide6.QtGui import QFont, QDesktopServices, QPainter, QPixmap, QColor, QPalette
+from PySide6.QtCore import Qt, QSize, Signal, QFileSystemWatcher, QTimer, QRectF
+from PySide6.QtGui import QFont, QPainter, QPixmap, QColor, QPalette
 from PySide6.QtSvg import QSvgRenderer
 
 from i18n import I18n
 from config import Config, UserConfig
 from ui.create_room_dialog import CreateRoomDialog
 from ui.join_room_dialog import JoinRoomDialog
-from ui.about_dialog import AboutDialog, fetch_latest_version
+from ui.about_dialog import AboutDialog
+from ui.update_dialog import UpdateDialog
+from utils.update_manager import fetch_manifest, is_newer as is_newer_version
 from ui.settings_dialog import SettingsDialog
 from ui.capsule_notification import CapsuleNotification
 from ui.announcement import fetch_announcement, is_newer
@@ -147,7 +149,7 @@ class AnnouncementEntry(QFrame):
 class MainWindow(QMainWindow):
     """主窗口"""
 
-    _update_fetched = Signal(str)  # 自动检查更新结果（新版本号；空串=无需提醒）
+    _update_fetched = Signal(object)  # 自动检查更新结果（UpdateInfo；None=无需提醒）
     _announcement_fetched = Signal(str, object)  # 公告拉取结果（版本号, 各语言正文 dict）
 
     def __init__(self):
@@ -157,6 +159,7 @@ class MainWindow(QMainWindow):
         self._version_label = None  # 版本和缓存信息标签
         self._update_label = None  # 发现新版本小字提醒标签
         self._update_version = ""  # 已提醒的新版本号（用于语言切换后刷新文案）
+        self._pending_update = None  # 已检查到的更新详情（点击小字时打开更新对话框）
         self._cache_watcher = None  # 文件系统监控器
         self._cache_refresh_timer = None  # 缓存刷新延迟定时器
         self._announce_capsule = CapsuleNotification()  # 公告提示胶囊
@@ -518,29 +521,22 @@ class MainWindow(QMainWindow):
             return
 
         def _fetch():
-            latest, _ = fetch_latest_version()
-            self._update_fetched.emit(latest or "")
+            try:
+                info = fetch_manifest()
+            except Exception:
+                info = None
+            self._update_fetched.emit(info)
 
         threading.Thread(target=_fetch, daemon=True).start()
 
-    def _on_update_fetched(self, version: str):
+    def _on_update_fetched(self, info):
         """后台检查结果：仅当确实存在新版本时显示主界面小字提醒（静默失败）"""
-        if not version:
+        if info is None or not is_newer_version(info.version, Config.APP_VERSION):
             return
-        if not self._is_newer(version, Config.APP_VERSION):
-            return
-        self._update_version = version
-        self._update_label.setText(I18n.tr('settings_update_available', version=version))
+        self._pending_update = info
+        self._update_version = info.version
+        self._update_label.setText(I18n.tr('settings_update_available', version=info.version))
         self._update_label.setVisible(True)
-
-    @staticmethod
-    def _is_newer(latest: str, current: str) -> bool:
-        """四段式版本号比较（R 前缀），latest > current 返回 True"""
-        latest_match = re.search(r'R(\d+)\.(\d+)\.(\d+)\.(\d+)', latest)
-        current_match = re.search(r'R(\d+)\.(\d+)\.(\d+)\.(\d+)', current)
-        if not latest_match or not current_match:
-            return False
-        return tuple(map(int, latest_match.groups())) > tuple(map(int, current_match.groups()))
 
     # ---------- 公告 ----------
 
@@ -634,8 +630,10 @@ class MainWindow(QMainWindow):
         dialog.exec()
 
     def _on_update_clicked(self, event):
-        """点击提醒标签：打开下载向导页（按语言选中/英文版）"""
-        QDesktopServices.openUrl(QUrl(Config.get_download_wizard_url(I18n.get_language())))
+        """点击提醒标签：打开更新对话框（版本信息 + 更新日志 + 下载安装包）"""
+        if self._pending_update is None:
+            return
+        UpdateDialog(self._pending_update, self).exec_()
     
     def on_about(self):
         """关于"""

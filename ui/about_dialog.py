@@ -3,13 +3,9 @@
 Copyright (c) 2026 Lisselde_E <Lisselde.E@outlook.com>.
 Licensed under the GNU General Public License v3.0.
 """
-import re
 import threading
-import urllib.request
-import ssl
 from PySide6.QtWidgets import (
-    QDialog, QVBoxLayout, QHBoxLayout, QLabel,
-    QPushButton, QMessageBox, QApplication
+    QDialog, QVBoxLayout, QHBoxLayout, QLabel, QMessageBox
 )
 from PySide6.QtCore import Qt, QUrl, Signal
 from PySide6.QtGui import QDesktopServices
@@ -17,42 +13,14 @@ from PySide6.QtGui import QDesktopServices
 from i18n import I18n
 from config import Config
 from ui.widgets import AnimatedButton, BUTTON_STYLES, ClickableLabel
-
-
-def fetch_latest_version():
-    """从 GitHub Pages 纯文本文件拉取最新版本号（无 UI 依赖，供主界面自动检查复用）
-
-    返回: (版本号字符串, 错误信息字符串) 元组
-        成功时: ("R7.1.1.0", None)
-        失败时: (None, "错误描述")
-    """
-    # 优先使用 certifi 自带 CA 根证书（macOS 及打包环境的系统证书库常缺失，
-    # 会导致 CERTIFICATE_VERIFY_FAILED）；certifi 缺失时回退默认上下文。
-    # 证书异常由下方 except 转为返回错误，调用方静默降级。
-    try:
-        import certifi
-        ssl_context = ssl.create_default_context(cafile=certifi.where())
-    except ImportError:
-        ssl_context = ssl.create_default_context()
-
-    req = urllib.request.Request(Config.UPDATE_URL)
-    req.add_header('User-Agent', Config.APP_NAME)
-
-    try:
-        with urllib.request.urlopen(req, timeout=6, context=ssl_context) as response:
-            body = response.read().decode('utf-8').strip()
-        # io 文件为 R 前缀四段（如 R7.1.1.0），校验后直接返回。
-        if not re.match(r'R\d+(\.\d+){0,3}', body):
-            return None, None
-        return body, None
-    except Exception as e:
-        return None, str(e)
+from ui.update_dialog import UpdateDialog
+from utils.update_manager import fetch_manifest, is_newer
 
 
 class AboutDialog(QDialog):
     """关于弹窗"""
 
-    update_checked = Signal(str, str)  # 后台检查更新结果（版本号, 错误信息）
+    update_checked = Signal(object, str)  # 后台检查更新结果（UpdateInfo 或 None, 错误信息）
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -248,9 +216,12 @@ class AboutDialog(QDialog):
         ok_btn.setStyleSheet(BUTTON_STYLES['primary'])
         msg_box.exec_()
 
-    def _get_latest_version(self):
-        """从 GitHub Pages 纯文本文件拉取最新版本号（复用模块级函数）"""
-        return fetch_latest_version()
+    def _fetch_update(self):
+        """拉取更新清单（网络/解析异常统一转为错误文本，不向 UI 线程抛出）"""
+        try:
+            return fetch_manifest(), None
+        except Exception as e:
+            return None, str(e)
 
     def _check_update(self):
         """检查更新：网络请求放后台线程，避免 UI 线程被最长 15 秒的超时阻塞"""
@@ -262,19 +233,16 @@ class AboutDialog(QDialog):
         button.setText(I18n.tr('about_checking'))
 
         def _fetch():
+            info, err = self._fetch_update()
             try:
-                latest, err = self._get_latest_version()
-            except Exception as exc:  # 兜底：线程内异常也要回到 UI 线程收尾
-                latest, err = None, str(exc)
-            try:
-                self.update_checked.emit(latest or "", err or "")
+                self.update_checked.emit(info, err or "")
             except RuntimeError:
                 pass  # 窗口已随程序退出被销毁
 
         threading.Thread(target=_fetch, daemon=True,
                          name="about-update-check").start()
 
-    def _on_update_checked(self, latest: str, err: str):
+    def _on_update_checked(self, info, err: str):
         """后台检查完成：恢复按钮并展示结果（窗口已关闭时只恢复状态）"""
         self._update_check_pending = False
         if self._check_update_btn is not None:
@@ -282,11 +250,11 @@ class AboutDialog(QDialog):
             self._check_update_btn.setEnabled(True)
         if not self.isVisible():
             return
-        self._show_update_result(latest, err)
+        self._show_update_result(info, err)
 
-    def _show_update_result(self, latest: str, err: str):
-        """按检查结果弹出提示（发现新版本 / 已是最新 / 失败）"""
-        if not latest:
+    def _show_update_result(self, info, err: str):
+        """按检查结果弹出提示（发现新版本 → 更新对话框 / 已是最新 / 失败）"""
+        if info is None:
             self._show_styled_message(
                 I18n.tr('about_check_update'),
                 err or I18n.tr('about_remote_parse_error'),
@@ -294,55 +262,13 @@ class AboutDialog(QDialog):
             )
             return
 
-        # 更新跳转按语言指向下载向导页（中文 zh_cn.md / 英文 en.md）
-        releases_url = Config.get_download_wizard_url(I18n.get_language())
-        # 解析远程与当前版本号（四段式元组比较）
-        latest_match = re.search(r'R(\d+)\.(\d+)\.(\d+)\.(\d+)', latest)
-        current_match = re.search(r'R(\d+)\.(\d+)\.(\d+)\.(\d+)', Config.APP_VERSION)
-        if not latest_match:
-            self._show_styled_message(
-                I18n.tr('about_check_update'),
-                I18n.tr('about_remote_parse_error'),
-                QMessageBox.Warning
-            )
-            return
-        if not current_match:
-            self._show_styled_message(
-                I18n.tr('about_check_update'),
-                I18n.tr('about_parse_error'),
-                QMessageBox.Warning
-            )
-            return
-
-        latest_version = tuple(map(int, latest_match.groups()))
-        current_version = tuple(map(int, current_match.groups()))
-
-        # 比较版本号（元组逐段比较）
-        if latest_version > current_version:
-            # 发现新版本
-            msg_box = QMessageBox(self)
-            msg_box.setWindowTitle(I18n.tr('about_check_update'))
-            msg_box.setText(I18n.tr('about_new_version', version=f"R{'.'.join(map(str, latest_version))}"))
-            msg_box.setIcon(QMessageBox.NoIcon)
-
-            # 自定义按钮
-            yes_btn = msg_box.addButton(I18n.tr('about_yes'), QMessageBox.YesRole)
-            no_btn = msg_box.addButton(I18n.tr('about_no'), QMessageBox.NoRole)
-
-            # 绿色"是"按钮
-            yes_btn.setStyleSheet(BUTTON_STYLES['success'])
-            # 红色"否"按钮
-            no_btn.setStyleSheet(BUTTON_STYLES['danger'])
-
-            msg_box.exec_()
-
-            # 处理用户选择：直达官网下载向导页（最新安装包在该页获取）
-            if msg_box.clickedButton() == yes_btn:
-                QDesktopServices.openUrl(QUrl(releases_url))
-        else:
-            # 已是最新版本
+        if not is_newer(info.version, Config.APP_VERSION):
             self._show_styled_message(
                 I18n.tr('about_check_update'),
                 I18n.tr('about_latest'),
                 QMessageBox.Information
             )
+            return
+
+        # 发现新版本：交给更新对话框展示日志并下载安装包
+        UpdateDialog(info, self).exec_()

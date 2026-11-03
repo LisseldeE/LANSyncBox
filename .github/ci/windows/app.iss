@@ -35,8 +35,9 @@ VersionInfoProductName={#AppName}
 VersionInfoDescription={#AppName} 安装程序
 VersionInfoOriginalFilename={#OutputBaseFilename}.exe
 DefaultDirName={autopf}\{#AppName}
-; 升级时不沿用旧版安装目录：旧版被卸载后装到上面的 DefaultDirName（路径中不再含 Pro）
-UsePreviousAppDir=no
+; 升级时沿用上次安装目录；若上次目录名是旧版的 "LANSyncBox Pro"，
+; 由 [Code] 在安装前把目录整体改名为 "LANSyncBox"，父目录保持不变
+UsePreviousAppDir=yes
 ; 不沿用上次的任务勾选：桌面快捷方式每次安装都默认勾选，避免旧版卸载后不再重建
 UsePreviousTasks=no
 DefaultGroupName={#AppName}
@@ -68,6 +69,12 @@ chinesesimp.LaunchProgram=运行 %1
 [Tasks]
 Name: "desktopicon"; Description: "{cm:CreateDesktopIcon}"; GroupDescription: "{cm:AdditionalIcons}"
 
+[InstallDelete]
+; 旧版（LANSyncBox Pro）留下的快捷方式：目录改名带不走它们，需显式清理
+Type: files; Name: "{commondesktop}\LANSyncBox Pro.lnk"
+Type: files; Name: "{commonprograms}\LANSyncBox Pro\LANSyncBox Pro.lnk"
+Type: dirifempty; Name: "{commonprograms}\LANSyncBox Pro"
+
 [Files]
 ; 目录版：整个 standalone 目录递归安装（含 PySide6\qt-plugins 等全部依赖）
 Source: "{#DistDir}\*"; DestDir: "{app}"; Flags: ignoreversion recursesubdirs createallsubdirs
@@ -81,40 +88,49 @@ Filename: "{app}\{#ExeName}"; Description: "{cm:LaunchProgram,{#StringChange(App
 
 [Code]
 const
+  LegacyDirName = 'LANSyncBox Pro';
+  LegacyExeName = 'LANSyncBox Pro.exe';
+  TargetDirName = 'LANSyncBox';
   UninstallParams = '/VERYSILENT /SUPPRESSMSGBOXES /NORESTART';
-  LegacyUninstallKey = 'Software\Microsoft\Windows\CurrentVersion\Uninstall\{#AppId}_is1';
 
-{ 旧版（原 LANSyncBox Pro）的安装目录与新版不同，而 Inno Setup 只会复用/覆盖，
-  不会自动卸载旧版本。这里在复制文件前静默运行旧版卸载程序，避免两个版本共存。 }
-procedure RunUninstaller(const Uninstaller: string);
 var
+  PreviousDir: String;
+
+{ 只替换路径最后一段目录名。不能全局替换 " Pro"——"Program Files" 里也含 "Pro"。 }
+function NormalizedTarget(const Path: String): String;
+begin
+  Result := Path;
+  if CompareText(ExtractFileName(Path), LegacyDirName) = 0 then
+    Result := ExtractFilePath(Path) + TargetDirName;
+end;
+
+procedure InitializeWizard;
+begin
+  { UsePreviousAppDir=yes 时这里已是上次安装目录（仅 64 位安装，键在 HKLM64） }
+  PreviousDir := RemoveBackslash(WizardForm.DirEdit.Text);
+  WizardForm.DirEdit.Text := NormalizedTarget(PreviousDir);
+end;
+
+{ 复制文件前静默卸载旧版：由旧卸载器按自己的记录删除全部旧文件，随后在新目录全量
+  安装，避免"同目录覆盖"留下旧主程序 / 旧 Qt 插件等与新版混用。 }
+function PrepareToInstall(var NeedsRestart: Boolean): String;
+var
+  OldDir, Uninstaller: String;
   ResultCode: Integer;
 begin
-  if FileExists(Uninstaller) then
-    Exec(Uninstaller, UninstallParams, '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
-end;
+  Result := '';
+  { 关闭新旧主程序，确保旧卸载器能删除占用中的文件 }
+  Exec(ExpandConstant('{sys}\taskkill.exe'), '/F /IM {#ExeName}', '',
+       SW_HIDE, ewWaitUntilTerminated, ResultCode);
+  Exec(ExpandConstant('{sys}\taskkill.exe'), '/F /IM ' + LegacyExeName, '',
+       SW_HIDE, ewWaitUntilTerminated, ResultCode);
 
-procedure UninstallLegacyVersion;
-var
-  InstallLocation, UninstallString: string;
-begin
-  { 旧版默认目录（32 位与 64 位安装模式都覆盖） }
-  RunUninstaller(ExpandConstant('{commonpf32}\LANSyncBox Pro\unins000.exe'));
-  RunUninstaller(ExpandConstant('{commonpf64}\LANSyncBox Pro\unins000.exe'));
+  if PreviousDir = '' then Exit;
+  OldDir := RemoveBackslash(PreviousDir);
+  { 防止异常路径（空目录名 / 盘符根）被误卸载 }
+  if ExtractFileName(OldDir) = '' then Exit;
+  Uninstaller := OldDir + '\unins000.exe';
+  if not FileExists(Uninstaller) then Exit;
 
-  { 兼容用户自定义过安装目录的旧版：按同一 AppId 的卸载项查找，排除当前安装目录 }
-  if RegQueryStringValue(HKLM32, LegacyUninstallKey, 'InstallLocation', InstallLocation)
-     and (LowerCase(InstallLocation) <> LowerCase(ExpandConstant('{app}')))
-     and RegQueryStringValue(HKLM32, LegacyUninstallKey, 'UninstallString', UninstallString) then
-    RunUninstaller(RemoveQuotes(UninstallString));
-  if RegQueryStringValue(HKLM64, LegacyUninstallKey, 'InstallLocation', InstallLocation)
-     and (LowerCase(InstallLocation) <> LowerCase(ExpandConstant('{app}')))
-     and RegQueryStringValue(HKLM64, LegacyUninstallKey, 'UninstallString', UninstallString) then
-    RunUninstaller(RemoveQuotes(UninstallString));
-end;
-
-procedure CurStepChanged(CurStep: TSetupStep);
-begin
-  if CurStep = ssInstall then
-    UninstallLegacyVersion;
+  Exec(Uninstaller, UninstallParams, '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
 end;

@@ -104,6 +104,13 @@ def main():
         except Exception:
             pass  # 静默失败，不影响程序启动
 
+        # 清理更新缓存（上次下载完成但未安装的安装包，避免长期占用空间）
+        try:
+            from utils.update_manager import clear_cache
+            clear_cache()
+        except Exception:
+            pass  # 静默失败，不影响程序启动
+
     # 设置AppUserModelID（必须在QApplication创建之前）
     if Config.IS_WINDOWS:
         try:
