@@ -18,6 +18,7 @@ from PySide6.QtGui import QPainter, QColor, QFont, QPalette, QDesktopServices
 from config import Config, UserConfig
 from i18n import I18n
 from ui.widgets import ToggleSwitch, AnimatedButton, BUTTON_STYLES, DeliverySettingsPanel
+from utils.nickname import nickname
 from sync.file_manager import safe_rmtree
 
 
@@ -217,10 +218,12 @@ class SettingsDialog(QDialog):
         self._size_generation = 0      # 统计批次号：重建列表后旧批次结果作废
         self._clear_workers = []       # 持有后台删除线程引用
         self._clearing = set()         # 正在后台删除的目录名
+        self._trust_rows_layout = None # 信任设备列表容器
 
         self._init_ui()
         self._setup_cache_watcher()
         self._rebuild_cache_rows()
+        self._rebuild_trust_rows()
 
     # ---------- UI ----------
 
@@ -237,6 +240,7 @@ class SettingsDialog(QDialog):
             I18n.tr('settings_category_system'),
             I18n.tr('settings_category_delivery'),
             I18n.tr('settings_category_cache'),
+            I18n.tr('settings_category_trust'),
         ])
         self._menu.picked.connect(self._switch_category)
         root.addWidget(self._menu)
@@ -247,6 +251,7 @@ class SettingsDialog(QDialog):
         self._stack.addWidget(self._build_system_page())
         self._stack.addWidget(self._build_delivery_page())
         self._stack.addWidget(self._build_cache_page())
+        self._stack.addWidget(self._build_trust_page())
         root.addWidget(self._stack, 1)
 
         self._menu.set_active(0)
@@ -395,6 +400,99 @@ class SettingsDialog(QDialog):
         scroll.setWidget(container)
         lay.addWidget(scroll, stretch=1)
         return page
+
+    def _build_trust_page(self):
+        page = QWidget()
+        lay = QVBoxLayout(page)
+        lay.setContentsMargins(0, 14, 0, 0)
+        lay.setSpacing(12)
+
+        lay.addWidget(self._make_section_label(I18n.tr('settings_section_trust')))
+        lay.addWidget(self._make_divider())
+
+        # 信任设备列表滚动区
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setFrameShape(QFrame.NoFrame)
+        scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        scroll.setStyleSheet("QScrollArea { background: transparent; border: none; }")
+        container = QWidget()
+        self._trust_rows_layout = QVBoxLayout(container)
+        self._trust_rows_layout.setContentsMargins(0, 0, 0, 0)
+        self._trust_rows_layout.setSpacing(10)
+        scroll.setWidget(container)
+        lay.addWidget(scroll, stretch=1)
+        return page
+
+    def _rebuild_trust_rows(self):
+        """重建信任设备列表。设置只在房间外打开，期间信任表不会变化，无需监听。"""
+        lay = self._trust_rows_layout
+        if lay is None:
+            return
+        while lay.count():
+            item = lay.takeAt(0)
+            w = item.widget()
+            if w is not None:
+                w.deleteLater()
+
+        error = ''
+        pins = {}
+        try:
+            from network import identity
+            pins = identity.list_pins()
+        except Exception:
+            error = I18n.tr('settings_trust_error')
+
+        if not pins:
+            dark = _is_dark(self)
+            lbl = QLabel(error or I18n.tr('settings_trust_empty'))
+            lbl.setAlignment(Qt.AlignCenter)
+            lbl.setStyleSheet(
+                f"font-size: 12px; color: {'#a0a0a0' if dark else '#adb5bd'};"
+            )
+            lay.addWidget(lbl)
+            lay.addStretch()
+            return
+
+        for end_id, cert_fp in sorted(pins.items(), key=lambda kv: nickname(kv[0])):
+            lay.addWidget(self._make_trust_row(end_id, cert_fp))
+        lay.addStretch()
+
+    def _make_trust_row(self, end_id: str, cert_fp: str) -> QWidget:
+        row = QWidget()
+        lay = QHBoxLayout(row)
+        lay.setContentsMargins(0, 2, 0, 2)
+        lay.setSpacing(12)
+        dark = _is_dark(self)
+
+        name_label = QLabel(nickname(end_id))
+        name_label.setToolTip(end_id)
+        lay.addWidget(name_label)
+
+        fp_label = QLabel(cert_fp[:12])
+        fp_label.setToolTip(cert_fp)
+        fp_label.setStyleSheet(
+            f"font-size: 11px; color: {'#a0a0a0' if dark else '#868e96'};"
+        )
+        lay.addWidget(fp_label)
+        lay.addStretch()
+
+        rm_btn = AnimatedButton(I18n.tr('settings_trust_remove'))
+        rm_btn.setCursor(Qt.PointingHandCursor)
+        rm_btn.setFixedSize(64, 30)
+        rm_btn.setStyleSheet(BUTTON_STYLES['danger'])
+        rm_btn.clicked.connect(lambda _, e=end_id: self._on_remove_pin(e))
+        lay.addWidget(rm_btn)
+        return row
+
+    def _on_remove_pin(self, end_id: str):
+        """移除一条信任（仅遗忘；不主动断开，对端下次连接会重新按 TOFU 登记）"""
+        try:
+            from network import identity
+            identity.remove_pin(end_id)
+        except Exception:
+            pass
+        self._rebuild_trust_rows()
 
     def _make_section_label(self, text: str) -> QLabel:
         """分组小标题：灰色小字（与创建/加入对话框字段标签一致的层级感）"""

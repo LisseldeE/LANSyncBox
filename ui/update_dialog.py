@@ -151,8 +151,13 @@ class UpdateDialog(QDialog):
         self._status.setText(I18n.tr('update_failed', error=str(result)))
 
     def _launch_installer(self, path: Path):
-        """延迟拉起安装包再退出主程序：安装器启动时旧 exe 已释放，避免文件占用。"""
-        command = f'cmd /c ping -n 3 127.0.0.1 >nul & start "" "{path}"'
+        """延迟拉起安装包再退出主程序：安装器启动时旧 exe 已释放，避免文件占用。
+
+        静默参数：不显示向导；安装器内部会静默卸载旧版并全量安装，结束后由
+        [Run] 自行启动新版主程序（安装目录可能已改名，这里算不出新路径）。
+        """
+        command = (f'cmd /c ping -n 3 127.0.0.1 >nul & start "" "{path}" '
+                   f'/VERYSILENT /SUPPRESSMSGBOXES /NORESTART /SP-')
         try:
             subprocess.Popen(
                 command, shell=True,

@@ -84,7 +84,8 @@ Name: "{group}\{#AppName}"; Filename: "{app}\{#ExeName}"
 Name: "{autodesktop}\{#AppName}"; Filename: "{app}\{#ExeName}"; Tasks: desktopicon
 
 [Run]
-Filename: "{app}\{#ExeName}"; Description: "{cm:LaunchProgram,{#StringChange(AppName, '&', '&&')}}"; Flags: nowait postinstall skipifsilent
+; 静默安装（自动更新）时也启动主程序，否则更新完没人把程序拉起来
+Filename: "{app}\{#ExeName}"; Description: "{cm:LaunchProgram,{#StringChange(AppName, '&', '&&')}}"; Flags: nowait postinstall
 
 [Code]
 const
@@ -106,9 +107,11 @@ end;
 
 procedure InitializeWizard;
 begin
-  { UsePreviousAppDir=yes 时这里已是上次安装目录（仅 64 位安装，键在 HKLM64） }
-  PreviousDir := RemoveBackslash(WizardForm.DirEdit.Text);
-  WizardForm.DirEdit.Text := NormalizedTarget(PreviousDir);
+  { UsePreviousAppDir=yes 时安装目录已是上次安装目录（仅 64 位安装，键在 HKLM64）。
+    静默安装不创建向导窗体，不能碰 WizardForm，只记下目录供 PrepareToInstall 使用 }
+  PreviousDir := RemoveBackslash(ExpandConstant('{app}'));
+  if not WizardSilent then
+    WizardForm.DirEdit.Text := NormalizedTarget(PreviousDir);
 end;
 
 { 复制文件前静默卸载旧版：由旧卸载器按自己的记录删除全部旧文件，随后在新目录全量
@@ -125,12 +128,18 @@ begin
   Exec(ExpandConstant('{sys}\taskkill.exe'), '/F /IM ' + LegacyExeName, '',
        SW_HIDE, ewWaitUntilTerminated, ResultCode);
 
-  if PreviousDir = '' then Exit;
-  OldDir := RemoveBackslash(PreviousDir);
+  { 交互式安装用上次目录（可能已改名）；静默安装没有向导，展开的安装目录即上次目录 }
+  if PreviousDir <> '' then
+    OldDir := PreviousDir
+  else
+    OldDir := RemoveBackslash(ExpandConstant('{app}'));
   { 防止异常路径（空目录名 / 盘符根）被误卸载 }
   if ExtractFileName(OldDir) = '' then Exit;
   Uninstaller := OldDir + '\unins000.exe';
   if not FileExists(Uninstaller) then Exit;
+  { 目录里确实是本程序才卸载，避免误跑其它安装器的卸载程序 }
+  if not (FileExists(OldDir + '\{#ExeName}') or
+          FileExists(OldDir + '\' + LegacyExeName)) then Exit;
 
   Exec(Uninstaller, UninstallParams, '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
 end;

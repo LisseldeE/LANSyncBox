@@ -138,6 +138,29 @@ def commit_pin(end_id: str, cert_fp: str):
         _save_pins_locked(pins)
 
 
+def list_pins() -> dict:
+    """返回信任表副本（end_id -> 指纹），供设置界面展示。"""
+    with _pin_lock:
+        return dict(_load_pins_locked())
+
+
+def remove_pin(end_id: str) -> bool:
+    """删除一条信任记录，返回是否确有删除。
+
+    语义是"遗忘"而非"拉黑"：对端下次连接会按 TOFU 重新登记。
+    """
+    end_id = str(end_id or '')
+    if not end_id:
+        return False
+    with _pin_lock:
+        pins = _load_pins_locked()
+        if end_id not in pins:
+            return False
+        del pins[end_id]
+        _save_pins_locked(pins)
+        return True
+
+
 def pin_or_verify(end_id: str, cert_fp: str):
     """校验并固定（运维/测试便捷入口）。"""
     check_pin(end_id, cert_fp)
