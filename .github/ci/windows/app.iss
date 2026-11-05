@@ -4,7 +4,6 @@
 #ifndef SourceDir
   #define SourceDir "."
 #endif
-; 打包来源目录：Nuitka --standalone 的 .dist 目录（目录版），默认回落到 SourceDir
 #ifndef DistDir
   #define DistDir SourceDir
 #endif
@@ -18,10 +17,11 @@
   #define LicenseFile SourceDir + "\LICENSE.txt"
 #endif
 
-; AppId 沿用历史 Pro 版的 GUID，保证已安装旧版本可被本安装包覆盖升级
 #define AppName "LANSyncBox"
 #define ExeName "LANSyncBox.exe"
 #define AppId "{{EE2BE98A-9E6F-4B94-A0EC-5646B8700116}"
+#define AppIdKey "{EE2BE98A-9E6F-4B94-A0EC-5646B8700116}_is1"
+#define StandardAppIdKey "{AFCA0D26-F6B7-442C-9A77-C11AD8971EC2}_is1"
 #define OutputBaseFilename "LANSyncBox_Setup"
 
 [Setup]
@@ -35,13 +35,12 @@ VersionInfoProductName={#AppName}
 VersionInfoDescription={#AppName} 安装程序
 VersionInfoOriginalFilename={#OutputBaseFilename}.exe
 DefaultDirName={autopf}\{#AppName}
-; 升级时沿用上次安装目录；若上次目录名是旧版的 "LANSyncBox Pro"，
-; 由 [Code] 在安装前把目录整体改名为 "LANSyncBox"，父目录保持不变
 UsePreviousAppDir=yes
-; 不沿用上次的任务勾选：桌面快捷方式每次安装都默认勾选，避免旧版卸载后不再重建
 UsePreviousTasks=no
+UsePreviousGroup=no
 DefaultGroupName={#AppName}
 DisableProgramGroupPage=yes
+DisableDirPage=no
 LicenseFile={#LicenseFile}
 UninstallDisplayIcon={app}\{#ExeName}
 UninstallDisplayName={#AppName}
@@ -65,18 +64,18 @@ english.LaunchProgram=Run %1
 chinesesimp.CreateDesktopIcon=创建桌面快捷方式
 chinesesimp.AdditionalIcons=附加快捷方式:
 chinesesimp.LaunchProgram=运行 %1
+english.OldUninstallFailed=Failed to remove the old version. Setup stopped to avoid mixing old and new files. Please close any running instance of the app and run this installer again.
+chinesesimp.OldUninstallFailed=卸载旧版本失败，安装已中止以避免新旧文件混用。请关闭正在运行的程序后重新运行本安装程序。
 
 [Tasks]
 Name: "desktopicon"; Description: "{cm:CreateDesktopIcon}"; GroupDescription: "{cm:AdditionalIcons}"
 
 [InstallDelete]
-; 旧版（LANSyncBox Pro）留下的快捷方式：目录改名带不走它们，需显式清理
 Type: files; Name: "{commondesktop}\LANSyncBox Pro.lnk"
 Type: files; Name: "{commonprograms}\LANSyncBox Pro\LANSyncBox Pro.lnk"
 Type: dirifempty; Name: "{commonprograms}\LANSyncBox Pro"
 
 [Files]
-; 目录版：整个 standalone 目录递归安装（含 PySide6\qt-plugins 等全部依赖）
 Source: "{#DistDir}\*"; DestDir: "{app}"; Flags: ignoreversion recursesubdirs createallsubdirs
 
 [Icons]
@@ -84,7 +83,6 @@ Name: "{group}\{#AppName}"; Filename: "{app}\{#ExeName}"
 Name: "{autodesktop}\{#AppName}"; Filename: "{app}\{#ExeName}"; Tasks: desktopicon
 
 [Run]
-; 静默安装（自动更新）时也启动主程序，否则更新完没人把程序拉起来
 Filename: "{app}\{#ExeName}"; Description: "{cm:LaunchProgram,{#StringChange(AppName, '&', '&&')}}"; Flags: nowait postinstall
 
 [Code]
@@ -97,7 +95,6 @@ const
 var
   PreviousDir: String;
 
-{ 只替换路径最后一段目录名。不能全局替换 " Pro"——"Program Files" 里也含 "Pro"。 }
 function NormalizedTarget(const Path: String): String;
 begin
   Result := Path;
@@ -105,41 +102,130 @@ begin
     Result := ExtractFilePath(Path) + TargetDirName;
 end;
 
-procedure InitializeWizard;
+procedure CurPageChanged(CurPageID: Integer);
 begin
-  { UsePreviousAppDir=yes 时安装目录已是上次安装目录（仅 64 位安装，键在 HKLM64）。
-    静默安装不创建向导窗体，不能碰 WizardForm，只记下目录供 PrepareToInstall 使用 }
-  PreviousDir := RemoveBackslash(ExpandConstant('{app}'));
-  if not WizardSilent then
-    WizardForm.DirEdit.Text := NormalizedTarget(PreviousDir);
+  if CurPageID = wpSelectDir then
+  begin
+    if PreviousDir = '' then
+      PreviousDir := RemoveBackslash(WizardForm.DirEdit.Text);
+    WizardForm.DirEdit.Text := NormalizedTarget(WizardForm.DirEdit.Text);
+  end;
 end;
 
-{ 复制文件前静默卸载旧版：由旧卸载器按自己的记录删除全部旧文件，随后在新目录全量
-  安装，避免"同目录覆盖"留下旧主程序 / 旧 Qt 插件等与新版混用。 }
+function QueryUninstaller(const RootKey: Integer; const SubKey: String): String;
+var
+  Value: String;
+  P: Integer;
+begin
+  Result := '';
+  if not RegQueryStringValue(RootKey, SubKey, 'UninstallString', Value) then Exit;
+  Value := Trim(Value);
+  if (Length(Value) > 1) and (Value[1] = '"') then
+  begin
+    P := Pos('"', Copy(Value, 2, Length(Value) - 1));
+    if P > 0 then Value := Copy(Value, 2, P - 1);
+  end
+  else
+  begin
+    P := Pos(' ', Value);
+    if P > 0 then Value := Copy(Value, 1, P - 1);
+  end;
+  Result := Value;
+end;
+
+function FindUninstallerInDir(const Dir: String): String;
+var
+  Candidate: String;
+  I: Integer;
+begin
+  Result := '';
+  for I := 0 to 99 do
+  begin
+    Candidate := Dir + '\unins' + Format('%.3d', [I]) + '.exe';
+    if FileExists(Candidate) then Result := Candidate;
+  end;
+end;
+
+function QueryAppUninstaller(const AppKey: String): String;
+var
+  Key: String;
+begin
+  Key := 'Software\Microsoft\Windows\CurrentVersion\Uninstall\' + AppKey;
+  Result := QueryUninstaller(HKLM, Key);
+  if (Result = '') or not FileExists(Result) then
+    Result := QueryUninstaller(HKLM32, Key);
+end;
+
+function FindUninstaller(const OldDir: String): String;
+begin
+  Result := QueryAppUninstaller('{#AppIdKey}');
+  if (Result = '') or not FileExists(Result) then
+    Result := FindUninstallerInDir(OldDir);
+end;
+
+function RemoveInstallation(const Dir, Uninstaller: String): Boolean;
+var
+  ResultCode, WaitCount: Integer;
+begin
+  Result := False;
+  if not Exec(Uninstaller, UninstallParams, '', SW_HIDE, ewWaitUntilTerminated,
+              ResultCode) then Exit;
+  if ResultCode <> 0 then Exit;
+  WaitCount := 0;
+  while FileExists(Dir + '\{#ExeName}') or
+        FileExists(Dir + '\' + LegacyExeName) do
+  begin
+    Sleep(250);
+    WaitCount := WaitCount + 1;
+    if WaitCount >= 40 then Exit;
+  end;
+  Result := True;
+end;
+
 function PrepareToInstall(var NeedsRestart: Boolean): String;
 var
   OldDir, Uninstaller: String;
   ResultCode: Integer;
 begin
   Result := '';
-  { 关闭新旧主程序，确保旧卸载器能删除占用中的文件 }
   Exec(ExpandConstant('{sys}\taskkill.exe'), '/F /IM {#ExeName}', '',
        SW_HIDE, ewWaitUntilTerminated, ResultCode);
   Exec(ExpandConstant('{sys}\taskkill.exe'), '/F /IM ' + LegacyExeName, '',
        SW_HIDE, ewWaitUntilTerminated, ResultCode);
 
-  { 交互式安装用上次目录（可能已改名）；静默安装没有向导，展开的安装目录即上次目录 }
   if PreviousDir <> '' then
     OldDir := PreviousDir
   else
     OldDir := RemoveBackslash(ExpandConstant('{app}'));
-  { 防止异常路径（空目录名 / 盘符根）被误卸载 }
   if ExtractFileName(OldDir) = '' then Exit;
-  Uninstaller := OldDir + '\unins000.exe';
-  if not FileExists(Uninstaller) then Exit;
-  { 目录里确实是本程序才卸载，避免误跑其它安装器的卸载程序 }
-  if not (FileExists(OldDir + '\{#ExeName}') or
-          FileExists(OldDir + '\' + LegacyExeName)) then Exit;
 
-  Exec(Uninstaller, UninstallParams, '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
+  Uninstaller := FindUninstaller(OldDir);
+  if Uninstaller <> '' then
+  begin
+    if FileExists(ExtractFilePath(Uninstaller) + '{#ExeName}') or
+       FileExists(ExtractFilePath(Uninstaller) + LegacyExeName) then
+    begin
+      if not RemoveInstallation(RemoveBackslash(ExtractFilePath(Uninstaller)),
+                                Uninstaller) then
+      begin
+        Result := ExpandConstant('{cm:OldUninstallFailed}');
+        Exit;
+      end;
+    end;
+  end;
+
+  Uninstaller := QueryAppUninstaller('{#StandardAppIdKey}');
+  if Uninstaller <> '' then
+  begin
+    if FileExists(ExtractFilePath(Uninstaller) + '{#ExeName}') or
+       FileExists(ExtractFilePath(Uninstaller) + LegacyExeName) then
+    begin
+      if not RemoveInstallation(RemoveBackslash(ExtractFilePath(Uninstaller)),
+                                Uninstaller) then
+      begin
+        Result := ExpandConstant('{cm:OldUninstallFailed}');
+        Exit;
+      end;
+    end;
+  end;
 end;

@@ -157,11 +157,13 @@ def package_path(info: UpdateInfo) -> Path:
 
 def download_package(info: UpdateInfo, language: str,
                      progress: Optional[Callable[[int, int], None]] = None,
-                     cancel=None) -> Path:
+                     cancel=None,
+                     on_verify: Optional[Callable[[], None]] = None) -> Path:
     """下载安装包到本机缓存并校验 sha256，返回落地路径。
 
     progress(done, total)：total 为 0 表示长度未知；cancel 为 threading.Event，
     置位后抛 UpdateError（已下载部分保留为 .part，供下次续传）。
+    on_verify()：字节下载完成、开始 sha256 校验前回调，供界面切换提示。
     """
     url = info.url_for(language)
     if not url:
@@ -210,6 +212,9 @@ def download_package(info: UpdateInfo, language: str,
     if info.size and done != info.size:
         part.unlink(missing_ok=True)
         raise UpdateError(f'安装包大小不符: 期望 {info.size}，实际 {done}')
+
+    if on_verify:
+        on_verify()
 
     digest = hashlib.sha256()
     with open(part, 'rb') as fh:
