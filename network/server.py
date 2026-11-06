@@ -72,7 +72,7 @@ class SyncServer(QObject):
         self.clients: Dict[str, dict] = {}  # {client_id: {socket, receiver, thread}}
         self.sync_folder = Config.get_room_folder(room_code)
         self._lock = threading.Lock()
-        
+        self._tls_fail_log_at = 0.0  # 入向 TLS 握手失败日志的限流时间戳
         # 创建传输队列，控制并发传输数量
         self.transfer_queue = TransferQueue(max_concurrent=5)
         
@@ -141,6 +141,14 @@ class SyncServer(QObject):
                 信号，避免打断宿主数据平面）；stop() 也不回收共享对象。
         """
         self._reuse = reuse
+        # TLS 预检：证书目录不可写、密钥损坏、cryptography 缺失等会让每条入向连接
+        # 在握手阶段失败，此时直接拒绝开房，避免"房间已创建、全员连不上"的静默失败
+        try:
+            tls_transport.get_server_context()
+        except Exception as e:
+            self.log_message.emit(f"TLS 初始化失败，无法启动房间服务: {e}")
+            return False
+
         start_port = port or Config.DEFAULT_PORT
         max_port = start_port + 10  # 尝试最多10个端口
 
@@ -415,7 +423,16 @@ class SyncServer(QObject):
             self.log_message.emit(f"设备身份冲突，拒绝连接: {e}")
             self._remove_client(client_id)
             return
-        except Exception:
+        except identity.IdentityError as e:
+            self.log_message.emit(f"设备身份校验失败，拒绝连接: {e}")
+            self._remove_client(client_id)
+            return
+        except Exception as e:
+            # 探活连接/旧版对端会在这里握手失败，属常态；按 30s 一条限流保留可观测性
+            now = time.monotonic()
+            if now - self._tls_fail_log_at >= 30.0:
+                self._tls_fail_log_at = now
+                self.log_message.emit(f"入向连接 TLS 握手失败: {e}")
             self._remove_client(client_id)
             return
         with self._lock:

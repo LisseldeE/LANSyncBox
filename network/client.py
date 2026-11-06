@@ -1410,6 +1410,14 @@ class SyncClient(QObject):
                         self.log_message.emit(f"设备身份冲突，拒绝连接: {e}")
                         self.disconnect()
                         return
+                    except OSError as e:
+                        # 信任表写入失败（数据目录只读/磁盘满）：明确提示，别当成解析错误
+                        self._pending_server_identity = None
+                        message = f"无法写入设备信任表，请检查数据目录权限与磁盘空间: {e}"
+                        self.log_message.emit(message)
+                        self.auth_failed.emit(message)
+                        self.disconnect()
+                        return
                     self._pending_server_identity = None
                 self.authenticated = True
                 self._perm_auth_denied = False  # 重新认证成功，重置"永久拒绝"提示标记

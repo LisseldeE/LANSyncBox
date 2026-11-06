@@ -1,5 +1,6 @@
 """
-更新对话框 - 展示新版本与更新日志，下载安装包并调用安装程序
+更新对话框
+展示新版本与更新日志，下载安装包并调用安装程序。
 Copyright (c) 2026 Lisselde_E <Lisselde.E@outlook.com>.
 Licensed under the GNU General Public License v3.0.
 """

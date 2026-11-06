@@ -270,5 +270,9 @@ class AboutDialog(QDialog):
             )
             return
 
-        # 发现新版本：交给更新对话框展示日志并下载安装包
+        # 发现新版本：Windows 交给更新对话框下载安装包，其他平台跳转官网下载区
+        if not Config.IS_WINDOWS:
+            QDesktopServices.openUrl(QUrl(
+                Config.get_download_wizard_url(I18n.get_language())))
+            return
         UpdateDialog(info, self).exec_()

@@ -10,8 +10,8 @@ from PySide6.QtWidgets import (
     QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
     QPushButton, QLabel, QFrame, QSpacerItem, QSizePolicy, QApplication
 )
-from PySide6.QtCore import Qt, QSize, Signal, QFileSystemWatcher, QTimer, QRectF
-from PySide6.QtGui import QFont, QPainter, QPixmap, QColor, QPalette
+from PySide6.QtCore import Qt, QSize, Signal, QFileSystemWatcher, QTimer, QRectF, QUrl
+from PySide6.QtGui import QFont, QPainter, QPixmap, QColor, QPalette, QDesktopServices
 from PySide6.QtSvg import QSvgRenderer
 
 from i18n import I18n
@@ -630,8 +630,12 @@ class MainWindow(QMainWindow):
         dialog.exec()
 
     def _on_update_clicked(self, event):
-        """点击提醒标签：打开更新对话框（版本信息 + 更新日志 + 下载安装包）"""
+        """点击提醒标签：Windows 打开更新对话框；其他平台跳转官网下载区"""
         if self._pending_update is None:
+            return
+        if not Config.IS_WINDOWS:
+            QDesktopServices.openUrl(QUrl(
+                Config.get_download_wizard_url(I18n.get_language())))
             return
         UpdateDialog(self._pending_update, self).exec_()
     

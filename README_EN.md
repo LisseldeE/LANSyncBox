@@ -39,21 +39,15 @@
 
 ## Project Introduction
 
-LANSyncBox is a cross-platform, LAN-focused real-time file synchronization tool for multiplayer collaboration. It requires no public network: it supports large-file streaming transfer, serialized sending, and broken-transfer resumption, ensuring reliable data and stable transfer under multi-connection, high-concurrency scenarios. It adopts a decentralized distributed architecture, eliminating the single-point-of-failure that affects the entire link. It also offers several capabilities: **Delivery** (cross-device copy & paste), top-edge drag-and-drop **quick-add**, peer-to-peer **Chat**, **endpoint nicknames**, Collect mode, permission management, and more.
+LANSyncBox is a cross-platform, LAN-focused real-time file synchronization tool for multiplayer collaboration. It uses a decentralized architecture with full-link encrypted transport and requires no public network: it supports large-file streaming, serialized sending, and broken-transfer resumption.
+
+It also introduces several capabilities: **Delivery** (cross-device copy & paste), top-edge drag-and-drop **quick-add**, peer-to-peer **Chat**, Collect mode, permission management, and more.
 
 ## Screenshots
 
 | Main Interface | Sync Interface |
 | :---: | :---: |
 | ![Main Interface](https://lisseldee.github.io/assets/images/webp/1p-3.webp) | ![Sync Interface](https://lisseldee.github.io/assets/images/webp/1p-4.webp) |
-
-## Project Information
-
-- **Project Name**: LANSyncBox
-- **Project Author**: Lisselde_E
-- **License**: GNU General Public License v3.0
-- **Official Website**: https://lansyncbox.com
-- **Project Repository**: https://github.com/LisseldeE/LANSyncBox/tree/main
 
 ## Feature Demos
 
@@ -69,19 +63,34 @@ LANSyncBox is a cross-platform, LAN-focused real-time file synchronization tool 
 | :---: | :---: |
 | ![Text Content Delivery](https://lansyncbox.com/assets/images/svg/deliver-text.svg) | ![File Content Delivery](https://lansyncbox.com/assets/images/svg/deliver-file.svg) |
 
-## Core Features (Existing)
+## Project Information
+
+- **Project Name**: LANSyncBox
+- **Project Author**: Lisselde_E
+- **License**: GNU General Public License v3.0
+- **Official Website**: https://lansyncbox.com
+- **Project Repository**: https://github.com/LisseldeE/LANSyncBox
+
+## Core Features
 
 - **Real-time Sync**: additions, edits, deletions, and renames sync to all clients instantly; auto-aligns differences on first connect
 - **Room Sharing**: custom 6-digit room codes, optional password protection, sync-logic version compatibility check when joining
 - **Large File Transfer**: streaming chunked transfer with resume support; transfers fail without corrupting files; up to 5 files in parallel, same-name pulls serialized for byte consistency
+- **TLS Encryption**: from R1.2.2.0 onward, every TCP connection — room control, peer-to-peer, file transfer, and chat — runs over TLS (1.2 minimum; a failed handshake is dropped, never downgraded to plaintext); devices use self-signed certificates pinned by TOFU fingerprint, plus a per-connection key signature
 - **File Operations**: add, create, copy, cut, paste, delete, rename; double-click for read-only preview
 - **Interface**: smooth Qt6 UI, real-time Chinese/English switching, visible transfer progress
 
 ## Feature Highlights
 
-### Endpoint Nickname
+### Delivery
 
-Each endpoint derives a stable, human-readable nickname from its own `end_id` (e.g. `青狐·3f2a` / `Teal Fox·3f2a`), replacing the legacy, unreliable IP display: the same `end_id` always maps to the same nickname, localized to the current UI language. The 4-character suffix is the prefix of that endpoint's `end_id`, keeping endpoints that happen to share a nickname distinguishable; the IP is retained only as a grey sub-label.
+**Cross-device copy & paste** across every endpoint in the room, supporting clipboard and file transfer:
+
+- **Text clipboard**: copy text on any endpoint and paste it straight away on the others; single items are capped at 1 MB and skipped beyond that
+- **Files / images**: after copying files, the other endpoints show a top-edge capsule reading "Remote files available"; open the target folder in a file manager and press Ctrl+V to pull, with same-name conflicts offering replace / skip / cancel
+- **Direct pull**: files transfer endpoint-to-endpoint, with progress and results written to the sync log in real time; nothing is sent while the mesh is not ready
+- **Delivery controls**: Settings offers All / Send / Receive / Off, plus separate switches for text clipboard and files
+- **Limit**: folders are not supported for delivery
 
 ### Chat
 
@@ -98,7 +107,7 @@ Peer-to-peer, one-to-one private messaging inside a room — **text** and **file
 
 <div align="center">
 
-| Operating System | x64 (AMD64) | ARM64 |
+| Operating System | x64 | ARM64 |
 | :--- | :---: | :---: |
 | Windows | ✅ | ❌ |
 | Linux | ✅ | ❌ |
@@ -208,17 +217,6 @@ This project does not collect any user data, see [Privacy Policy](https://github
 This project is open-sourced under the GPL-3.0 license. If you wish to use it in a closed-source commercial scenario, or require custom development and technical support, feel free to contact us through the following methods:
 
 **Contact**: Lisselde.E@outlook.com
-
-**Cooperation Process**:
-1. Describe your usage scenario and requirements
-2. Confirm the scope of authorization and fees
-3. Sign an authorization agreement
-4. Obtain commercial authorization and technical support
-
-**Authorization Scope**:
-- Closed-source commercial license
-- Enterprise deployment license
-- Custom development and technical support
 
 ## Feedback
 

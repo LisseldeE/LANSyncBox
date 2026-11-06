@@ -1,13 +1,14 @@
 """
-在线更新：解析官网更新清单、下载安装包、清理更新缓存。
+在线更新模块
+解析官网更新清单、下载安装包并清理更新缓存。
 Copyright (c) 2026 Lisselde_E <Lisselde.E@outlook.com>.
 Licensed under the GNU General Public License v3.0.
 
 清单格式（官网纯文本；第一行必须是版本号，保证旧客户端仍能按原逻辑识别）：
 R1.2.2.0
 # win_sha256: <64 位十六进制>
-# url_zh_CN: `https://.../LANSyncBox_Setup.exe`
-# url_en_US: `https://.../LANSyncBox_Setup.exe`
+# win_url_zh_CN: `https://.../LANSyncBox_Setup.exe`
+# win_url_en_US: `https://.../LANSyncBox_Setup.exe`
 # log
 - 条目一
 - 条目二
@@ -117,8 +118,8 @@ def parse_manifest(text: str) -> UpdateInfo:
     if not _SHA256_RE.fullmatch(sha256):
         sha256 = ''
 
-    url_zh = meta.get('url_zh_cn', '')
-    url_en = meta.get('url_en_us', '')
+    url_zh = meta.get('win_url_zh_cn', '')
+    url_en = meta.get('win_url_en_us', '')
 
     size = meta.get('size', '')
     try:

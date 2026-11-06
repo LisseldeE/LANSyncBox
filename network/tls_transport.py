@@ -1,13 +1,8 @@
 """
-TLS 传输层：对全部 TCP 链路做传输加密
+TLS 传输层
+对全部 TCP 链路做传输加密且绝不回退明文，只加密、不校验证书身份（CERT_NONE）。
 Copyright (c) 2026 Lisselde_E <Lisselde.E@outlook.com>.
 Licensed under the GNU General Public License v3.0.
-
-设计要点：
-- 仅加密、不校验证书身份（客户端 CERT_NONE），房间密码准入逻辑保持不变；
-- 每设备首次使用生成一张自签 ECDSA P-256 证书，落在用户数据目录 tls/ 下；
-- 进程内单例 SSLContext，握手统一 5s 超时；
-- 绝不回退明文：握手失败即关闭连接并抛异常，由调用方按连接失败处理。
 """
 import os
 import socket
@@ -149,7 +144,11 @@ def _wrap(sock, ctx: ssl.SSLContext, server_side: bool, host: Optional[str]) -> 
     握手完成后恢复调用方原超时，由调用方按自身需要再设置。
     """
     old_timeout = sock.gettimeout()
-    sock.settimeout(HANDSHAKE_TIMEOUT)
+    # 握手超时不得超过调用方原有超时，否则 1~2s 的快速失败会被拉长到 5s
+    timeout = HANDSHAKE_TIMEOUT
+    if old_timeout is not None and old_timeout < timeout:
+        timeout = old_timeout
+    sock.settimeout(timeout)
     wrapped = None
     try:
         wrapped = ctx.wrap_socket(

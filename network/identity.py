@@ -1,15 +1,8 @@
 """
-设备身份校验：TOFU 指纹信任表 + 每连接 nonce 签名
+设备身份校验
+TOFU 指纹信任表 + 每连接 nonce 签名，首见即固定、指纹不符即拒绝。
 Copyright (c) 2026 Lisselde_E <Lisselde.E@outlook.com>.
 Licensed under the GNU General Public License v3.0.
-
-设计要点：
-- 去中心化：每端只维护本地信任表（tls/peers.json，end_id -> 证书指纹）；
-- 每条 TCP 连接独立校验，不存在"本会话已认证"的豁免；
-- 拨号方校验服务端 TLS 证书指纹（按证书 CN 定位 end_id），防冒充主机/对端；
-- 接受方下发一次性 nonce，拨号方用设备私钥签名（end_id + purpose + nonce），
-  接受方验签并固定指纹——只知道密码、没有私钥的端无法冒充回归端；
-- 首次见到的新端 TOFU 固定；已固定端证书指纹不一致 -> 硬拒绝（不回退、不覆盖）。
 """
 import base64
 import hashlib
