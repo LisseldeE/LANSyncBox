@@ -385,7 +385,7 @@ class MeshManager(QObject):
             last_activity = time.time()
             while self.running:
                 try:
-                    data = conn_socket.recv(65536)
+                    data = send_guard.recv(conn_socket, 65536)  # 与发送互斥（TLS 同连接并发读写出伪 EOF）
                 except socket.timeout:
                     # 静默超时：收不到对端任何字节（含心跳）→ 判半开/静默死亡
                     if time.time() - last_activity > self.MAX_SILENT_SECONDS:
@@ -448,7 +448,7 @@ class MeshManager(QObject):
         try:
             while self.running:
                 try:
-                    data = conn_socket.recv(65536)
+                    data = send_guard.recv(conn_socket, 65536)  # 与发送互斥（TLS 同连接并发读写出伪 EOF）
                 except socket.timeout:
                     # 静默判死：半开/断电链路无 FIN/RST，只能以"多久没收到对端
                     # 字节"判定。上限留足心跳间隔余量，正常相连每秒都能收到对端心跳。

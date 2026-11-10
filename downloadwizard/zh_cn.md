@@ -14,18 +14,26 @@
 
 ## LANSyncBox
 
-### [R1.2.1.0](https://github.com/LisseldeE/LANSyncBox/releases/tag/pro-R1.2.1.0)
+### [R1.2.2.0](https://github.com/LisseldeE/LANSyncBox/releases/tag/main-R1.2.2.0)
 
 > 最新构建
+
+| 支持系统 | 支持架构 | 获取方式 | 链接 |
+|:---|:---|:---|:---|
+| Windows | x64 | GitHub | [**下载**](https://github.com/LisseldeE/LANSyncBox/releases/download/main-R1.2.2.0/LANSyncBoxPro_Setup.exe) |
+| Linux | x64 | GitHub | [**下载**](https://github.com/LisseldeE/LANSyncBox/releases/download/main-R1.2.2.0/lansyncboxpro_amd64.deb) |
+| macOS | arm64 | GitHub | [**下载**](https://github.com/LisseldeE/LANSyncBox/releases/download/main-R1.2.2.0/LANSyncBoxPro_arm64.dmg) |
+
+<details>
+<summary>历史版本（点击展开）</summary>
+
+### [R1.2.1.0](https://github.com/LisseldeE/LANSyncBox/releases/tag/pro-R1.2.1.0)
 
 | 支持系统 | 支持架构 | 获取方式 | 链接 |
 |:---|:---|:---|:---|
 | Windows | x64 | GitHub | [**下载**](https://github.com/LisseldeE/LANSyncBox/releases/download/pro-R1.2.1.0/LANSyncBoxPro_Setup.exe) |
 | Linux | x64 | GitHub | [**下载**](https://github.com/LisseldeE/LANSyncBox/releases/download/pro-R1.2.1.0/lansyncboxpro_amd64.deb) |
 | macOS | arm64 | GitHub | [**下载**](https://github.com/LisseldeE/LANSyncBox/releases/download/pro-R1.2.1.0/LANSyncBoxPro_arm64.dmg) |
-
-<details>
-<summary>历史版本（点击展开）</summary>
 
 ### [R1.2.0.0](https://github.com/LisseldeE/LANSyncBox/releases/tag/pro-R1.2.0.0)
 

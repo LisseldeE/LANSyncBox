@@ -321,19 +321,24 @@ class SyncClient(QObject):
         self._ping_stop.clear()
         self._ping_gen += 1
         gen = self._ping_gen
-        self._ping_thread = threading.Thread(target=self._ping_loop, args=(gen,), daemon=True)
+        sock = self.socket  # 绑定本代连接：旧代线程不得用过期 PONG 判死新连接
+        self._ping_thread = threading.Thread(target=self._ping_loop, args=(gen, sock), daemon=True)
         self._ping_thread.start()
 
-    def _ping_loop(self, gen: int):
+    def _ping_loop(self, gen: int, sock):
         """心跳探测线程：每 1 秒 PING 当前管理连接一次；超过 OFFLINE_TIMEOUT 未收到
         PONG 回包即判定离线（主机拔线/杀进程等半开场景），触发故障切换
         （_handle_management_lost：保留数据平面，按可用端点列表切至下一端点）。
-        gen 为线程代际号：新连接启动新线程后，旧线程据此让位退出（防重复 PING）。"""
+        gen 为线程代际号：新连接启动新线程后，旧线程据此让位退出（防重复 PING）；
+        sock 为本代连接的 socket：换代后旧线程既不发 PING 也不判死新连接
+        （新连接认证成功到刷新 PONG 时间戳之间存在窗口，旧线程据此会误杀新连接）。"""
         while not self._ping_stop.is_set():
             if gen != self._ping_gen:
                 break  # 已被新连接的新线程取代，让位退出
             if self._ping_stop.wait(self.PING_INTERVAL):
                 break
+            if self.socket is not sock:
+                break  # 已换代：旧连接的心跳线程退出，不越权判死新连接
             if not self.socket or not self.authenticated:
                 continue
             with self._ping_lock:
@@ -343,9 +348,9 @@ class SyncClient(QObject):
                 self._handle_management_lost()
                 break
             try:
-                # 可恢复发送：大文件传输背压时 PING 不丢失，避免误判离线
+                # 心跳让位：发送锁正被大文件占用时丢弃本次，避免与对端 PONG 互相等锁
                 self._send_guard.send_resumable(
-                    self.socket, Protocol.create_ping(time.time()))
+                    self.socket, Protocol.create_ping(time.time()), best_effort=True)
             except Exception:
                 pass
 
@@ -750,7 +755,7 @@ class SyncClient(QObject):
         receiver = MessageReceiver()
         while self.running and self.socket is sock:
             try:
-                data = sock.recv(65536)
+                data = self._send_guard.recv(sock, 65536)  # 与发送互斥（TLS 同连接并发读写出伪 EOF）
                 if not data:
                     break
 
@@ -967,11 +972,12 @@ class SyncClient(QObject):
             self.sync_result.emit(has_diff)
 
         elif msg_type == MessageType.PING:
-            # 主机心跳探测：立即回 PONG 并原样带回发送时刻（可恢复发送，背压不丢包）
+            # 主机心跳探测：立即回 PONG 并带回发送时刻（锁忙时丢本次，下拍重发）
             try:
                 send_time = struct.unpack('!d', content)[0]
+                # 接收线程回 PONG 不得被发送锁堵死，否则双向大流量会互等
                 self._send_guard.send_resumable(
-                    self.socket, Protocol.create_pong(send_time))
+                    self.socket, Protocol.create_pong(send_time), best_effort=True)
             except Exception:
                 pass
 

@@ -80,8 +80,8 @@ class Config:
     TERMS_URL = "https://lansyncbox.com/terms"
     PRIVACY_URL = "https://lansyncbox.com/privacy"
     # 条款版本号：协议内容有实质变更时同步修改（客户端据此判断是否需要重新确认）
-    TERMS_VERSION = "2026-10-25"
-    PRIVACY_VERSION = "2026-10-26"
+    TERMS_VERSION = "2026-11-10"
+    PRIVACY_VERSION = "2026-11-10"
     ANNOUNCEMENT_URL = "https://lansyncbox.com/announcement/lansyncbox"
     # 下载落地页（按语言区分，保持不变）
     GITHUB_RELEASES = f"https://github.com/{GITHUB_REPO}/releases"

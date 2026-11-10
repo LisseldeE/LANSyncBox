@@ -2,8 +2,10 @@
 Copyright (c) 2026 Lisselde_E <Lisselde.E@outlook.com>.
 Licensed under the GNU General Public License v3.0.
 """
+import errno
 import json
 import os
+import shutil
 import socket
 import tempfile
 import threading
@@ -302,7 +304,7 @@ class FileProvider(QObject):
         try:
             while self.running:
                 try:
-                    data = conn_socket.recv(65536)
+                    data = info['send_guard'].recv(conn_socket, 65536)  # 与发送互斥（TLS 同连接并发读写出伪 EOF）
                 except socket.timeout:
                     # 网络慢/请求未达：静默等待（与同步 server._handle_client 一致），
                     # 避免网络差时把拉取连接误判为断开而提前关闭。但连接长时间无任何
@@ -645,6 +647,83 @@ def _connect_provider(host: str, port: int, stop_event):
 # pull_file 落盘前回调判定「本份已过时」时的固定返回文案：调用方据此与真失败区分
 PULL_STALE_DISCARD_MSG = "落盘前已过时，未覆盖目标文件"
 
+# 目标盘空间不足固定文案前缀：调用方据此停止自动重试
+PULL_NO_SPACE_PREFIX = "目标磁盘空间不足"
+
+_FREE_SPACE_TTL = 2.0
+_FREE_SPACE_CACHE = {}      # 盘根 -> (剩余字节, 采样时刻)
+_FREE_SPACE_RESERVED = {}   # 盘根 -> 在途拉取尚未写入的字节数
+_FREE_SPACE_LOCK = threading.Lock()
+
+
+def _space_root(path: str) -> str:
+    """取目标所在文件系统的根（Windows 盘符根；其他平台按 st_dev 向上归一）。"""
+    abs_path = os.path.abspath(path)
+    root = os.path.splitdrive(abs_path)[0]
+    if root:
+        return root + os.sep
+    try:
+        dev = os.stat(abs_path).st_dev
+        cur = abs_path
+        while True:
+            parent = os.path.dirname(cur)
+            if parent == cur or os.stat(parent).st_dev != dev:
+                return cur
+            cur = parent
+    except OSError:
+        return abs_path
+
+
+def _disk_free(root: str) -> int:
+    """盘根剩余字节（缓存 2 秒，避免大量小文件反复系统调用）。"""
+    now = time.time()
+    with _FREE_SPACE_LOCK:
+        hit = _FREE_SPACE_CACHE.get(root)
+    if hit and now - hit[1] < _FREE_SPACE_TTL:
+        return hit[0]
+    free = shutil.disk_usage(root).free
+    with _FREE_SPACE_LOCK:
+        _FREE_SPACE_CACHE[root] = (free, now)
+    return free
+
+
+def _has_space_for(root: str, need: int) -> bool:
+    """剩余空间扣掉在途预留后是否够放 need 字节；查询失败按够放行。"""
+    with _FREE_SPACE_LOCK:
+        reserved = _FREE_SPACE_RESERVED.get(root, 0)
+    try:
+        free = _disk_free(root)
+    except OSError:
+        return True
+    return free - reserved >= need
+
+
+def _reserve_space(root: str, amount: int):
+    """登记在途拉取的待写字节，供并发拉取判断剩余空间。"""
+    if amount <= 0:
+        return
+    with _FREE_SPACE_LOCK:
+        _FREE_SPACE_RESERVED[root] = _FREE_SPACE_RESERVED.get(root, 0) + amount
+
+
+def _release_space(root: str, amount: int):
+    """释放已写入或已放弃的在途预留。"""
+    if amount <= 0:
+        return
+    with _FREE_SPACE_LOCK:
+        left = _FREE_SPACE_RESERVED.get(root, 0) - amount
+        if left > 0:
+            _FREE_SPACE_RESERVED[root] = left
+        else:
+            _FREE_SPACE_RESERVED.pop(root, None)
+
+
+def is_no_space_error(exc) -> bool:
+    """写盘失败是否「磁盘已满」（POSIX ENOSPC / Windows 39、112）。"""
+    if getattr(exc, 'errno', None) == errno.ENOSPC:
+        return True
+    return getattr(exc, 'winerror', None) in (39, 112)
+
 
 def pull_file(host: str, port: int, session_id: str, token: str, name: str, dest_path: str,
               progress_cb=None, stop_event=None, msg_type: int = None,
@@ -683,8 +762,14 @@ def pull_file(host: str, port: int, session_id: str, token: str, name: str, dest
         (成功?, 实际接收字节数, 错误消息)
     """
     dest_dir = os.path.dirname(os.path.abspath(dest_path)) or '.'
-    os.makedirs(dest_dir, exist_ok=True)
-    tmp_fd, tmp_path = tempfile.mkstemp(prefix='.tcp_', suffix='.part', dir=dest_dir)
+    try:
+        os.makedirs(dest_dir, exist_ok=True)
+        tmp_fd, tmp_path = tempfile.mkstemp(prefix='.tcp_', suffix='.part', dir=dest_dir)
+    except OSError as e:
+        # 盘满时连建临时文件都可能失败：按空间不足返回，交由调用方冷却
+        if is_no_space_error(e):
+            return False, 0, PULL_NO_SPACE_PREFIX
+        raise
     resume_attempts = max_resume if max_resume is not None \
         else FileProvider.MAX_RESUME_ATTEMPTS
 
@@ -704,6 +789,9 @@ def pull_file(host: str, port: int, session_id: str, token: str, name: str, dest
     cancelled = False
     timed_out = False
     got_end = False
+    no_space = False
+    space_root = _space_root(dest_dir)
+    reserved_left = 0    # 本份尚未写入的在途预留（写一块释放一块）
 
     try:
         with os.fdopen(tmp_fd, 'rb+') as fh:
@@ -719,6 +807,10 @@ def pull_file(host: str, port: int, session_id: str, token: str, name: str, dest
                     break  # 建连 3 次全失败：非瞬时，放弃（同样不再续传）
                 conn, peer_identity = connected
                 peer_committed = False
+                # 重连/续传前归还上一段残留预留，FILE_BEGIN 会按新的待写字节重算
+                if reserved_left:
+                    _release_space(space_root, reserved_left)
+                    reserved_left = 0
                 try:
                     # recv 超时 1s 供 stop_event 轮询（弱网语义不变：timeout 后 continue
                     # 静默等待，发送端打开/读取慢时依然无限等待；仅新增取消与整体超时兜底）
@@ -759,10 +851,27 @@ def pull_file(host: str, port: int, session_id: str, token: str, name: str, dest
                                     peer_committed = True
                                 expected_total = fsize  # 发送端开流时的真实大小（进度分母，恒定）
                                 mtime = msg_mtime
+                                # 开流即知真实大小：先查目标盘空间，不足则立即放弃（不白传）
+                                need = max(0, expected_total - written)
+                                if not _has_space_for(space_root, need):
+                                    no_space = True
+                                    break
+                                _reserve_space(space_root, need)
+                                reserved_left += need
                             elif mtype == MessageType.FILE_DATA:
                                 _chunk_index, chunk = content
-                                fh.write(chunk)
+                                try:
+                                    fh.write(chunk)
+                                except OSError as we:
+                                    if is_no_space_error(we):
+                                        no_space = True
+                                        break
+                                    raise
                                 written += len(chunk)
+                                if reserved_left:
+                                    taken = min(reserved_left, len(chunk))
+                                    _release_space(space_root, taken)
+                                    reserved_left -= taken
                                 if progress_cb:
                                     progress_cb(written, expected_total)
                             elif mtype == MessageType.FILE_END:
@@ -770,10 +879,12 @@ def pull_file(host: str, port: int, session_id: str, token: str, name: str, dest
                                 break
                             else:
                                 continue
-                        if got_end:
+                        if no_space or got_end:
                             break
-                except OSError:
-                    pass  # 连接中断（Reset/BrokenPipe/Aborted）：按本段是否收过字节决定续传
+                except OSError as oe:
+                    if is_no_space_error(oe):
+                        no_space = True   # 写盘满（含缓冲关闭时回刷失败）：按空间不足收尾
+                    # 其余为连接中断（Reset/BrokenPipe/Aborted）：按本段是否收过字节决定续传
                 finally:
                     try:
                         # 接收端主动取消（优雅取消握手）：断开前向发送端发一个最小
@@ -804,6 +915,8 @@ def pull_file(host: str, port: int, session_id: str, token: str, name: str, dest
                         pass
                 if cancelled or timed_out:
                     break
+                if no_space:
+                    break
                 if got_end:
                     ok = (expected_total <= 0) or (written == expected_total)
                     break
@@ -815,7 +928,12 @@ def pull_file(host: str, port: int, session_id: str, token: str, name: str, dest
                 # 本段有真实前进 → 断点续传：进入下一轮，从 written 重连续传
     except Exception as e:
         _safe_remove(tmp_path)
+        if no_space or is_no_space_error(e):
+            return False, written, PULL_NO_SPACE_PREFIX
         return False, written, f"拉取失败: {e}"
+    finally:
+        if reserved_left:
+            _release_space(space_root, reserved_left)
 
     # 收尾（成功路径复用原原子替换 + mtime 恢复；任何失败清理临时文件）
     if ok and got_end:
@@ -861,6 +979,14 @@ def pull_file(host: str, port: int, session_id: str, token: str, name: str, dest
         return False, written, "已取消"
     if timed_out:
         return False, written, "拉取超时"
+    if no_space:
+        try:
+            free = _disk_free(space_root)
+        except OSError:
+            free = 0
+        return False, written, (
+            f"{PULL_NO_SPACE_PREFIX}（已收 {written / 1024 ** 2:.1f} MB，"
+            f"剩余 {free / 1024 ** 2:.1f} MB）")
     if got_end:
         # 收到 FILE_END 但字节数不符（含续传场景下文件在传输期间被改动）
         return False, written, f"文件不完整（实际 {written}/期望 {expected_total}）"

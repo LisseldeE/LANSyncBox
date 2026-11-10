@@ -730,6 +730,20 @@ class DragableTableWidget(QTableWidget):
         return ""
 
 
+def _replace_with_retry(src, dst, attempts: int = 5):
+    """原子改名：目标被本机 FileProvider 共享读占用时 Windows 会拒绝改名
+    （WinError 5/32），短退避重试等发送线程释放句柄（与 pull_file 同一策略）。"""
+    last_err = None
+    for i in range(attempts):
+        try:
+            os.replace(src, dst)
+            return
+        except PermissionError as e:
+            last_err = e
+            time.sleep(0.05 * (i + 1))
+    raise last_err
+
+
 class FileCopyWorker(QThread):
     """文件复制工作线程"""
 
@@ -771,24 +785,24 @@ class FileCopyWorker(QThread):
                 except Exception:
                     pass
 
+                tmp = None
                 try:
                     if src.is_dir():
-                        # 复制文件夹（如果目标存在，先删除再复制）
+                        # 复制文件夹：先落 .part 临时目录，完成后再改名；.tcp_ 前缀
+                        # 会被补扫的目录剪枝，对端/补扫都看不到半成品
                         if dst.exists():
                             from sync.file_manager import safe_rmtree
                             safe_rmtree(dst)
-                        shutil.copytree(src, dst)
+                        tmp = dst.with_name('.tcp_' + dst.name + '.part')
+                        shutil.rmtree(tmp, ignore_errors=True)
+                        shutil.copytree(src, tmp)
+                        _replace_with_retry(tmp, dst)
+                        tmp = None
                     else:
                         # 复制文件（分块复制以显示进度）
                         success = self._copy_file_with_progress(src, dst, idx)
                         if not success:
-                            # 取消了复制，删除部分文件
-                            if dst.exists():
-                                try:
-                                    dst.unlink()
-                                except Exception:
-                                    pass
-                            # 发送取消信号并退出
+                            # 取消了复制（临时文件已由复制函数清理）
                             self.cancelled.emit()
                             return
 
@@ -796,12 +810,9 @@ class FileCopyWorker(QThread):
                     self.file_finished.emit(str(dst))
 
                 except Exception as e:
-                    # 发生错误，清理部分文件
-                    if dst.exists():
-                        try:
-                            dst.unlink()
-                        except Exception:
-                            pass
+                    # 失败清理临时产物；文件复制失败时既有正式文件保持原样
+                    if tmp is not None:
+                        shutil.rmtree(tmp, ignore_errors=True)
                     self.error_occurred.emit(f"复制 {src.name} 失败: {str(e)}")
 
             # 发送完成信号（仅在未取消时）
@@ -812,19 +823,16 @@ class FileCopyWorker(QThread):
             self.error_occurred.emit(f"复制过程出错: {str(e)}")
 
     def _copy_file_with_progress(self, src: Path, dst: Path, file_idx: int) -> bool:
-        """分块复制文件并更新进度，返回是否成功完成"""
+        """分块复制文件并更新进度，返回是否成功完成（先写 .part 临时文件，完成再改名）"""
         file_size = src.stat().st_size
         chunk_size = 1024 * 1024  # 1MB
         copied = 0
         last_progress = -1
+        tmp = dst.with_name('.tcp_' + dst.name + '.part')
 
         try:
-            with open(src, 'rb') as f_src, open(dst, 'wb') as f_dst:
-                while copied < file_size:
-                    if self._is_cancelled:
-                        # 取消复制，返回 False
-                        return False
-
+            with open(src, 'rb') as f_src, open(tmp, 'wb') as f_dst:
+                while copied < file_size and not self._is_cancelled:
                     chunk = f_src.read(chunk_size)
                     if not chunk:
                         break
@@ -840,12 +848,22 @@ class FileCopyWorker(QThread):
                         self.progress_updated.emit(file_idx, progress, 0)
                         last_progress = progress
 
-            # 复制元数据（仅在成功完成时）
-            shutil.copystat(src, dst)
+            if self._is_cancelled:
+                tmp.unlink(missing_ok=True)
+                return False
+
+            # 复制元数据（仅在成功完成时），再原子改名成正式文件名；
+            # 目标可能正被本机 FileProvider 共享读，改名需重试等待句柄释放
+            shutil.copystat(src, tmp)
+            _replace_with_retry(tmp, dst)
             return True
 
         except Exception as e:
-            # 发生错误，返回 False
+            try:
+                if tmp.exists():
+                    tmp.unlink()
+            except Exception:
+                pass
             return False
 
     def cancel(self):
@@ -991,6 +1009,9 @@ class FileListWidget(QWidget):
         self._capsule_pending = None       # 待确认的 (file_paths, target_dir)
         self._capsule_current_name = ""    # 胶囊进度状态下的当前文件名
         self._capsule_copying = False      # 胶囊复制进行中（防重复启动）
+        # 在途复制线程的强引用：连续添加文件会有多个 FileCopyWorker 并存，
+        # 只保存"最新一个"会让旧线程失去引用、在 run() 结束时被回收即闪退
+        self._copy_workers = set()
 
         self.init_ui()
         self.load_files()
@@ -1618,6 +1639,16 @@ class FileListWidget(QWidget):
         # 有选中项时右上角显示已选数量，摘要只作后备，等取消选中后再呈现
         if self._search_mode and not self.table.selectionModel().selectedRows():
             self._sel_status_label.setText(self._search_summary)
+
+    def _wait_keep_painting(self, seconds: float):
+        """等待文件句柄释放：只处理绘制事件，窗口不假死且不会重入用户操作。"""
+        import time
+        from PySide6.QtCore import QEventLoop
+        from PySide6.QtWidgets import QApplication
+        deadline = time.monotonic() + seconds
+        while time.monotonic() < deadline:
+            QApplication.processEvents(QEventLoop.ExcludeUserInputEvents)
+            time.sleep(0.01)
 
     def _refresh_after_mutation(self):
         """本地增删改完成后刷新视图：搜索态重新扫描，普通态刷新当前目录。"""
@@ -2300,33 +2331,32 @@ class FileListWidget(QWidget):
         progress_dialog.show()
 
         # 创建工作线程
-        self._paste_worker = FileCopyWorker([str(f) for f in files_to_paste], target_dir)
+        worker = FileCopyWorker([str(f) for f in files_to_paste], target_dir)
 
         # 连接信号
-        self._paste_worker.file_started.connect(
+        worker.file_started.connect(
             lambda name: progress_dialog.set_filename(name)
         )
-        self._paste_worker.progress_updated.connect(
+        worker.progress_updated.connect(
             lambda idx, progress, total: progress_dialog.set_progress(progress)
         )
-        self._paste_worker.file_finished.connect(
+        worker.file_finished.connect(
             lambda path: self._on_paste_file_finished(path)
         )
-        self._paste_worker.all_finished.connect(
+        worker.all_finished.connect(
             lambda: self._on_paste_finished(progress_dialog)
         )
-        self._paste_worker.error_occurred.connect(
+        worker.error_occurred.connect(
             lambda msg: self._show_error(msg)
         )
-        self._paste_worker.cancelled.connect(
+        worker.cancelled.connect(
             lambda: self._on_paste_cancelled(progress_dialog)
         )
-        progress_dialog.cancelled.connect(
-            lambda: self._paste_worker.cancel()
-        )
+        progress_dialog.cancelled.connect(worker.cancel)
 
+        self._track_copy_worker(worker)
         # 启动工作线程
-        self._paste_worker.start()
+        worker.start()
 
     def _on_paste_file_finished(self, file_path: str):
         """粘贴文件完成回调"""
@@ -2486,10 +2516,10 @@ class FileListWidget(QWidget):
                             break
                         except PermissionError as pe:
                             last_error = pe
-                            time.sleep(0.1)
+                            self._wait_keep_painting(0.1)
                         except OSError as oe:
                             last_error = oe
-                            time.sleep(0.1)
+                            self._wait_keep_painting(0.1)
 
                     if not deleted:
                         raise last_error if last_error else Exception("删除失败")
@@ -2765,10 +2795,10 @@ class FileListWidget(QWidget):
                             break
                         except PermissionError as pe:
                             last_error = pe
-                            time.sleep(0.1)
+                            self._wait_keep_painting(0.1)
                         except OSError as oe:
                             last_error = oe
-                            time.sleep(0.1)
+                            self._wait_keep_painting(0.1)
                     
                     if not renamed:
                         raise last_error if last_error else Exception("重命名失败")
@@ -2863,29 +2893,28 @@ class FileListWidget(QWidget):
         progress_dialog.show()
         
         # 创建工作线程
-        self._copy_worker = FileCopyWorker([str(f) for f in files], dest_path)
-        
+        worker = FileCopyWorker([str(f) for f in files], dest_path)
+
         # 连接信号
-        self._copy_worker.file_started.connect(
+        worker.file_started.connect(
             lambda name: progress_dialog.set_filename(name)
         )
-        self._copy_worker.progress_updated.connect(
+        worker.progress_updated.connect(
             lambda idx, progress, total: progress_dialog.set_progress(progress)
         )
-        self._copy_worker.file_finished.connect(
+        worker.file_finished.connect(
             lambda path: None  # 保存至外部不需要触发同步信号
         )
-        self._copy_worker.all_finished.connect(
+        worker.all_finished.connect(
             lambda: self._on_save_to_finished(progress_dialog)
         )
-        self._copy_worker.error_occurred.connect(
+        worker.error_occurred.connect(
             lambda msg: self._show_error(msg)
         )
-        progress_dialog.cancelled.connect(
-            lambda: self._copy_worker.cancel()
-        )
-        
-        self._copy_worker.start()
+        progress_dialog.cancelled.connect(worker.cancel)
+
+        self._track_copy_worker(worker)
+        worker.start()
     
     def _on_save_to_finished(self, dialog):
         """保存至完成回调"""
@@ -3042,21 +3071,23 @@ class FileListWidget(QWidget):
             except Exception:
                 pass
 
+            tmp = None
             try:
                 if is_copy:
-                    # 复制文件
+                    # 复制一律先落 .part 临时名、完成后再改名：补扫/对端永远看不到半成品
+                    tmp = dst.with_name('.tcp_' + dst.name + '.part')
                     if src.is_dir():
                         # 如果目标文件夹已存在，先删除
                         if dst.exists():
                             from sync.file_manager import safe_rmtree
                             safe_rmtree(dst)
-                        shutil.copytree(src, dst)
+                        shutil.rmtree(tmp, ignore_errors=True)
+                        shutil.copytree(src, tmp)
+                        _replace_with_retry(tmp, dst)
                         is_dir_copy = True
                     else:
-                        # 如果目标文件已存在，先删除
-                        if dst.exists():
-                            dst.unlink()
-                        shutil.copy2(src, dst)
+                        shutil.copy2(src, tmp)
+                        _replace_with_retry(tmp, dst)
                         is_dir_copy = False
 
                     # 触发同步信号
@@ -3081,6 +3112,15 @@ class FileListWidget(QWidget):
                         self.file_renamed.emit(str(src), str(dst))
 
             except Exception as e:
+                # 失败清理临时产物，不残留半成品
+                if tmp is not None:
+                    if tmp.is_dir():
+                        shutil.rmtree(tmp, ignore_errors=True)
+                    else:
+                        try:
+                            tmp.unlink(missing_ok=True)
+                        except Exception:
+                            pass
                 self._show_error(f"操作失败: {str(e)}")
         
         # 刷新文件列表
@@ -3119,6 +3159,20 @@ class FileListWidget(QWidget):
             return self._add_files_capsule(file_paths, target_dir, existing_files)
 
         return self._add_files_with_dialog(file_paths, target_dir, existing_files)
+
+    def _track_copy_worker(self, worker):
+        """保留在途复制线程的强引用，线程结束后释放。
+
+        运行中的 QThread 被 Python 回收会让 Qt 直接 abort（表现为传完文件时
+        闪退）：连续添加文件时旧 worker 不能只靠单个实例变量持有。
+        """
+        self._copy_workers.add(worker)
+
+        def _release():
+            self._copy_workers.discard(worker)
+            worker.deleteLater()
+
+        worker.finished.connect(_release)
 
     def _add_files_with_dialog(self, file_paths: List[str], target_dir: Path,
                                existing_files: List[str]) -> bool:
@@ -3160,33 +3214,32 @@ class FileListWidget(QWidget):
         progress_dialog.show()
         
         # 创建工作线程
-        self._copy_worker = FileCopyWorker(file_paths, target_dir)
+        worker = FileCopyWorker(file_paths, target_dir)
         
         # 连接信号
-        self._copy_worker.file_started.connect(
+        worker.file_started.connect(
             lambda name: progress_dialog.set_filename(name)
         )
-        self._copy_worker.progress_updated.connect(
+        worker.progress_updated.connect(
             lambda idx, progress, total: progress_dialog.set_progress(progress)
         )
-        self._copy_worker.file_finished.connect(
+        worker.file_finished.connect(
             lambda path: self._on_file_copied(path)
         )
-        self._copy_worker.all_finished.connect(
+        worker.all_finished.connect(
             lambda: self._on_copy_finished(progress_dialog)
         )
-        self._copy_worker.error_occurred.connect(
+        worker.error_occurred.connect(
             lambda msg: self._show_error(msg)
         )
-        self._copy_worker.cancelled.connect(
+        worker.cancelled.connect(
             lambda: self._on_copy_cancelled(progress_dialog)
         )
-        progress_dialog.cancelled.connect(
-            lambda: self._copy_worker.cancel()
-        )
+        progress_dialog.cancelled.connect(worker.cancel)
 
+        self._track_copy_worker(worker)
         # 启动工作线程
-        self._copy_worker.start()
+        worker.start()
         return False
 
     # ============================ 胶囊添加流程（窗口最小化时） ============================
@@ -3231,14 +3284,15 @@ class FileListWidget(QWidget):
         self._capsule_copying = True
         self._capsule_current_name = ""
 
-        self._copy_worker = FileCopyWorker(file_paths, target_dir)
-        self._copy_worker.file_started.connect(self._on_capsule_file_started)
-        self._copy_worker.progress_updated.connect(self._on_capsule_progress)
-        self._copy_worker.file_finished.connect(lambda path: self._on_file_copied(path))
-        self._copy_worker.all_finished.connect(self._on_capsule_copy_finished)
-        self._copy_worker.error_occurred.connect(self._on_capsule_copy_error)
-        self._copy_worker.cancelled.connect(self._on_capsule_copy_cancelled)
-        self._copy_worker.start()
+        worker = FileCopyWorker(file_paths, target_dir)
+        worker.file_started.connect(self._on_capsule_file_started)
+        worker.progress_updated.connect(self._on_capsule_progress)
+        worker.file_finished.connect(lambda path: self._on_file_copied(path))
+        worker.all_finished.connect(self._on_capsule_copy_finished)
+        worker.error_occurred.connect(self._on_capsule_copy_error)
+        worker.cancelled.connect(self._on_capsule_copy_cancelled)
+        self._track_copy_worker(worker)
+        worker.start()
 
     def _on_capsule_file_started(self, name: str):
         self._capsule_current_name = name

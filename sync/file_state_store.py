@@ -12,7 +12,7 @@ from typing import Optional
 from PySide6.QtCore import QObject, Signal
 
 from network.protocol import Protocol, MessageType
-from network.file_provider import pull_file, PULL_STALE_DISCARD_MSG
+from network.file_provider import pull_file, PULL_STALE_DISCARD_MSG, PULL_NO_SPACE_PREFIX
 from sync.vector import (FileState, STATE_ADD, STATE_CHANGE, compare_states,
                          vv_covers)
 
@@ -196,9 +196,17 @@ class FileStateStore(QObject):
         必须清除。仅清 .tcp_*.part（FileProvider 与主机直推统一命名），不碰
         用户自己的 .tmp 等其它文件。Returns: 删除个数。
         """
+        import shutil
         removed = 0
         try:
             for root, dirs, files in os.walk(self.sync_folder):
+                # 遗留临时目录（添加文件夹中途崩溃）整棵删除，否则会被下面的
+                # dot 剪枝永久隐藏，既不清理也不会被同步
+                for dn in list(dirs):
+                    if self._is_transient_temp(dn):
+                        shutil.rmtree(os.path.join(root, dn), ignore_errors=True)
+                        dirs.remove(dn)
+                        removed += 1
                 dirs[:] = [d for d in dirs if not d.startswith('.')]
                 for fn in files:
                     if not self._is_transient_temp(fn):
@@ -1026,6 +1034,12 @@ class FileStateStore(QObject):
             if err == PULL_STALE_DISCARD_MSG:
                 self.log_message.emit(f"拉取 {name} 落盘前已过时，放弃覆盖")
                 return
+            # 目标盘空间不足：立即进入冷却，避免「拉到一半失败→重拉」无限循环
+            if str(err).startswith(PULL_NO_SPACE_PREFIX):
+                self._record_pull_cooldown(name, item['end_id'], item['op_no'],
+                                           immediate=True)
+                self.log_message.emit(f"拉取 {name} 暂停: {err}；清理目标磁盘后自动恢复")
+                return
             # 阶段 5：源端明确「没有此文件」→ 记录冷却（连续多次后对账轮暂停重复拉取）
             if self._source_lacks_file(err):
                 self._record_pull_cooldown(name, item['end_id'], item['op_no'])
@@ -1049,8 +1063,8 @@ class FileStateStore(QObject):
         """
         return bool(err) and "复制端未提供数据" in str(err)
 
-    def _record_pull_cooldown(self, name: str, src_id: str, op_no):
-        """记录一次「源端无此文件」拉取失败；连续多次后进入冷却。
+    def _record_pull_cooldown(self, name: str, src_id: str, op_no, immediate: bool = False):
+        """记录一次拉取失败；连续多次或 immediate 时进入冷却。
 
         __lock__ 保护。冷却完成后（gate 侧触碰到期条目会移除）下次重试若仍失败
         再累计，故内存仅保留「正在冷却」的条目，不会无限增长。
@@ -1061,7 +1075,7 @@ class FileStateStore(QObject):
                 'fails': 0, 'cooldown_until': 0.0, 'last_op_no': 0})
             rec['last_op_no'] = max(rec.get('last_op_no', 0), int(op_no or 0))
             rec['fails'] = rec.get('fails', 0) + 1
-            if rec['fails'] >= self.PULL_COOLDOWN_FAILS:
+            if immediate or rec['fails'] >= self.PULL_COOLDOWN_FAILS:
                 rec['cooldown_until'] = time.time() + self.PULL_COOLDOWN_SECONDS
                 rec['fails'] = 0
 

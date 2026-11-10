@@ -63,7 +63,8 @@ class _CacheClearWorker(QThread):
 
 class _CacheSizeWorker(QThread):
     """后台统计目录占用，逐个目录回传，避免大量 stat 调用卡住界面"""
-    size_ready = Signal(int, str, int)  # 批次号, 目录名, 字节
+    # 字节数用 64 位整型：目录超过 2GB 时 32 位 int 会溢出（shiboken 警告并截断）
+    size_ready = Signal(int, str, 'qlonglong')  # 批次号, 目录名, 字节
 
     def __init__(self, paths, generation: int, parent=None):
         super().__init__(parent)

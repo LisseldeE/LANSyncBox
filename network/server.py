@@ -349,9 +349,9 @@ class SyncServer(QObject):
                         pass
                     continue
                 try:
-                    # 可恢复发送：大文件传输背压时 PING 不丢失，避免误判离线
+                    # 心跳让位：发送锁正被大文件占用时丢弃本次，避免与对端 PONG 互相等锁
                     info['send_guard'].send_resumable(
-                        info['socket'], Protocol.create_ping(now))
+                        info['socket'], Protocol.create_ping(now), best_effort=True)
                 except Exception:
                     pass
 
@@ -411,6 +411,7 @@ class SyncServer(QObject):
                 return
             raw_socket = client_info['socket']
             receiver = client_info['receiver']
+            send_guard = client_info['send_guard']
 
         # TLS 握手放在每连接线程内完成，避免阻塞 accept 循环；失败静默移除
         # （探活连接/不兼容旧端都会在此握手失败，不 emit 错误信号）
@@ -451,7 +452,7 @@ class SyncServer(QObject):
         
         while self.running:
             try:
-                data = client_socket.recv(65536)
+                data = send_guard.recv(client_socket, 65536)  # 与发送互斥（TLS 同连接并发读写出伪 EOF）
                 if not data:
                     break
                 
@@ -507,11 +508,12 @@ class SyncServer(QObject):
                 self._handle_end_info(client_id, content)
 
         elif msg_type == MessageType.PING:
-            # 连接端心跳探测：立即回 PONG 并原样带回发送时刻（可恢复发送，背压不丢包）
+            # 连接端心跳探测：立即回 PONG 并带回发送时刻（锁忙时丢本次，下拍重发）
             try:
                 send_time = struct.unpack('!d', content)[0]
+                # 接收线程回 PONG 不得被发送锁堵死，否则双向大流量会互等
                 client_info['send_guard'].send_resumable(
-                    client_info['socket'], Protocol.create_pong(send_time))
+                    client_info['socket'], Protocol.create_pong(send_time), best_effort=True)
             except Exception:
                 pass
 

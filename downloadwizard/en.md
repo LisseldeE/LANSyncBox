@@ -14,18 +14,26 @@
 
 ## LANSyncBox
 
-### [R1.2.1.0](https://github.com/LisseldeE/LANSyncBox/releases/tag/pro-R1.2.1.0)
+### [R1.2.2.0](https://github.com/LisseldeE/LANSyncBox/releases/tag/main-R1.2.2.0)
 
 > Latest build
+
+| OS | Architecture | Mirror | Link |
+|:---|:---|:---|:---|
+| Windows | x64 | GitHub | [**Download**](https://github.com/LisseldeE/LANSyncBox/releases/download/main-R1.2.2.0/LANSyncBoxPro_Setup.exe) |
+| Linux | x64 | GitHub | [**Download**](https://github.com/LisseldeE/LANSyncBox/releases/download/main-R1.2.2.0/lansyncboxpro_amd64.deb) |
+| macOS | arm64 | GitHub | [**Download**](https://github.com/LisseldeE/LANSyncBox/releases/download/main-R1.2.2.0/LANSyncBoxPro_arm64.dmg) |
+
+<details>
+<summary>Older releases (click to expand)</summary>
+
+### [R1.2.1.0](https://github.com/LisseldeE/LANSyncBox/releases/tag/pro-R1.2.1.0)
 
 | OS | Architecture | Mirror | Link |
 |:---|:---|:---|:---|
 | Windows | x64 | GitHub | [**Download**](https://github.com/LisseldeE/LANSyncBox/releases/download/pro-R1.2.1.0/LANSyncBoxPro_Setup.exe) |
 | Linux | x64 | GitHub | [**Download**](https://github.com/LisseldeE/LANSyncBox/releases/download/pro-R1.2.1.0/lansyncboxpro_amd64.deb) |
 | macOS | arm64 | GitHub | [**Download**](https://github.com/LisseldeE/LANSyncBox/releases/download/pro-R1.2.1.0/LANSyncBoxPro_arm64.dmg) |
-
-<details>
-<summary>Older releases (click to expand)</summary>
 
 ### [R1.2.0.0](https://github.com/LisseldeE/LANSyncBox/releases/tag/pro-R1.2.0.0)
 
