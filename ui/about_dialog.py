@@ -96,7 +96,7 @@ class AboutDialog(QDialog):
             hover_color="#228be6",
             underline_on_hover=True
         )
-        feedback_label.set_click_callback(self._open_issues)
+        feedback_label.set_click_callback(self._open_feedback)
         link_layout.addWidget(feedback_label)
 
         link_layout.addSpacing(20)  # 两个链接之间间距
@@ -186,9 +186,9 @@ class AboutDialog(QDialog):
         """打开 GitHub 仓库链接"""
         QDesktopServices.openUrl(QUrl(f"https://github.com/{Config.GITHUB_REPO}"))
 
-    def _open_issues(self, event):
-        """打开 GitHub Issues 页面（问题反馈）"""
-        QDesktopServices.openUrl(QUrl(f"https://github.com/{Config.GITHUB_REPO}/issues"))
+    def _open_feedback(self, event):
+        """打开官网问题反馈页面"""
+        QDesktopServices.openUrl(QUrl("https://lansyncbox.com/#feedback"))
 
     def _open_details(self, event):
         """打开官方网站（官方网站链接）"""

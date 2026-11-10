@@ -612,10 +612,10 @@ BUTTON_STYLES = {
             border: 1px solid transparent;
         }
         QPushButton:hover {
-            background-color: #495057;
+            background-color: #6c757d;
         }
         QPushButton:pressed {
-            background-color: #343a40;
+            background-color: #5a6268;
         }
         QPushButton:disabled {
             background-color: #adb5bd;
