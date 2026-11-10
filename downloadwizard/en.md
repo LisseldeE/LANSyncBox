@@ -20,9 +20,9 @@
 
 | OS | Architecture | Mirror | Link |
 |:---|:---|:---|:---|
-| Windows | x64 | GitHub | [**Download**](https://github.com/LisseldeE/LANSyncBox/releases/download/main-R1.2.2.0/LANSyncBoxPro_Setup.exe) |
-| Linux | x64 | GitHub | [**Download**](https://github.com/LisseldeE/LANSyncBox/releases/download/main-R1.2.2.0/lansyncboxpro_amd64.deb) |
-| macOS | arm64 | GitHub | [**Download**](https://github.com/LisseldeE/LANSyncBox/releases/download/main-R1.2.2.0/LANSyncBoxPro_arm64.dmg) |
+| Windows | x64 | GitHub | [**Download**](https://github.com/LisseldeE/LANSyncBox/releases/download/main-R1.2.2.0/LANSyncBox_Setup.exe) |
+| Linux | x64 | GitHub | [**Download**](https://github.com/LisseldeE/LANSyncBox/releases/download/main-R1.2.2.0/lansyncbox_amd64.deb) |
+| macOS | arm64 | GitHub | [**Download**](https://github.com/LisseldeE/LANSyncBox/releases/download/main-R1.2.2.0/LANSyncBox_arm64.dmg) |
 
 <details>
 <summary>Older releases (click to expand)</summary>
