@@ -921,8 +921,15 @@ class SyncServer(QObject):
             # ---- 连接端"复用管理监听"（_reuse=True，非真主机）——H1：控制面只连主机 ----
             # 接入端拨到的是本连接端的管理监听，并非真主机。不能让接入端把本端误当
             # 管理宿主（互相取暖）。故：
-            #   主机已知 → 下发真主机信息（HOST_INFO）并断开，令接入端换接真主机；
-            #   主机未知（离线/待机）→ 拒绝承担管理宿主并断开（接入端回退重试）。
+            #   主机在线（本端此刻确实挂接真主机）→ 只下发 HOST_INFO 并断开，
+            #       令接入端换接真主机；
+            #   主机离线/待机 → 回瞬时拒绝码，接入端据此提示"主机暂不可用"。
+            # 注意：此处绝不能先回 AUTH_OK。AUTH_OK 会让接入端把本中间端当成管理宿主
+            # 并立刻进入重路径（建 mesh/管理监听、emit connected、起心跳），而这期间
+            # 本端已经关闭连接，紧随其后的 HOST_INFO 极易被连带丢弃（换接帧丢失）：
+            # 接入端既没认证成功、也没拿到真主机地址，于是又回来重连本中间端，
+            # 形成"验证成功/端点切换"高频空转（主机离线时尤为明显）。只发一帧
+            # HOST_INFO 可保证接入端在无重负载的情况下立即处理换接。
             if self._reuse:
                 host = self._host_provider() if self._host_provider else None
                 # 仅当已知真主机身份(end_id 非空)才转发 HOST_INFO：主机 id 未知时
@@ -932,15 +939,14 @@ class SyncServer(QObject):
                         and int(host.get('mgmt_port', 0) or 0) > 0
                         and (host.get('end_id') or '')):
                     self.clients[client_id]['last_pong'] = time.time()
-                    self._socket_send(self.clients[client_id],
-                                      Protocol.create_auth_response(True, "验证成功"))
                     try:
                         self._socket_send(self.clients[client_id], Protocol.create_host_info(
                             host.get('end_id', ''), host.get('ip'), int(host['mgmt_port'])))
+                        self.log_message.emit(
+                            f"客户端 {client_id} 接入，转发至真主机 {host.get('ip')}:{host.get('mgmt_port')}")
                     except Exception:
+                        # 换接帧发不出去（接入端已断开）：正常移除即可，不必升级为认证错误
                         pass
-                    self.log_message.emit(
-                        f"客户端 {client_id} 接入，转发至真主机 {host.get('ip')}:{host.get('mgmt_port')}")
                     self._remove_client(client_id)
                 else:
                     # 主机暂不在属瞬时态：回瞬时码（`2`），避免客户端当成永久拒绝停重连

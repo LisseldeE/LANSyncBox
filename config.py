@@ -49,7 +49,7 @@ class Config:
 
     # 应用信息
     APP_NAME = "LANSyncBox"
-    APP_VERSION = "R1.2.2.0"
+    APP_VERSION = "R1.2.3.0"
     # 同步逻辑版本号
     SYNC_LOGIC_VERSION = "26.11C1"
     # 序列号：P(历史沿用前缀) + 构建年月 YYMM(发布时手改) + . + 平台字母(自动识别) + H(GitHub 发布源固定)

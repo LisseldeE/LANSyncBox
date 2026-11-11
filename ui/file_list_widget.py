@@ -1760,8 +1760,10 @@ class FileListWidget(QWidget):
             self.drag_hint_label.hide()
             return
 
-        # 获取文件列表
-        items = list(self.current_path.iterdir())
+        # 获取文件列表（跳过传输临时文件 .tcp_*.part：它们仅在传输期间存在，
+        # 与 FileManager.get_file_list_for_sync / 补扫的过滤规则一致，不应出现在列表）
+        items = [it for it in self.current_path.iterdir()
+                 if not (it.name.startswith('.tcp_') and it.name.endswith('.part'))]
 
         # 排序：文件夹在前，然后按名称排序
         items.sort(key=lambda x: (not x.is_dir(), x.name.lower()))

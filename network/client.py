@@ -117,7 +117,7 @@ class SyncClient(QObject):
         self._reported_offline = False     # 是否已发过 disconnected（整轮失败才发一次）
         self._mgmt_server = None           # 本端管理监听（reuse 模式 SyncServer）
         self._auth_wait = threading.Condition()  # 认证结果等待（_try_attach 试连用）
-        self._auth_result = None           # 最近一次认证结果（True/False/None）
+        self._auth_result = None           # 最近一次认证结果（True/False/None/'redirect'=已被换接）
         self._reconnect_stop = threading.Event()  # 停止自动重连
         self._reconnect_wake = threading.Event()  # 唤醒重连循环
         self._reconnect_lock = threading.Lock()   # 保护重连线程启动
@@ -141,6 +141,14 @@ class SyncClient(QObject):
         # 只提示一次"主机离线，静默待机"）；不再连对端 mgmt，"不互相取暖"。
         self._host_offline_logged = False   # 是否已就"主机离线，静默待机"提示过（主机回归后复位）
         self._silent_standby = False        # 是否处于主机静默待机（屏蔽 connect 失败日志）
+        # 最近一次管理连接的目标 (ip, port)：用于识别"对端下发的换接地址与当前接入点相同"
+        # 的自指重定向（否则会原地反复换接，形成热循环）
+        self._mgmt_target = None
+        # 防抖动：最近一次"试连并挂上"的时刻与连续"挂上即被断"的次数。正常挂上后
+        # 连接能存活，_flap_count 由重连循环在已挂接分支复位；若反复秒断则退避。
+        self._last_attach_at = 0.0
+        self._flap_count = 0
+        self._empty_redirect_logged = False  # "换接信息缺身份"是否已提示过（去重）
 
         # 自动重连参数
         self.RECONNECT_BASE = 1.0          # 整轮端点试连失败后的初始退避（秒）
@@ -191,6 +199,7 @@ class SyncClient(QObject):
             self._pending_server_identity = identity.authenticate_dialer(self.socket, "mgmt")
             self.socket.settimeout(1.0)
             self.host_ip = host
+            self._mgmt_target = (host, int(port))
 
             # 竞态防护：自动重连过程中发生了手动断开（disconnect 已置 _reconnect_stop）。
             # 不在此时复活 running 状态、也不启动接收线程，回收半开 socket 交重连循环退出，
@@ -388,6 +397,11 @@ class SyncClient(QObject):
                 if self.socket and self.authenticated:
                     # 已保持管理连接：确认挂在主机（index0 恒为主机占位），挂在非主机
                     # 对端则丢开回待机（不互相取暖）
+                    # 连接存活足够久才清除"挂上即断"计数：刚挂上就走到这里不能清零，
+                    # 否则秒断循环每轮都会把计数打回 0，下面的防抖动永远不触发
+                    if (self._last_attach_at
+                            and time.time() - self._last_attach_at >= 2.0):
+                        self._flap_count = 0
                     idx = self._current_ep_index()
                     if idx == 0 or idx == -1:
                         # 已挂主机（含 end_id='' 的占位主机） / 无法识别挂接端点：
@@ -406,6 +420,19 @@ class SyncClient(QObject):
                     continue
                 # 无管理连接：只连主机
                 self._silent_standby = True
+                # 防抖动：刚挂上就立刻被断开（对端接纳后秒断）时不得无间隔重连空转，
+                # 连续 3 次退避一轮待机间隔再试（正常主机回归只多等几秒，不影响收敛）
+                if (self._last_attach_at
+                        and time.time() - self._last_attach_at < 2.0):
+                    self._flap_count += 1
+                    if self._flap_count >= 3:
+                        self.log_message.emit(
+                            "管理连接反复瞬时断开，暂停重连 10 秒")
+                        self._flap_count = 0
+                        self._reconnect_wake.clear()
+                        self._reconnect_wake.wait(self.PREFERRED_REPROBE_INTERVAL)
+                        self._reconnect_wake.clear()
+                        continue
                 host = self._host_candidate()
                 if not host or not int(host.get('mgmt_port', 0) or 0):
                     self._enter_host_standby()
@@ -435,6 +462,19 @@ class SyncClient(QObject):
             return None  # 主机不在列表：静默待机
         return self._best_endpoint(0)
 
+    def _live_host_candidate(self) -> Optional[dict]:
+        """对外提供的主机换接线索（复用管理监听/探活用）：仅在本端当前确实保持着
+        到真主机的已认证管理连接时返回，否则 None。
+
+        主机离线后 _host_candidate 仍会返回"历史上已知的主机地址"（供本端自己
+        周期回探）。若照此转发给新接入端，等于把新端引向一个已死地址：新端每次
+        接入都要走一遍 重定向→断连→重连，表现为管理面无限切换、端点状态闪烁
+        （主机离线时第三端加入即触发）。主机不在线 → 返回 None，让复用监听回
+        瞬时码，新端据此提示"主机暂不可用"，不再空转。"""
+        if not (self.socket and self.authenticated):
+            return None
+        return self._host_candidate()
+
     def _enter_host_standby(self):
         """进入/维持主机静默待机：固定间隔重探主机，只提示一次"主机离线"。
 
@@ -444,6 +484,9 @@ class SyncClient(QObject):
             self._host_offline_logged = True
             self.log_message.emit("主机离线，静默待机，仅等待主机回归")
         self._silent_standby = True
+        # 先消化已积压的唤醒再等待：进入待机前积压的唤醒来自"刚才那次断连"，
+        # 若留到 wait 里会立即返回，把 10s 待机退化成无间隔重试（热循环）。
+        self._reconnect_wake.clear()
         self._reconnect_wake.wait(self.PREFERRED_REPROBE_INTERVAL)
         self._reconnect_wake.clear()
 
@@ -459,10 +502,17 @@ class SyncClient(QObject):
         host_id = info.get('host_id', '') or ''
         if not host_ip or host_port <= 0:
             return
+        # 空身份的重定向不可执行：换接目标没有 end_id 时，本端只会把"同一地址的
+        # 占位"重新钉成候选，连上再被重定向回来就是原地热循环。宁可不换接。
+        if not host_id:
+            if not self._empty_redirect_logged:
+                self._empty_redirect_logged = True
+                self.log_message.emit("对端下发的主机信息缺少身份，忽略本次换接")
+            return
         # 自指兜底：对端回带的主机就是本端 → 本端即该房间主机，绝不自我换接/自我拨号
         # （否则会把自己钉成唯一连接候选，形成热循环）。去重提示一次后停重连，
         # 交用户以主机身份回归。
-        if host_id and host_id == UserConfig.get_end_id():
+        if host_id == UserConfig.get_end_id():
             self.log_message.emit("对端回带主机即本端，本端即该房间主机，请以主机身份回归")
             if not self._perm_auth_denied:
                 self._perm_auth_denied = True
@@ -470,6 +520,10 @@ class SyncClient(QObject):
                 self._reconnect_active = False
                 self.auth_failed.emit(self.REGRESS_AUTH_MSG)
             self._close_mgmt_socket()
+            return
+        # 自指重定向（换接地址与当前接入点完全相同）同样会原地打转，直接忽略
+        if self._mgmt_target and (host_ip, host_port) == self._mgmt_target:
+            self.log_message.emit("对端下发的换接地址与当前接入点相同，忽略本次换接")
             return
         with self._ep_lock:
             self._endpoint_list = [{
@@ -488,6 +542,11 @@ class SyncClient(QObject):
                                         ip=host_ip, mesh_port=0, mgmt_port=host_port))
         self._reported_offline = False
         self._host_offline_logged = False
+        # 即刻告知正在 _try_attach 等待认证结果的试连方：本次不是认证成功，
+        # 而是"已被换接"。否则试连方会干等满 AUTH_WAIT_TIMEOUT（3s）并计入失败。
+        with self._auth_wait:
+            self._auth_result = 'redirect'
+            self._auth_wait.notify_all()
         # 换接真主机：丢开当前中间端管理连接，交给"只连主机"重连收敛
         self._close_mgmt_socket()
         self._start_reconnect()
@@ -511,6 +570,11 @@ class SyncClient(QObject):
                 timeout=self.AUTH_WAIT_TIMEOUT)
             result = self._auth_result
             self._auth_result = None
+        if result == 'redirect':
+            # 本次接入点是"中间端复用监听"，已下发真主机换接信息并关闭连接：
+            # 既不是认证成功（不打"端点切换"），也不算该端点失败（不计失败计数），
+            # 由重连循环按新钉的主机候选继续换接。
+            return True
         if not result:
             self._close_mgmt_socket()
             self._note_ep_fail(ep)
@@ -519,6 +583,7 @@ class SyncClient(QObject):
         self._attached_ep = dict(ep)
         self._reported_offline = False
         self._backoff = self.RECONNECT_BASE
+        self._last_attach_at = time.time()
         self.log_message.emit(
             f"端点切换: 已连接 {ep.get('name', '')} ({ep.get('end_id', '')}) {ip}")
         return True
@@ -1168,8 +1233,10 @@ class SyncClient(QObject):
             server.file_state_store = self.file_state_store
             server._file_provider = self._file_provider
             server.mode = self.mode
-            # H1：向接入本端复用管理监听的"新端"提供真主机信息，令其换接真主机
-            server._host_provider = self._host_candidate
+            # H1：向接入本端复用管理监听的"新端"提供真主机信息，令其换接真主机。
+            # 用"在线"版本：主机离线期间不把历史地址转发出去，否则新端被引向死地址，
+            # 反复换接/断连形成管理面无限切换。
+            server._host_provider = self._live_host_candidate
             if not server.start(port=Config.DEFAULT_PORT, reuse=True):
                 self.log_message.emit("本端管理监听启动失败")
                 return
