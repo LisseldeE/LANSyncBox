@@ -956,8 +956,25 @@ class FileStateStore(QObject):
         # （bytes_vv），知识覆盖但字节未到位（backfill 待补）不在此列照常拉取；
         # 文件被删时 os.path.exists 兜底放行，不影响正常补拉。
         st = self.distributor.get_state(name) if self.distributor else None
+        # 同一内容版本会被多个对端各公告一次（空白端回归、新端加入时每个对端
+        # 各回一份 RESP），同一文件因此会入队多次。第一份拉取落盘后，bytes_vv
+        # 只含「首份来源」的分量，第二份来源的 vv 分量不被覆盖 → 仅凭 vv 去重
+        # 会漏判（同源重复能去重、异源重复漏掉），把同一份字节再从另一个端
+        # 完整拉一遍。故补充「本端字节已认证为该版本」判据：
+        #   · bytes_clock == clock：本端磁盘字节已被认证为当前知识版本
+        #     （本地写入显式置等；拉取落盘仅当源端字节指纹 == 胜者版本才置等，
+        #      否则不等；字节不可信时被 _mark_bytes_unknown 清零 → 不等）；
+        #   · 候选版本 (clock, ts) 与本端知识版本一致 → 要拉的就是这一版。
+        # 两者同时成立即磁盘已是该版本内容，无需再拉。指纹为 0 不参与判定。
+        cand_clock = int(item.get('clock', 0) or 0)
+        cand_ts = float(item.get('ts', 0.0) or 0.0)
+        same_version = (st is not None
+                        and bool(st.bytes_clock)
+                        and st.bytes_clock == st.clock
+                        and st.clock == cand_clock
+                        and abs(st.ts - cand_ts) <= 1e-6)
         if (st is not None and st.exists
-                and vv_covers(st.bytes_vv, cand.vv)
+                and (vv_covers(st.bytes_vv, cand.vv) or same_version)
                 and os.path.exists(dest)):
             self.log_message.emit(f"拉取 {name} 跳过: 本端已持有该版本字节")
             return
