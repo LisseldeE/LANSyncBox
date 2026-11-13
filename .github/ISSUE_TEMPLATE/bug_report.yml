@@ -9,14 +9,15 @@ body:
       value: |
         ## 感谢提交 Bug
 
-        请尽量提供完整的复现信息，便于快速定位问题。
+        LANSyncBox 标准版与 Pro 版已合并为单一项目 LANSyncBox（R1.2.2.0 起完成合并，原标准版已下架）。
+        请基于最新的 LANSyncBox 正式版复现问题，并尽量提供完整的复现信息，便于快速定位。
 
   - type: input
     id: app_version
     attributes:
       label: 应用版本号
-      description: 在"关于"界面左下角或帮助菜单中查看，形如 R1.2.1.0
-      placeholder: 例如 R1.2.1.0
+      description: 在"关于"界面左下角或帮助菜单中查看，形如 R1.2.2.1
+      placeholder: 例如 R1.2.2.1
     validations:
       required: true
 
