@@ -75,6 +75,22 @@ def _regular_files(paths) -> list:
     return [p for p in paths if p and os.path.isfile(p)]
 
 
+def _slim_scrollbar_qss() -> str:
+    """窄圆角滚动条：去箭头、透明轨道，颜色随深浅色主题贴合面板。"""
+    win = QApplication.palette().color(QPalette.Window)
+    handle = _shift(win, 54 if _is_dark() else -44)
+    hover = _shift(win, 70 if _is_dark() else -60)
+    return (
+        "QScrollBar:vertical { background: transparent; width: 6px; margin: 0; }"
+        f"QScrollBar::handle:vertical {{ background: {handle}; "
+        "border-radius: 3px; min-height: 24px; }"
+        f"QScrollBar::handle:vertical:hover {{ background: {hover}; }}"
+        "QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical { height: 0; }"
+        "QScrollBar::add-page:vertical, QScrollBar::sub-page:vertical "
+        "{ background: transparent; }"
+    )
+
+
 # 文件消息卡片左侧线条图标（%C% 为描边色占位，与同步列表快捷操作栏同一套风格）
 _SVG_FOLDER = (
     '<svg viewBox="0 0 24 24" fill="none" stroke="%C%" stroke-width="1.8" '
@@ -1881,6 +1897,7 @@ class SendPanel(QWidget):
                            (self._peer_scroll, self._peer_host)):
             area.viewport().setStyleSheet("background:transparent;")
             host.setStyleSheet("background:transparent;")
+            area.verticalScrollBar().setStyleSheet(_slim_scrollbar_qss())
 
         self._update_action_state()
 

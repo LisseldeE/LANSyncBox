@@ -9,16 +9,93 @@ import threading
 from html import escape
 from pathlib import Path
 
-from PySide6.QtCore import Qt, QTimer, Signal
+from PySide6.QtCore import (
+    Property, QEasingCurve, QPropertyAnimation, QRectF, Qt, QTimer, Signal
+)
+from PySide6.QtGui import QColor, QPainter, QPainterPath
 from PySide6.QtWidgets import (
-    QApplication, QDialog, QFrame, QHBoxLayout, QLabel, QProgressBar, QTextBrowser,
-    QVBoxLayout
+    QApplication, QDialog, QFrame, QHBoxLayout, QLabel, QTextBrowser,
+    QVBoxLayout, QWidget
 )
 
 from config import Config
 from i18n import I18n
 from ui.widgets import AnimatedButton, BUTTON_STYLES
 from utils import update_manager
+
+
+class _ProgressBar(QWidget):
+    """细进度条：确定态按百分比填充，不确定态自绘条纹（必定从左侧 0 点起步）。
+
+    不用 QProgressBar 的忙态，因为它的相位来自样式的时间动画，切进去时
+    可能落在轨道中间，无法通过 setRange 复位。
+    """
+
+    CHUNK_RATIO = 0.25
+    CYCLE_MS = 3200
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setFixedHeight(8)
+        self._value = 0
+        self._busy = False
+        self._phase_value = 0.0
+        self._anim = QPropertyAnimation(self, b'_phase', self)
+        self._anim.setStartValue(0.0)
+        self._anim.setEndValue(1.0)
+        self._anim.setDuration(self.CYCLE_MS)
+        self._anim.setEasingCurve(QEasingCurve.Linear)
+        self._anim.setLoopCount(-1)
+
+    def _get_phase(self):
+        return self._phase_value
+
+    def _set_phase(self, value):
+        self._phase_value = value
+        self.update()
+
+    _phase = Property(float, _get_phase, _set_phase)
+
+    def setRange(self, minimum, maximum):
+        busy = maximum == minimum
+        if busy == self._busy:
+            return
+        self._busy = busy
+        if busy:
+            self._phase_value = 0.0  # 从 0 点起步
+            self._anim.start()
+        else:
+            self._anim.stop()
+        self.update()
+
+    def setValue(self, value):
+        self._value = max(0, min(100, int(value)))
+        if not self._busy:
+            self.update()
+
+    def paintEvent(self, event):
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.Antialiasing, True)
+        rect = QRectF(self.rect())
+        radius = rect.height() / 2
+        painter.setPen(Qt.NoPen)
+        painter.setBrush(QColor(255, 255, 255, 30))
+        painter.drawRoundedRect(rect, radius, radius)
+
+        if self._busy:
+            chunk = max(48.0, rect.width() * self.CHUNK_RATIO)
+            x = -chunk + self._phase * (rect.width() + chunk)
+            fill = QRectF(x, 0, chunk, rect.height())
+        elif self._value > 0:
+            fill = QRectF(0, 0, rect.width() * self._value / 100.0, rect.height())
+        else:
+            return
+
+        clip = QPainterPath()
+        clip.addRoundedRect(rect, radius, radius)
+        painter.setClipPath(clip)
+        painter.setBrush(QColor('#339af0'))
+        painter.drawRect(fill)
 
 
 class UpdateDialog(QDialog):
@@ -76,10 +153,8 @@ class UpdateDialog(QDialog):
             self._log_view.setPlainText(I18n.tr('update_empty_log'))
         layout.addWidget(self._log_view, 1)
 
-        self._progress = QProgressBar()
+        self._progress = _ProgressBar()
         self._progress.setVisible(False)
-        self._progress.setTextVisible(False)
-        self._progress.setFixedHeight(8)
         layout.addWidget(self._progress)
 
         self._status = QLabel('')
@@ -116,7 +191,10 @@ class UpdateDialog(QDialog):
         self._download_btn.setText(I18n.tr('update_download'))
         self._download_btn.setEnabled(False)
         self._progress.setVisible(True)
-        self._progress.setRange(0, 0)
+        # 先给确定态的 0%，等确实拿不到总长度（total=0）再切不确定态，
+        # 避免"条纹动画跑一半就跳成百分比"的视觉闪跳
+        self._progress.setRange(0, 100)
+        self._progress.setValue(0)
         self._status.setText(I18n.tr('update_downloading_unknown'))
         self._cancel.clear()
         self._thread = threading.Thread(target=self._worker, daemon=True,
