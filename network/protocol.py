@@ -82,6 +82,12 @@ class MessageType:
     IDENTITY_PROOF = 0x33      # 拨号方→接受方：content=JSON {end_id, cert, sig}
     IDENTITY_OK = 0x34         # 接受方→拨号方：验签与指纹固定通过；content 为空
 
+    # ---- 权限策略（主机→连接端/引导端；content=JSON） ----
+    # 主机把"新端默认权限 + 按 end_id 手动覆盖"的完整策略下发；连接端持久化并在
+    # 主机离线时由引导端据此为新端适配档位。属协议语义变更（要求双端都懂），
+    # 已随本类型提升 SYNC_LOGIC_VERSION：旧端不识别该帧会静默忽略，混版无意义。
+    PERM_POLICY = 0x35         # 权限策略快照：{default: "rw"|"ro"|"", overrides: {end_id: "rw"|"ro"}}
+
 
 class RoomProbeState:
     """房间探活状态码（ROOM_PROBE_RESP 的 content 取值）
@@ -352,6 +358,15 @@ class Protocol:
         """
         content = perm.encode('utf-8')
         return Protocol.pack_message(msg_type, '', len(content), False, content)
+
+    @staticmethod
+    def create_perm_policy(policy: dict) -> bytes:
+        """创建权限策略快照消息（0x35，主机/引导端→连接端）
+
+        policy: {default: "rw"|"ro"|"", overrides: {end_id: "rw"|"ro"}}
+        连接端据此在主机离线期间为后续新端适配档位（覆盖优先于默认）。
+        """
+        return Protocol._pack_json(MessageType.PERM_POLICY, policy or {})
 
     @staticmethod
     def create_clipboard_message(mime_type: str, data: bytes) -> bytes:
@@ -675,6 +690,7 @@ class MessageReceiver:
         MessageType.CLIPBOARD_NOTIFY_SIGNAL,
         MessageType.HOST_INFO,
         MessageType.ROOM_PEER_LIST,
+        MessageType.PERM_POLICY,
         MessageType.CHAT_TEXT,
         MessageType.CHAT_FILE_OFFER,
         MessageType.CHAT_SESSION_CLOSE,

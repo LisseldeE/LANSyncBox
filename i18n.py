@@ -106,6 +106,7 @@ class I18n:
             "connecting": "正在连接...",
             "verifying": "正在验证...",
             "connection_failed": "连接失败",
+            "host_unavailable_join": "主机离线，暂时无法加入，请等待主机重新上线",
             "invalid_room_code": "无效的房间号",
             "incorrect_password": "密码错误",
             "host_address_optional": "主机地址 (可选)",
@@ -142,6 +143,8 @@ class I18n:
             "legend_scanned": "发现房间",
             "legend_history_online": "历史在线",
             "legend_history_offline": "历史离线",
+            "legend_incompatible": "不可加入",
+            "room_version_incompatible_tip": "版本不兼容（对方 {versions}，本机 {mine}），需升级后加入",
 
             # 同步界面
             "host_mode": "主机端",
@@ -530,6 +533,7 @@ class I18n:
             "connecting": "Connecting...",
             "verifying": "Verifying...",
             "connection_failed": "Connection failed",
+            "host_unavailable_join": "Host is offline, unable to join for now. Please wait for the host to come back online.",
             "invalid_room_code": "Invalid room code",
             "incorrect_password": "Incorrect password",
             "host_address_optional": "Host Address (Optional)",
@@ -566,6 +570,8 @@ class I18n:
             "legend_scanned": "Discovered",
             "legend_history_online": "History Online",
             "legend_history_offline": "History Offline",
+            "legend_incompatible": "Not Joinable",
+            "room_version_incompatible_tip": "Incompatible version (peer {versions}, local {mine}); upgrade required to join",
 
             # Sync window
             "host_mode": "Host",

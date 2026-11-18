@@ -14,12 +14,13 @@ from PySide6.QtGui import QPalette, QColor, QPainter
 from i18n import I18n
 from ui.sync_window import PermSegmentedControl
 from ui.widgets import AnimatedButton, BUTTON_STYLES
+from utils.nickname import nickname
 
 
 class PermManageDialog(QDialog):
     """权限管理面板（主机端专用）
 
-    每行一个已认证连接端：IP + 只读/读写权限胶囊。
+    每行一个已认证连接端：端昵称（按 end_id 派生，未登记时回退 IP）+ 只读/读写权限胶囊。
     - 切换中：该行胶囊置灰（复用模式切换占位，宽度不变避免布局跳动）
     - 收 ACK：胶囊落定 + 底部状态提示「已切换为只读/读写」
     - 重发超限：胶囊回滚 + 底部状态提示「切换失败（对端无响应）」
@@ -47,6 +48,7 @@ class PermManageDialog(QDialog):
         self.server.perm_ack_received.connect(self._on_perm_ack)
         self.server.perm_switch_failed.connect(self._on_perm_failed)
         self.server.client_connected.connect(lambda cid: self._refresh())
+        self.server.client_identity_updated.connect(self._on_client_identity_updated)
         self.server.client_disconnected.connect(self._on_client_disconnected)
 
         self._refresh()
@@ -150,6 +152,7 @@ class PermManageDialog(QDialog):
 
         for cid, info in entries:
             if cid in self._rows:
+                self._update_row_label(cid, info)  # end_id 可能晚于建行到达
                 continue
             self._add_row(cid, info)
 
@@ -163,19 +166,18 @@ class PermManageDialog(QDialog):
         self._empty_label.setVisible(empty_visible)
 
     def _add_row(self, client_id: str, info: dict):
-        """添加一个连接端行：IP + 权限胶囊"""
+        """添加一个连接端行：端昵称（未登记 end_id 时回退 IP）+ 权限胶囊"""
         row = QWidget()
         row_layout = QHBoxLayout(row)
         row_layout.setContentsMargins(4, 2, 4, 2)
         row_layout.setSpacing(8)
 
-        ip = info.get('ip') or client_id.split(':')[0]
-        ip_label = QLabel(ip)
+        nick_label = QLabel()
         dark = self._is_dark()
-        ip_label.setStyleSheet(
+        nick_label.setStyleSheet(
             f"font-size: 12px; color: {'#a0a0a0' if dark else '#495057'};"
         )
-        row_layout.addWidget(ip_label)
+        row_layout.addWidget(nick_label)
 
         row_layout.addStretch()
 
@@ -187,8 +189,26 @@ class PermManageDialog(QDialog):
         )
         row_layout.addWidget(seg)
 
-        self._rows[client_id] = {'widget': row, 'label': ip_label, 'seg': seg}
+        self._rows[client_id] = {'widget': row, 'label': nick_label, 'seg': seg}
         self._list_layout.insertWidget(self._list_layout.count() - 1, row)
+        self._update_row_label(client_id, info)
+
+    def _update_row_label(self, client_id: str, info: dict):
+        """行标题按 end_id 派生端昵称（与聊天面板/主机浮层同一套逻辑）；
+        尚未收到 END_INFO 时回退 IP，IP 始终放在悬浮提示里便于区分。"""
+        row = self._rows.get(client_id)
+        if row is None:
+            return
+        nick = nickname(info.get('end_id') or '')
+        ip = info.get('ip') or client_id.split(':')[0]
+        row['label'].setText(nick or ip)
+        row['label'].setToolTip(f"{nick}（{ip}）" if nick else ip)
+
+    def _on_client_identity_updated(self, client_id: str):
+        with self.server._lock:
+            info = dict(self.server.clients.get(client_id) or {})
+        if info:
+            self._update_row_label(client_id, info)
 
     def _remove_row(self, client_id: str):
         """移除一个连接端行"""

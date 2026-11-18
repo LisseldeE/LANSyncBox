@@ -2769,12 +2769,12 @@ class SyncWindow(QMainWindow):
             # 主机在线状态/地址；host 亲和由 mesh 既有回探机制负责。只要房间里任意
             # 一端存活应答，新端即可据此加入，消除"仅主机应答"的单点依赖。
             if self.responder is None:
-                # 连接端应答时上报"本房间真主机"的 end_id（client._host_id），而非本端
-                # 自身 id——否则宿主设备在创建里查"宿主即本机"永远不匹配，无法变"回归为主机"。
-                # END_INFO 在 join 之后才到达，故用 provider 每次应答现行取；主机离线静默
-                # 待机期间 _host_id 仍保留，回归判断不受影响。
+                # 连接端应答时上报"本房间真主机"的 end_id（client.room_host_id()：当前
+                # 已认证主机优先，主机离线时用受信引导端下发的线索），而非本端自身 id
+                # ——否则宿主设备在创建里查"宿主即本机"永远不匹配，无法变"回归为主机"。
+                # END_INFO 在 join 之后才到达，故用 provider 每次应答现行取。
                 self.responder = RoomResponder(
-                    self, host_id_provider=lambda: getattr(self.client, '_host_id', '') or '',
+                    self, host_id_provider=self.client.room_host_id,
                     endpoint_provider=self._local_endpoint,
                     peers_provider=self._mesh_peer_list,
                     has_password_provider=lambda: bool(getattr(self.client, 'password', '')))

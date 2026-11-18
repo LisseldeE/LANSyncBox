@@ -107,8 +107,9 @@ class MeshManager(QObject):
     def set_host(self, ep: Optional[Endpoint]):
         """登记/刷新房间主机端点线索（置顶辐射用），同时记下主机权威身份。
 
-        仅由管理面认证路径（自身、主机 END_INFO、HOST_INFO 重定向）调用；wire 上
-        他人清单里的 is_host 声明须先与本端已知 host_id 一致才允许刷新（见 merge_peers）。
+        仅由管理面认证路径（自身、主机 END_INFO、HOST_INFO 重定向）以及受信引导端
+        经 MESH_PEER_LIST 下发的 is_host 条目调用；wire 上他人清单里的 is_host 声明
+        须先与本端已知 host_id 一致才允许刷新（见 merge_peers）。
         """
         if not ep or not ep.end_id:
             return

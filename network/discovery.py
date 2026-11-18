@@ -388,9 +388,11 @@ class RoomDiscovery(QObject):
         """返回最近一次发现中指定房间所在主机的持久 end_id（用于"创建被占且宿主即本机"判断）
 
         同一房间会有多个应答端点（主机 mgmt + 各已连接成员）。真宿主 end_id 由宿主
-        连同所有已连接成员一致上报（连接端经 host_id_provider 注入 client._host_id）；
-        个别成员自报自身 id / 空值只是离群单条。故取「出现频率最高的非空 host_id」，
-        避免第一个应答来自离群成员时误判宿主非本机（多方连带导致"回归"按钮置灰）。
+        连同所有已连接成员一致上报（连接端经 host_id_provider 注入
+        client.room_host_id()——当前已认证主机优先，主机离线时用受信引导端下发的
+        线索）；个别成员自报自身 id / 空值只是离群单条。故取「出现频率最高的非空
+        host_id」，避免第一个应答来自离群成员时误判宿主非本机（多方连带导致"回归"
+        按钮置灰）。
         """
         counts: dict = {}
         with self._lock:
@@ -528,7 +530,8 @@ class RoomResponder(QObject):
         self.port = Config.DEFAULT_PORT
         self.discovery_port = None  # 实际使用的发现端口
         # 本房间主机的持久 end_id：主机端即本机 → 取本端标识；连接端则由使用方传入
-        # 真主机 end_id（client._host_id），让"创建被占且宿主即本机"的判断在连接端
+        # 真主机 end_id（client.room_host_id()：当前已认证主机优先，主机离线时用受信
+        # 引导端下发的线索），让"创建被占且宿主即本机"的判断在连接端
         # 回退/主机离线静默待机期间仍能识别出自己曾是宿主，从而在创建里变"回归为主机"。
         self.host_id = host_id or UserConfig.get_end_id()
         # host_id_provider：连接端传入可调用对象，每次应答时现行取真主机 end_id
@@ -714,9 +717,7 @@ class TcpRoomProbe(QObject):
                 while receiver.has_complete_message():
                     message = receiver.get_message()
                     if message and message[0] == MessageType.ROOM_PROBE_RESP:
-                        state = (message[5] or b'').decode('utf-8', 'ignore')
-                        # filename 承载宿主 end_id（旧端为空）
-                        host_id = (message[1] or b'').decode('utf-8', 'ignore')
+                        state, host_id = self._parse_probe_resp(message)
                         break
                 if state is not None:
                     break
@@ -739,6 +740,19 @@ class TcpRoomProbe(QObject):
             self.probed.emit(room_code, ip, online, host_id if online else '')
         except RuntimeError:
             pass
+
+    @staticmethod
+    def _parse_probe_resp(message: tuple) -> tuple:
+        """解析探活响应帧 → (state, host_id)。
+
+        content 为 bytes，filename（承载宿主 end_id）由 MessageReceiver 解码为 str。
+        不可对 str 再调 decode：旧实现对非空宿主 id 抛 AttributeError，被外层当成
+        探测失败，把"有主机 id 的应答"整体判为离线（TCP 定向探活形同失效）。"""
+        state = (message[5] or b'').decode('utf-8', 'ignore')
+        raw_id = message[1] or ''
+        host_id = (raw_id.decode('utf-8', 'ignore')
+                   if isinstance(raw_id, bytes) else str(raw_id))
+        return state, host_id
 
 
 def query_peers(ip: str, room_code: str, port: int = None,

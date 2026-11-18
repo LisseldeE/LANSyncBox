@@ -34,7 +34,8 @@ class SyncClient(QObject):
     connected = Signal()              # 连接成功
     disconnected = Signal()           # 断开连接
     error_occurred = Signal(str)      # 错误
-    auth_failed = Signal(str)         # 验证失败
+    auth_failed = Signal(str)         # 验证失败（永久拒绝：密码/房间号/逻辑版本）
+    host_unavailable = Signal(str)    # 主机暂不可用（复用监听瞬时拒绝，非密码错误）
     file_received = Signal(str)       # 收到文件
     file_receive_start = Signal(str, 'qlonglong')  # 开始接收文件 (filename, file_size 字节，>2GB 需 64 位)
     file_receive_progress = Signal(str, int, int)  # 文件接收进度 (filename, current, total)
@@ -97,6 +98,9 @@ class SyncClient(QObject):
         # 离线期间加载持久化档位保持只读——不再因无主机下发而放松成读写。
         self.perm = UserConfig.get_room_perm(self.room_code)
         self.perm_received = False  # 是否已收到主机权限下发（复用连接时用于补偿 UI 状态）
+        # 本房间主机权限策略快照（默认 + 按 end_id 覆盖，仅内存）：随 PERM_POLICY 更新。
+        # 主机离线时本端作为引导端，据此为经本端加入的新端适配档位（覆盖 > 默认 > 只读）。
+        self._perm_policy = {'default': '', 'overrides': {}}
 
         # 心跳探测线程控制：周期性 PING 主机并核对 PONG 回包，判定本端在线/离线
         self._ping_stop = threading.Event()
@@ -137,6 +141,12 @@ class SyncClient(QObject):
         # 以此按"身份"而非"IP"回填首位占位，主机多网卡/IP 变化时仍稳定排在候选首位，
         # 使重连始终"先够主机"，避免主机被挤到列表末尾而错挂到对端上。
         self._host_id = ""
+        # 房间真主机线索（受信引导端经 MESH_PEER_LIST 的 is_host 条目下发）：主机
+        # 离线期间经引导加入的端据此知道"房间主机是谁"，发现应答继续上报主机 end_id，
+        # 主机回归后也可自发换接。与 _host_id 严格区分——后者仅表示"当前已认证挂接
+        # 的主机"，若把线索写进 _host_id，重连会立刻离开引导端，且复用监听会把
+        # 离线主机误判为在线、把更新的端重定向到死地址。
+        self._known_host: Optional[dict] = None
         # 控制面"只连主机"待机状态：主机离线时静默待机（静默=不刷端点连接失败日志，
         # 只提示一次"主机离线，静默待机"）；不再连对端 mgmt，"不互相取暖"。
         self._host_offline_logged = False   # 是否已就"主机离线，静默待机"提示过（主机回归后复位）
@@ -403,7 +413,7 @@ class SyncClient(QObject):
                             and time.time() - self._last_attach_at >= 2.0):
                         self._flap_count = 0
                     idx = self._current_ep_index()
-                    if idx == 0 or idx == -1:
+                    if idx == 0 or idx == -1 or self._attached_looks_like_host():
                         # 已挂主机（含 end_id='' 的占位主机） / 无法识别挂接端点：
                         # 仅等待不探活
                         self._silent_standby = False
@@ -443,6 +453,14 @@ class SyncClient(QObject):
                     self._silent_standby = False
                     self._backoff = self.RECONNECT_BASE
                     continue
+                # 引导端连不上：用受信线索指向的真主机补试一次（主机回归后自发换接，
+                # 不必等引导端回来介绍）。仍只连主机，不连普通对端。
+                alt = self._fallback_host_candidate(host)
+                if alt and self._try_attach(alt):
+                    self._host_offline_logged = False
+                    self._silent_standby = False
+                    self._backoff = self.RECONNECT_BASE
+                    continue
                 # 主机连不上：静默待机，周期重探（不连对端）
                 self._enter_host_standby()
             except Exception:
@@ -462,6 +480,77 @@ class SyncClient(QObject):
             return None  # 主机不在列表：静默待机
         return self._best_endpoint(0)
 
+    def room_host_id(self) -> str:
+        """本房间真主机的 end_id（房间发现应答上报用）。
+
+        优先"当前已认证挂接的主机身份"；主机离线（控制面静默待机）时回落到受信
+        引导端下发的线索，使"房间主机是谁"在主机关机期间仍能沿房间向后传递。"""
+        if self._host_id:
+            return self._host_id
+        known = self._known_host or {}
+        return known.get('end_id', '') or ''
+
+    def _adopt_known_host(self, info: dict):
+        """采纳受信引导端下发的房间主机线索（MESH_PEER_LIST 的 is_host 条目）。
+
+        主机离线期间经引导加入的端靠这条线索知道"房间主机是谁"：发现应答继续上报
+        主机 end_id，引导端失联后也能自发换接主机。只写入 _known_host，绝不写
+        _host_id——后者表示"当前已认证挂接的主机"，提前落位会让重连立刻离开引导端，
+        且复用监听会把离线主机误判为在线，把新端重定向到死地址。"""
+        if not isinstance(info, dict):
+            return
+        end_id = info.get('end_id', '') or ''
+        ip = info.get('ip', '') or ''
+        try:
+            mgmt_port = int(info.get('mgmt_port', 0) or 0)
+        except (TypeError, ValueError):
+            mgmt_port = 0
+        if not end_id or end_id == UserConfig.get_end_id():
+            return
+        if not ip or mgmt_port <= 0:
+            return
+        # 已认证挂接的主机身份唯一：线索指向别处一律忽略（防冒充/串房间）
+        if self._host_id and end_id != self._host_id:
+            return
+        entry = {
+            'end_id': end_id,
+            'name': info.get('name', '') or '主机',
+            'ip': ip,
+            'mesh_port': int(info.get('mesh_port', 0) or 0),
+            'mgmt_port': mgmt_port,
+        }
+        self._known_host = entry
+        # 已认证挂上真主机时不覆盖置顶线索：END_INFO/HOST_INFO 给的是实连地址，比
+        # 他人转述的线索新。仅在没有主机身份时才靠线索把它继续向后传递。
+        if self.mesh and not self._host_id:
+            try:
+                self.mesh.set_host(Endpoint.from_dict(entry))
+            except Exception:
+                pass
+
+    def _fallback_host_candidate(self, primary: Optional[dict]) -> Optional[dict]:
+        """主机候选的后备：引导端试连失败且本端尚未挂上真主机时，用受信线索补试。
+
+        只负责"主机回来就去挂"：控制面仍然只连主机，不连普通对端。"""
+        if self._host_id or self.authenticated:
+            return None
+        known = self._known_host
+        if not known or not known.get('end_id') or not known.get('ip'):
+            return None
+        if int(known.get('mgmt_port', 0) or 0) <= 0:
+            return None
+        if primary:
+            # 刚失败的就是这条线索（同一身份或同一地址）→ 不重复拨号
+            try:
+                same_addr = (primary.get('ip') == known.get('ip')
+                             and int(primary.get('mgmt_port', 0) or 0)
+                             == int(known.get('mgmt_port', 0) or 0))
+            except (TypeError, ValueError):
+                same_addr = False
+            if primary.get('end_id') == known.get('end_id') or same_addr:
+                return None
+        return dict(known)
+
     def _live_host_candidate(self) -> Optional[dict]:
         """对外提供的主机换接线索（复用管理监听/探活用）：仅在本端当前确实保持着
         到真主机的已认证管理连接时返回，否则 None。
@@ -469,8 +558,8 @@ class SyncClient(QObject):
         主机离线后 _host_candidate 仍会返回"历史上已知的主机地址"（供本端自己
         周期回探）。若照此转发给新接入端，等于把新端引向一个已死地址：新端每次
         接入都要走一遍 重定向→断连→重连，表现为管理面无限切换、端点状态闪烁
-        （主机离线时第三端加入即触发）。主机不在线 → 返回 None，让复用监听回
-        瞬时码，新端据此提示"主机暂不可用"，不再空转。"""
+        （主机离线时第三端加入即触发）。主机不在线 → 返回 None，让复用监听改走
+        "引导端接纳"（校验口令 + 引入 mesh），加入不再依赖主机在线。"""
         if not (self.socket and self.authenticated):
             return None
         return self._host_candidate()
@@ -666,6 +755,7 @@ class SyncClient(QObject):
             }]
         self._attached_ep = None
         self._host_id = ""  # 重置后主机身份未知，待首条 END_INFO 重新识别
+        self._known_host = None  # 换房间/重连：旧房间的主机线索不再适用
         self._host_offline_logged = False  # 手动重连复位：下次离线仍提示一次
         self._silent_standby = False
 
@@ -767,6 +857,20 @@ class SyncClient(QObject):
                     if ep.get('ip') == attached.get('ip'):
                         return i
         return -1
+
+    def _attached_looks_like_host(self) -> bool:
+        """当前挂接端点能否判定为主机（兼容"线索已指向、END_INFO 未到"的窗口）。
+
+        按受信线索补挂主机的首轮，真主机的 END_INFO 可能还在接收队列，列表里该端
+        尚未归一到 0 号位；若只看下标，重连循环会把刚建立的主机连接当成"挂在非
+        主机对端"丢开并误报离线。"""
+        attached_id = (self._attached_ep or {}).get('end_id') or ''
+        if not attached_id:
+            return False
+        # 已知真主机身份时以它为准（线索可能是主机更换前的旧身份）
+        if self._host_id:
+            return attached_id == self._host_id
+        return attached_id == ((self._known_host or {}).get('end_id', '') or '')
 
     def send_clipboard(self, mime_type: str, data: bytes):
         """连接端本端复制时，上报剪切板内容给主机（由主机分发给其余端）
@@ -1074,6 +1178,11 @@ class SyncClient(QObject):
             perm = content.decode('utf-8', errors='ignore').strip()
             self._handle_perm_update(perm)
 
+        elif msg_type == MessageType.PERM_POLICY:
+            # 主机权限策略快照：持久化，主机离线时本端作为引导端据此适配新端
+            if isinstance(content, dict):
+                self._handle_perm_policy(content)
+
         elif msg_type == MessageType.END_INFO:
             # 去中心化：主机端身份信息（含 mesh_port/mgmt_port），记录主机端点供
             # 引导/建连，并登记进可用端点列表（故障切换候选）
@@ -1099,6 +1208,13 @@ class SyncClient(QObject):
                         'mesh_port': int(content.get('mesh_port', 0) or 0),
                         'mgmt_port': int(content.get('mgmt_port', 0) or 0),
                     })
+                    # 本端若同时担任他人的引导端（复用监听），此刻已知真主机：通告换接，
+                    # 否则经本端加入的端会一直停在本端、无法随主机回归换接
+                    if self._mgmt_server is not None:
+                        try:
+                            self._mgmt_server.announce_host()
+                        except Exception:
+                            pass
 
         elif msg_type == MessageType.MESH_PEER_LIST:
             # 去中心化：主机引导 → 批量登记对端（含管理端口）并建立网状直连
@@ -1108,6 +1224,10 @@ class SyncClient(QObject):
                 for p in peers:
                     if isinstance(p, dict):
                         self._upsert_endpoint(p)
+                        # 受信引导端下发的房间主机线索：记下但不当作"当前挂接主机"，
+                        # 供发现应答上报与主机回归后的自发换接
+                        if p.get('is_host'):
+                            self._adopt_known_host(p)
 
         elif msg_type == MessageType.MESH_PEER_JOIN:
             # 去中心化：新端加入通告 → 反向与新端建直连，并登记进可用端点列表
@@ -1237,6 +1357,11 @@ class SyncClient(QObject):
             # 用"在线"版本：主机离线期间不把历史地址转发出去，否则新端被引向死地址，
             # 反复换接/断连形成管理面无限切换。
             server._host_provider = self._live_host_candidate
+            # 主机离线时探测应答仍要回带"本房间主机是谁"：用已知主机身份（含受信
+            # 引导端下发的线索），供发现/定向探测端判定"宿主即本机，可回归为主机"
+            server._known_host_id_provider = self.room_host_id
+            # 主机离线时为本端引导接入的新端适配档位：提供本端持有的策略快照
+            server._perm_policy_provider = self._perm_policy_snapshot
             if not server.start(port=Config.DEFAULT_PORT, reuse=True):
                 self.log_message.emit("本端管理监听启动失败")
                 return
@@ -1451,6 +1576,54 @@ class SyncClient(QObject):
     def _perm_cn(perm: str) -> str:
         """权限中文名（日志显示用，避免残留英文）"""
         return "只读" if perm == "ro" else "读写"
+
+    def _perm_policy_snapshot(self) -> dict:
+        """本端持有的主机权限策略快照（供复用管理监听按 end_id 适配新端）。"""
+        policy = getattr(self, '_perm_policy', None) or {}
+        return {
+            'default': policy.get('default') if policy.get('default') in ("rw", "ro") else '',
+            'overrides': dict(policy.get('overrides') or {}),
+        }
+
+    def _push_perm_policy_to_host(self):
+        """认证成功后把本端持有的权限表快照回传主机。
+
+        主机进程重启会丢失内存覆盖表（不落盘），而房间内其他端仍持有快照；
+        由成员主动回传，主机据此恢复手动档位（只采纳覆盖项）。
+        """
+        policy = self._perm_policy_snapshot()
+        if not policy.get('default') and not policy.get('overrides'):
+            return
+        if not self.socket:
+            return
+        try:
+            self._send_guard.send(self.socket, Protocol.create_perm_policy(policy))
+        except Exception:
+            pass
+
+    def _handle_perm_policy(self, policy: dict):
+        """处理主机权限策略快照（默认 + 按 end_id 覆盖）。
+
+        只更新内存快照，不改变本端档位（本端档位仍以主机单独的 PERM_UPDATE 为准），
+        也不写 config.json：权限表随房间会话存在，房间内无节点后自然失效。
+        快照用于主机离线时本端作为引导端为新端适配档位。
+        """
+        default = policy.get('default')
+        default = default if default in ("rw", "ro") else ''
+        overrides = {}
+        for end_id, perm in (policy.get('overrides') or {}).items():
+            if end_id and perm in ("rw", "ro"):
+                overrides[str(end_id)] = perm
+        # 空白快照（引导端/刚重启的主机尚无表）不得冲掉本端已持有的表，
+        # 否则主机重启后各端会把自己的快照清空，权限表再也恢复不了
+        if not default and not overrides and (self._perm_policy.get('default')
+                                              or self._perm_policy.get('overrides')):
+            return
+        snapshot = {'default': default, 'overrides': overrides}
+        self._perm_policy = snapshot
+        default_cn = ("读写" if default == "rw" else "只读") if default else "未记录"
+        self.log_message.emit(
+            f"收到主机权限策略: 默认{default_cn}，按端覆盖 {len(overrides)} 项")
     
     def _handle_auth_response(self, content: bytes):
         """处理验证响应"""
@@ -1469,7 +1642,8 @@ class SyncClient(QObject):
                 if self._reconnect_active:
                     return
                 self.log_message.emit(f"主机暂不可用: {message}")
-                self.auth_failed.emit(message)
+                # 瞬时拒绝不是密码错误：走独立信号，避免加入界面误弹密码框
+                self.host_unavailable.emit(message)
                 self.disconnect()
                 return
             
@@ -1518,7 +1692,9 @@ class SyncClient(QObject):
                 with self._ping_lock:
                     self._last_pong = time.time()
                 self._start_ping_thread()
-                # 认证成功后请求当前模式，由主机端决定本端模式
+                # 认证成功后先回传本端权限表快照（供主机重启后恢复手动档位），
+                # 再请求当前模式
+                self._push_perm_policy_to_host()
                 self._send_mode_request()
             else:
                 self.log_message.emit(f"验证失败: {message}")

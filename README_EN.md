@@ -9,10 +9,10 @@
 </div>
 
 > [!NOTE]
-> Project update: the LANSyncBox Standard and Pro editions have begun merging. The project is now named LANSyncBox. The merge will be officially complete with the R1.2.2.0 release, after which the Standard edition will be delisted and retired.
+> Project update: the LANSyncBox Standard and Pro editions have officially merged.
 
 <p align="center">
-  <a href="https://github.com/LisseldeE/LANSyncBox/releases/tag/main-R1.2.2.1"><img src="https://img.shields.io/badge/releases-R1.2.2.1-3b82f6" alt="releases R1.2.2.1"></a>
+  <a href="https://github.com/LisseldeE/LANSyncBox/releases/tag/main-R1.2.3.0"><img src="https://img.shields.io/badge/releases-R1.2.3.0-3b82f6" alt="releases R1.2.3.0"></a>
   <a href="LICENSE"><img src="https://img.shields.io/github/license/LisseldeE/LANSyncBox" alt="License"></a>
   <img src="https://img.shields.io/badge/platform-Windows-blue?logo=windows" alt="Platform">
   <img src="https://img.shields.io/badge/platform-Linux-orange?logo=linux" alt="Platform">
@@ -124,7 +124,7 @@ Peer-to-peer, one-to-one private messaging inside a room — **text** and **file
 </p>
 
 <p align="center">
-  <a href="https://github.com/LisseldeE/LANSyncBox/blob/main/downloadwizard/en.md#lansyncbox">
+  <a href="https://github.com/LisseldeE/LANSyncBox/releases">
     <img src="https://img.shields.io/badge/GitHub%20Releases-Download-181717?style=for-the-badge&logo=github&logoColor=white" alt="GitHub Releases"/>
   </a>
 </p>

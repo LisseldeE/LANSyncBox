@@ -9,10 +9,10 @@
 </div>
 
 > [!NOTE]
-> 项目调整：LANSyncBox 标准版与 Pro 版本现已开始合并。此后项目名为 LANSyncBox。发布版本 R1.2.2.0 后合并将正式完成，原标准版将下架并弃用。
+> 项目调整：LANSyncBox 标准版与 Pro 版本已正式合并。
 
 <p align="center">
-  <a href="https://github.com/LisseldeE/LANSyncBox/releases/tag/main-R1.2.2.1"><img src="https://img.shields.io/badge/releases-R1.2.2.1-3b82f6" alt="releases R1.2.2.1"></a>
+  <a href="https://github.com/LisseldeE/LANSyncBox/releases/tag/main-R1.2.3.0"><img src="https://img.shields.io/badge/releases-R1.2.3.0-3b82f6" alt="releases R1.2.3.0"></a>
   <a href="LICENSE"><img src="https://img.shields.io/github/license/LisseldeE/LANSyncBox" alt="开源协议"></a>
   <img src="https://img.shields.io/badge/platform-Windows-blue?logo=windows" alt="支持平台">
   <img src="https://img.shields.io/badge/platform-Linux-orange?logo=linux" alt="支持平台">
@@ -125,7 +125,7 @@ LANSyncBox 是一款跨平台、专注局域网多人协作的文件实时同步
 </p>
 
 <p align="center">
-  <a href="https://github.com/LisseldeE/LANSyncBox/blob/main/downloadwizard/zh_cn.md#lansyncbox">
+  <a href="https://github.com/LisseldeE/LANSyncBox/releases">
     <img src="https://img.shields.io/badge/GitHub%20Releases-Download-181717?style=for-the-badge&logo=github&logoColor=white" alt="GitHub Releases"/>
   </a>
 </p>

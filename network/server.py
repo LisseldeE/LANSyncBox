@@ -29,6 +29,7 @@ class SyncServer(QObject):
     
     # 信号
     client_connected = Signal(str)       # 客户端连接
+    client_identity_updated = Signal(str)  # 连接端身份登记完成（收到 END_INFO），UI 据此按 end_id 显示端昵称
     client_disconnected = Signal(str)    # 客户端断开
     error_occurred = Signal(str)         # 错误
     file_received = Signal(str)          # 收到文件
@@ -105,12 +106,17 @@ class SyncServer(QObject):
         # 权限状态：主机端管理各连接端权限（默认读写，向后兼容）
         # 权限存储于 self.clients[client_id]['perm'] = "rw"（读写）/ "ro"（只读）
         self.perm_ack_pending = {}      # {client_id: {'perm': new_perm, 'old_perm': old_perm, 'tries': 重发次数}}
+        self._perm_fix_pending = {}     # {client_id: perm}：恢复权限表时该端正有切换在途，待 ACK 后补发目标档位
         self._perm_ack_stop = threading.Event()
         self._perm_ack_thread = None
         self.PERM_ACK_MAX_TRIES = 3     # 权限 ACK 补发上限，超过后回滚旧档位并通知 UI
         # 新加入连接端的默认权限（持久化于 config.json）：新端认证成功时自动按此应用，
         # 免去逐个手动修改
         self.default_perm = UserConfig.get_default_perm()
+        # 主机手动改过的每端档位（按 end_id，仅内存）：覆盖优先于默认。
+        # 权限表随房间会话存在——只要房间内还有节点（主机或引导端）就持有，
+        # 全部消失即无意义，因此不写 config.json；主机重启后按默认权限重新下发。
+        self._perm_overrides = {}
 
         # 网状连接管理器（去中心化数据平面）：主机也是网状小节点，仅做引导 + 管理平面
         self.mesh: Optional[MeshManager] = None
@@ -128,6 +134,10 @@ class SyncServer(QObject):
         # 真主机服务（_reuse=False）不使用。用于 H1"控制面只连主机"：接入新端时令其
         # 换接真主机，而非把本连接端误当管理宿主。
         self._host_provider = None
+        # reuse 模式下主机离线时仍可回带"本房间主机 end_id"的提供者（含受信引导端
+        # 下发的线索）：探测端据此判定"宿主即本机"，主机回归后仍能识别回归身份。
+        # 仅回带身份，不回带地址——不能把新端引向离线主机的死地址。
+        self._known_host_id_provider = None
     
     def start(self, port: int = None, exclude_port: int = None,
               reuse: bool = False) -> bool:
@@ -739,6 +749,52 @@ class SyncServer(QObject):
             perm = content.decode('utf-8', errors='ignore').strip()
             self._handle_perm_ack(client_id, perm)
 
+        elif msg_type == MessageType.PERM_POLICY:
+            # 连接端回传其持有的权限表快照：主机进程重启后据此恢复手动档位
+            if isinstance(content, dict):
+                self._handle_member_perm_policy(client_id, content)
+
+    def _handle_member_perm_policy(self, client_id: str, policy: dict):
+        """主机从已认证成员恢复权限表（仅内存，不落盘）。
+
+        主机进程重启后覆盖表为空，而房间内仍有成员各自持有散发的快照；成员认证
+        成功后会主动回传。仅当本端覆盖表为空时采纳（本会话已有的决定优先），且只
+        采纳按端覆盖项，默认档位仍以主机自身的"新端默认权限"为准。
+        """
+        if self._reuse:
+            return  # 复用监听（引导端）只是转发策略，不持有主机权限表
+        info = self.clients.get(client_id)
+        if not info or not info.get('authenticated'):
+            return
+        overrides = {}
+        for end_id, perm in (policy.get('overrides') or {}).items():
+            if end_id and perm in ("rw", "ro"):
+                overrides[str(end_id)] = perm
+        if not overrides:
+            return
+        # 主机回归时多个端会几乎同时回传：用 _lock 串行化"检查为空 → 采纳"，
+        # 只让第一个非空快照生效，其余直接忽略（正常情况各端表一致）
+        with self._lock:
+            if self._perm_overrides:
+                return
+            self._perm_overrides = overrides
+        self.log_message.emit(f"已从端恢复权限表: 按端覆盖 {len(overrides)} 项")
+        # 恢复后立刻校正当前已认证端的档位（reconnect 时已按默认档位接入的端）。
+        # 若该端此刻正有权限切换在途（如刚按默认只读接入、ACK 未回），set_perm
+        # 会因"切换进行中"直接拒绝，导致表里是读写而端仍是只读；此时登记待补发，
+        # 等本次 ACK 完成后再按表校正。
+        for cid, cinfo in list(self.clients.items()):
+            want = overrides.get(cinfo.get('end_id'))
+            if not (want and cinfo.get('authenticated') and cinfo.get('perm') != want):
+                continue
+            with self._lock:
+                busy = cid in self.perm_ack_pending
+                if busy:
+                    self._perm_fix_pending[cid] = want
+            if not busy:
+                self.set_perm(cid, want, persist=False)
+        self._broadcast_perm_policy()
+
     def _handle_files_notify(self, client_id: str, content: bytes):
         """处理主机收到的文件会话通知（复制端→主机）
 
@@ -814,7 +870,7 @@ class SyncServer(QObject):
             sync_version = data[0] if len(data) > 0 else ''
             room_code = data[1] if len(data) > 1 else ''
 
-            host_id = ''  # 宿主 end_id（仅 ONLINE 时回带，见各分支）
+            host_id = ''  # 宿主 end_id（ONLINE，或离线但本端已知主机身份时回带，见各分支）
             if sync_version != Config.SYNC_LOGIC_VERSION:
                 state = RoomProbeState.VERSION_MISMATCH
             elif room_code != self.room_code:
@@ -828,8 +884,15 @@ class SyncServer(QObject):
                     and (host.get('end_id') or '')
                 )
                 state = RoomProbeState.ONLINE if online else RoomProbeState.HOST_UNAVAILABLE
-                # 宿主 end_id 随响应回带：探测端据此判定"宿主即本机"（防主机自连）
+                # 宿主 end_id 随响应回带：探测端据此判定"宿主即本机"（防主机自连）。
+                # 主机离线但本端已知主机身份（受信引导端下发的线索）→ 仍回带身份，
+                # 否则回归的主机在只剩这类端时会认不出"宿主即本机"，无法回归。
                 host_id = (host.get('end_id') or '') if online else ''
+                if not host_id and self._known_host_id_provider:
+                    try:
+                        host_id = self._known_host_id_provider() or ''
+                    except Exception:
+                        host_id = ''
             else:
                 state = RoomProbeState.ONLINE
                 host_id = UserConfig.get_end_id()
@@ -899,37 +962,23 @@ class SyncServer(QObject):
                 self._remove_client(client_id)
                 return
 
-            # 密码验证
-            if password_hash != expected_hash:
-                fail_msg = "密码错误"
-                response = Protocol.create_auth_response(False, fail_msg)
-                self._socket_send(self.clients[client_id], response)
-                self.log_message.emit(f"客户端 {client_id} 验证失败: {fail_msg}")
-                self._remove_client(client_id)
-                return
-
-            # 密码/房间/版本均已通过：此时才固定对端设备指纹（首次 TOFU，之后必须一致）
-            peer = self.clients[client_id].get('peer_identity')
-            if peer:
-                try:
-                    identity.commit_pin(peer.end_id, peer.fingerprint)
-                except identity.IdentityConflict as e:
-                    self.log_message.emit(f"设备身份冲突，拒绝连接: {e}")
-                    self._remove_client(client_id)
-                    return
-
             # ---- 连接端"复用管理监听"（_reuse=True，非真主机）——H1：控制面只连主机 ----
             # 接入端拨到的是本连接端的管理监听，并非真主机。不能让接入端把本端误当
             # 管理宿主（互相取暖）。故：
             #   主机在线（本端此刻确实挂接真主机）→ 只下发 HOST_INFO 并断开，
             #       令接入端换接真主机；
-            #   主机离线/待机 → 回瞬时拒绝码，接入端据此提示"主机暂不可用"。
-            # 注意：此处绝不能先回 AUTH_OK。AUTH_OK 会让接入端把本中间端当成管理宿主
+            #   主机离线/待机 → 本端作引导端接纳接入端（校验口令 + 引入 mesh，
+            #       只读），不让"主机不在线"阻断加入。
+            # 注意：换接路径绝不能先回 AUTH_OK。AUTH_OK 会让接入端把本中间端当成管理宿主
             # 并立刻进入重路径（建 mesh/管理监听、emit connected、起心跳），而这期间
             # 本端已经关闭连接，紧随其后的 HOST_INFO 极易被连带丢弃（换接帧丢失）：
             # 接入端既没认证成功、也没拿到真主机地址，于是又回来重连本中间端，
             # 形成"验证成功/端点切换"高频空转（主机离线时尤为明显）。只发一帧
             # HOST_INFO 可保证接入端在无重负载的情况下立即处理换接。
+            # 本分支必须先于密码校验：复用监听不是真主机，不承担密码校验职责（密码
+            # 交真主机在换接后校验）。否则主机离线时接入端会先收到"密码错误"：
+            # 无密码房（本端密码为空）被误报成需要密码；有密码房则要输对密码才看到
+            # "主机暂不可用"，两种情况都会误导用户。
             if self._reuse:
                 host = self._host_provider() if self._host_provider else None
                 # 仅当已知真主机身份(end_id 非空)才转发 HOST_INFO：主机 id 未知时
@@ -949,27 +998,90 @@ class SyncServer(QObject):
                         pass
                     self._remove_client(client_id)
                 else:
-                    # 主机暂不在属瞬时态：回瞬时码（`2`），避免客户端当成永久拒绝停重连
-                    self._socket_send(self.clients[client_id],
-                                      Protocol.create_auth_response(
-                                          False, "主机暂不可用，请稍后加入", transient=True))
-                    self.log_message.emit(f"客户端 {client_id} 接入但主机不可用，拒绝承担管理宿主")
-                    self._remove_client(client_id)
+                    # 主机不在线：本端作为"引导端"接纳新端（去中心化：加入房间无需主机在线）。
+                    # 复用监听不是管理宿主，只校验房间口令并把新端引入 mesh；不下发 END_INFO，
+                    # 新端的管理身份保持未知（占位主机），主机回归后由 announce_host 推
+                    # HOST_INFO 令其换接真主机。
+                    if password_hash != expected_hash:
+                        fail_msg = "密码错误"
+                        self._socket_send(self.clients[client_id],
+                                          Protocol.create_auth_response(False, fail_msg))
+                        self.log_message.emit(f"客户端 {client_id} 验证失败: {fail_msg}")
+                        self._remove_client(client_id)
+                        return
+                    peer = self.clients[client_id].get('peer_identity')
+                    if peer:
+                        try:
+                            identity.commit_pin(peer.end_id, peer.fingerprint)
+                        except identity.IdentityConflict as e:
+                            self.log_message.emit(f"设备身份冲突，拒绝连接: {e}")
+                            self._remove_client(client_id)
+                            return
+                    info = self.clients[client_id]
+                    info['authenticated'] = True
+                    # 按主机下发过的策略适配档位：该 end_id 有手动覆盖则用覆盖，
+                    # 否则用主机默认；策略未知时回退只读（引导端无权凭空放开）。
+                    end_id = (peer.end_id if peer else '') or ''
+                    perm = self._guide_perm_for_end(end_id)
+                    info['perm'] = perm
+                    info['last_pong'] = time.time()
+                    self._socket_send(info, Protocol.create_auth_response(
+                        True, "验证成功（主机离线，经对端引导接入）"))
+                    # 先于新增连接落地档位，避免新端窗口短暂与目标档位不一致
+                    self._socket_send(info, Protocol.create_perm_message(
+                        MessageType.PERM_UPDATE, perm))
+                    # 把主机策略继续传给新端：其日后作为引导端时仍能按覆盖/默认适配
+                    policy = self._guide_policy_snapshot()
+                    if policy and (policy.get('default') in ("rw", "ro")
+                                   or policy.get('overrides')):
+                        try:
+                            self._socket_send(info,
+                                              Protocol.create_perm_policy(policy))
+                        except Exception:
+                            pass
+                    self.client_connected.emit(client_id)
+                    self.log_message.emit(
+                        f"客户端 {client_id} 经本端引导加入（主机离线，{self._perm_cn(perm)}）")
                 return
+
+            # 密码验证（仅真主机执行）
+            if password_hash != expected_hash:
+                fail_msg = "密码错误"
+                response = Protocol.create_auth_response(False, fail_msg)
+                self._socket_send(self.clients[client_id], response)
+                self.log_message.emit(f"客户端 {client_id} 验证失败: {fail_msg}")
+                self._remove_client(client_id)
+                return
+
+            # 密码/房间/版本均已通过：此时才固定对端设备指纹（首次 TOFU，之后必须一致）
+            peer = self.clients[client_id].get('peer_identity')
+            if peer:
+                try:
+                    identity.commit_pin(peer.end_id, peer.fingerprint)
+                except identity.IdentityConflict as e:
+                    self.log_message.emit(f"设备身份冲突，拒绝连接: {e}")
+                    self._remove_client(client_id)
+                    return
 
             # 验证成功（真主机服务）
             self.clients[client_id]['authenticated'] = True
-            self.clients[client_id]['perm'] = "rw"  # 先按读写初始化；默认只读时随后经 set_perm 下发并应用
+            # 端身份（TLS 已认证）先说：初始档位按 end_id 查手动覆盖，其次新端默认权限
+            end_id = (peer.end_id if peer else '') or ''
+            self.clients[client_id]['end_id'] = end_id
+            initial_perm = self._host_perm_for_end(end_id)
+            self.clients[client_id]['perm'] = "rw"  # 先按读写初始化；目标为只读时随后经 set_perm 下发并应用
             self.clients[client_id]['last_pong'] = time.time()  # 心跳计时起点（防认证后立即误判离线）
             response = Protocol.create_auth_response(True, "验证成功")
             self._socket_send(self.clients[client_id], response)
             self.log_message.emit(f"客户端 {client_id} 验证成功（同步逻辑版本 {sync_version}）")
-            # 新加入连接端默认权限：若配置为只读，自动下发 PERM_UPDATE（set_perm 篇幅复用
-            # ACK 通道，客户端据此置只读并回执；服务端兜底侧同步即刻按 ro 生效）
-            if self.default_perm == "ro":
-                self.set_perm(client_id, "ro")
+            # 初始档位为只读时，自动下发 PERM_UPDATE（set_perm 复用 ACK 通道，客户端据此
+            # 置只读并回执；服务端兜底侧同步即刻按 ro 生效）。认证初始化不得写手动覆盖。
+            if initial_perm == "ro":
+                self.set_perm(client_id, "ro", persist=False)
             # 认证成功后通知 UI 更新连接数
             self.client_connected.emit(client_id)
+            # 下发权限策略快照：本端（连接端）日后在主机离线时作为引导端按此适配新端
+            self._send_perm_policy_to(self.clients[client_id])
 
             # 去中心化：认证握手后立即交换 END_INFO（本端身份 + 网状监听端口 + 管理端口）
             if self.mesh and self.mesh.mesh_port:
@@ -1009,30 +1121,38 @@ class SyncServer(QObject):
             info['mgmt_port'] = mgmt_port  # 全网状管理平面：对端据此故障切换连接本端管理端口
             info['mesh_registered'] = True
         self.log_message.emit(f"端身份登记: {name}({end_id}) @ {ip}:{mesh_port}")
+        # 通知 UI（权限面板）该端身份已就绪：认证成功早于 END_INFO，行先按 IP 建占位，
+        # 收到 end_id 后改为按 utils.nickname 派生的端昵称
+        self.client_identity_updated.emit(client_id)
 
         # 主机作为网状节点，与新端直连（双向拨号由 mesh 去重规则收敛）
         if self.mesh:
             self.mesh.add_peer(Endpoint(end_id=end_id, name=name, ip=ip, mesh_port=mesh_port))
 
-        # 该新端的引导清单：主机自身 + 其他已登记端（不含该端自己）
-        peers = []
-        if self.mesh and self.mesh.mesh_port:
-            host_ep = self.mesh.endpoint.to_dict()
-            host_ep['mgmt_port'] = self.port
-            host_ep['is_host'] = True  # 置顶主机条目：引导端据此寻回主机统领权限
-            peers.append(host_ep)
-        with self._lock:
-            for cid, cinfo in list(self.clients.items()):
-                if cid == client_id:
-                    continue
-                if cinfo.get('end_id') and cinfo.get('mesh_port'):
-                    peers.append({
-                        'end_id': cinfo['end_id'],
-                        'name': cinfo.get('name', ''),
-                        'ip': cinfo.get('ip', ''),
-                        'mesh_port': cinfo['mesh_port'],
-                        'mgmt_port': cinfo.get('mgmt_port', 0),
-                    })
+        # 该新端的引导清单（不含该端自己）
+        if self._reuse:
+            # 引导端不是管理宿主：复用本端 mesh 已知对端（含离线主机线索 + 活跃端），
+            # 不得把自己冒充成主机下发，否则新端会被钉死在本端、主机回归后无法换接
+            peers = self._local_peer_list() if self.mesh else []
+        else:
+            peers = []
+            if self.mesh and self.mesh.mesh_port:
+                host_ep = self.mesh.endpoint.to_dict()
+                host_ep['mgmt_port'] = self.port
+                host_ep['is_host'] = True  # 置顶主机条目：引导端据此寻回主机统领权限
+                peers.append(host_ep)
+            with self._lock:
+                for cid, cinfo in list(self.clients.items()):
+                    if cid == client_id:
+                        continue
+                    if cinfo.get('end_id') and cinfo.get('mesh_port'):
+                        peers.append({
+                            'end_id': cinfo['end_id'],
+                            'name': cinfo.get('name', ''),
+                            'ip': cinfo.get('ip', ''),
+                            'mesh_port': cinfo['mesh_port'],
+                            'mgmt_port': cinfo.get('mgmt_port', 0),
+                        })
         if not peers:
             return
         try:
@@ -1047,6 +1167,30 @@ class SyncServer(QObject):
             'mesh_port': mesh_port,
             'mgmt_port': mgmt_port,
         }), except_end_id=end_id)
+
+    def announce_host(self):
+        """主机回归通告：把真主机地址推给经本端引导接入的端，令其换接真主机。
+
+        仅在 reuse（引导端）模式生效。引导接入端的管理身份是"占位主机"（本端不下发
+        END_INFO），不知道真正房主；本端重新挂上主机后必须主动通告，否则它会一直停在本端。
+        """
+        if not self._reuse or not self._host_provider:
+            return
+        host = self._host_provider()
+        if not (host and host.get('ip')
+                and int(host.get('mgmt_port', 0) or 0) > 0
+                and (host.get('end_id') or '')):
+            return
+        with self._lock:
+            targets = [info for info in self.clients.values()
+                       if info.get('authenticated')]
+        for info in targets:
+            try:
+                self._socket_send(info, Protocol.create_host_info(
+                    host.get('end_id', ''), host.get('ip'),
+                    int(host['mgmt_port'])))
+            except Exception:
+                pass
 
     def _broadcast_to_mesh_peers(self, data: bytes, except_end_id: str = ''):
         """向所有已登记网状身份的已认证连接端广播一条管理消息（主机权威下发通道）。"""
@@ -2247,21 +2391,93 @@ class SyncServer(QObject):
         """设置【新加入连接端】的默认权限（读写/只读），并持久化到 config.json。
 
         仅对之后新接入的连接端生效，已连接端权限不受影响（由各自 set_perm 管理）。
+        变更后向已认证成员广播策略快照：主机离线时，引导端据此为新端适配档位。
         """
         if perm not in ("rw", "ro"):
             return False
         self.default_perm = perm
         UserConfig.set_default_perm(perm)
         self.log_message.emit(f"设置新加入端默认权限: {self._perm_cn(perm)}")
+        self._broadcast_perm_policy()
         return True
 
-    def set_perm(self, client_id: str, new_perm: str) -> bool:
+    def _perm_policy_dict(self) -> dict:
+        """本房间权限策略快照（默认 + 按 end_id 覆盖），供下发/广播。"""
+        with self._lock:
+            overrides = dict(getattr(self, '_perm_overrides', {}) or {})
+        return {'default': self.default_perm, 'overrides': overrides}
+
+    def _send_perm_policy_to(self, client_info: dict):
+        """向单个已认证连接端补发策略快照（认证成功后调用）。"""
+        try:
+            self._socket_send(client_info,
+                              Protocol.create_perm_policy(self._perm_policy_dict()))
+        except Exception:
+            pass
+
+    def _broadcast_perm_policy(self):
+        """向所有已认证成员广播策略快照（默认/覆盖变更后调用）。"""
+        try:
+            msg = Protocol.create_perm_policy(self._perm_policy_dict())
+        except Exception:
+            return
+        with self._lock:
+            targets = [info for info in self.clients.values()
+                       if info.get('authenticated')]
+        for info in targets:
+            try:
+                self._socket_send(info, msg)
+            except Exception:
+                pass
+
+    def _host_perm_for_end(self, end_id: str) -> str:
+        """主机为某 end_id 决定的初始档位：手动覆盖优先，其次新端默认权限。"""
+        overrides = getattr(self, '_perm_overrides', {}) or {}
+        perm = overrides.get(end_id) if end_id else None
+        if perm in ("rw", "ro"):
+            return perm
+        return self.default_perm if self.default_perm in ("rw", "ro") else "rw"
+
+    def _guide_policy_snapshot(self):
+        """引导端（复用管理监听）持有的主机策略快照；未知时返回 None。"""
+        provider = getattr(self, '_perm_policy_provider', None)
+        if not provider:
+            return None
+        try:
+            policy = provider()
+        except Exception:
+            return None
+        if not isinstance(policy, dict):
+            return None
+        overrides = {str(k): v for k, v in (policy.get('overrides') or {}).items()
+                     if k and v in ("rw", "ro")}
+        default = policy.get('default')
+        return {'default': default if default in ("rw", "ro") else '',
+                'overrides': overrides}
+
+    def _guide_perm_for_end(self, end_id: str) -> str:
+        """引导端为经本端加入的新端适配档位：覆盖 > 默认 > 未知回退只读。
+
+        策略未知（本端从未收到主机下发，如旧房间/引导端也刚入房）时必须回退只读，
+        不能凭空放开写权限。"""
+        policy = self._guide_policy_snapshot()
+        if policy:
+            perm = policy['overrides'].get(end_id) if end_id else None
+            if perm in ("rw", "ro"):
+                return perm
+            if policy.get('default') in ("rw", "ro"):
+                return policy['default']
+        return "ro"
+
+    def set_perm(self, client_id: str, new_perm: str, persist: bool = True) -> bool:
         """主机端发起对某连接端的权限切换（读写 <-> 只读）
 
         - 权限立即存储生效（主机兜底侧即刻按新权限执行：只读端发来的
           FILE_BEGIN/DELETE/DIR_CREATE/RENAME 一律拒收）；
         - 发送 PERM_UPDATE 给该连接端并记录 ACK 等待；
         - ACK 到齐后发 perm_ack_received；重发超限无响应则回滚旧档位并发 perm_switch_failed。
+        - persist=True（UI 手动操作）时在 ACK 成功后按 end_id 记入内存覆盖表；
+          认证初始化下发默认档位须传 False，否则会把"跟随默认"误固化成手动档位。
 
         Returns:
             True 表示已发起切换；False 表示参数非法/客户端不在线/权限未变化。
@@ -2277,11 +2493,14 @@ class SyncServer(QObject):
                 return False  # 权限未变化，幂等
             if client_id in self.perm_ack_pending:
                 return False  # 该端已有权限切换进行中
+            end_id = client_info.get('end_id') or ''
             client_info['perm'] = new_perm  # 立即生效
             self.perm_ack_pending[client_id] = {
                 'perm': new_perm,
                 'old_perm': old_perm,
                 'tries': 0,
+                'persist': bool(persist and end_id),
+                'end_id': end_id,
             }
         # 发射切换发起信号（UI 置灰该行胶囊）
         self.perm_switching.emit(client_id, new_perm)
@@ -2307,8 +2526,20 @@ class SyncServer(QObject):
                 return  # 回执权限与预期不符，忽略
             del self.perm_ack_pending[client_id]
             applied_perm = pending['perm']
+            persist = bool(pending.get('persist'))
+            end_id = pending.get('end_id') or ''
         self.perm_ack_received.emit(client_id, applied_perm)
         self.log_message.emit(f"连接端 {client_id} 已应用权限 {self._perm_cn(applied_perm)}")
+        # 手动档位在 ACK 成功后才写入内存覆盖表（超时回滚不污染），并广播新策略
+        if persist and end_id:
+            with self._lock:  # 与"从端恢复权限表"的采纳互斥，避免整体替换时丢条目
+                self._perm_overrides[end_id] = applied_perm
+            self._broadcast_perm_policy()
+        # 恢复权限表时被"切换在途"挡下的校正，现在补发
+        with self._lock:
+            deferred = self._perm_fix_pending.pop(client_id, None)
+        if deferred and self.get_perm(client_id) != deferred:
+            self.set_perm(client_id, deferred, persist=False)
 
     def _start_perm_ack_thread(self):
         """启动权限 ACK 定时补发线程"""
@@ -2337,6 +2568,7 @@ class SyncServer(QObject):
                     if not info or not info.get('authenticated'):
                         # 已断开：无需补发，直接移除（UI 由断连信号清理）
                         del self.perm_ack_pending[cid]
+                        self._perm_fix_pending.pop(cid, None)
                         continue
                     if pend['tries'] >= self.PERM_ACK_MAX_TRIES:
                         to_rollback.append((cid, pend['old_perm'], pend['perm']))
@@ -2349,8 +2581,11 @@ class SyncServer(QObject):
                     info = self.clients.get(cid)
                     if info:
                         info['perm'] = old_perm  # 回滚旧档位
+                    deferred = self._perm_fix_pending.pop(cid, None)
                 self.perm_switch_failed.emit(cid, old_perm, new_perm)
                 self.log_message.emit(f"权限切换失败（对端无响应）: {cid} 回滚为 {old_perm}")
+                if deferred and deferred != old_perm:
+                    self.set_perm(cid, deferred, persist=False)
             for cid, info, perm in targets:
                 msg = Protocol.create_perm_message(MessageType.PERM_UPDATE, perm)
                 try:

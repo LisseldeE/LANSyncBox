@@ -172,6 +172,13 @@ class PasswordDialog(QDialog):
                 timeout_timer.stop()
                 loop.quit()
 
+        def on_host_unavailable(msg):
+            # 复用监听回瞬时码：主机离线，不能当成密码错误
+            result['status'] = 'host_unavailable'
+            result['message'] = msg
+            timeout_timer.stop()
+            loop.quit()
+
         def on_timeout():
             if result['status'] is None:
                 result['status'] = 'timeout'
@@ -179,6 +186,7 @@ class PasswordDialog(QDialog):
 
         client.connected.connect(on_connected)
         client.auth_failed.connect(on_auth_failed)
+        client.host_unavailable.connect(on_host_unavailable)
         client.error_occurred.connect(on_error)
         timeout_timer.timeout.connect(on_timeout)
 
@@ -205,6 +213,7 @@ class PasswordDialog(QDialog):
             try:
                 client.connected.disconnect(on_connected)
                 client.auth_failed.disconnect(on_auth_failed)
+                client.host_unavailable.disconnect(on_host_unavailable)
                 client.error_occurred.disconnect(on_error)
             except Exception:
                 pass
@@ -223,6 +232,9 @@ class PasswordDialog(QDialog):
 
         if result['status'] == 'failed':
             self._show_status(result['message'], error=True)
+        elif result['status'] == 'host_unavailable':
+            # 主机离线与密码无关：明确提示，不显示"密码错误"误导用户
+            self._show_status(I18n.tr('host_unavailable_join'), error=True)
         elif result['status'] == 'timeout':
             self._show_status(I18n.tr('connection_failed'), error=True)
         else:

@@ -218,6 +218,7 @@ class RoomRowWidget(QWidget):
     COLOR_SCANNED = "#339af0"   # 扫描发现的房间（固定主题蓝）
     COLOR_ONLINE = "#69db7c"    # 历史房间在线
     COLOR_OFFLINE = "#ffd43b"   # 历史房间离线
+    COLOR_INCOMPATIBLE = "#868e96"  # 仅有同步逻辑版本不兼容成员（不可加入）
 
     def __init__(self, room_code: str, count: int = 0, indicator_color: str = "",
                  show_delete: bool = True, ip: str = "", parent=None):
@@ -226,6 +227,7 @@ class RoomRowWidget(QWidget):
         self.count = count
         self.ip = ip or ""
         self._fixed_color = indicator_color  # 固定色指示条（扫描行）；空则动态（历史行）
+        self._incompatible = False  # 版本不兼容（置灰优先于在线/离线状态色）
         self._init_ui(show_delete)
 
     def _init_ui(self, show_delete: bool):
@@ -283,12 +285,19 @@ class RoomRowWidget(QWidget):
 
     def set_status(self, reachable: bool):
         """更新指示条状态：绿=找到，黄=未找到（仅动态指示条的历史行生效）"""
-        if self._fixed_color:
-            return  # 固定色行不受探测影响
+        if self._fixed_color or self._incompatible:
+            return  # 固定色行/版本不兼容行不受探测影响
         color = self.COLOR_ONLINE if reachable else self.COLOR_OFFLINE
         self._bar_background.setStyleSheet(
             f"background: {color};"
         )
+
+    def set_incompatible(self, incompatible: bool):
+        """标记版本不兼容：指示条置灰；恢复时回到固定色或历史行默认黄。"""
+        self._incompatible = bool(incompatible)
+        color = (self.COLOR_INCOMPATIBLE if self._incompatible
+                 else (self._fixed_color or self.COLOR_OFFLINE))
+        self._bar_background.setStyleSheet(f"background: {color};")
 
     def _label_text(self) -> str:
         """行文案：房间号 · 在线X"""
@@ -605,6 +614,7 @@ class JoinRoomDialog(QDialog):
             (RoomRowWidget.COLOR_SCANNED, I18n.tr('legend_scanned')),
             (RoomRowWidget.COLOR_ONLINE, I18n.tr('legend_history_online')),
             (RoomRowWidget.COLOR_OFFLINE, I18n.tr('legend_history_offline')),
+            (RoomRowWidget.COLOR_INCOMPATIBLE, I18n.tr('legend_incompatible')),
         ):
             row = QHBoxLayout()
             row.setSpacing(6)
@@ -1101,6 +1111,9 @@ class JoinRoomDialog(QDialog):
         elif status == 'failed':
             # 空密码被拒：该房间需要密码，弹出密码对话框由它负责输入与验证
             self._open_password_dialog()
+        elif status == 'host_unavailable':
+            # 房间还有成员在应答，但真主机离线：不是密码问题，不弹密码框
+            self._show_status(I18n.tr('host_unavailable_join'), color='#ff6b6b')
         elif status == 'cancel':
             # 用户中途修改输入取消了验证：界面已复位，等待新输入，无需提示
             pass
@@ -1155,6 +1168,13 @@ class JoinRoomDialog(QDialog):
                 timeout_timer.stop()
                 loop.quit()
 
+        def on_host_unavailable(msg):
+            # 复用监听回瞬时码：主机离线，不是密码错误，交 on_connect 单独提示
+            result['status'] = 'host_unavailable'
+            result['message'] = msg
+            timeout_timer.stop()
+            loop.quit()
+
         def on_timeout():
             if result['status'] is None:
                 result['status'] = 'timeout'
@@ -1162,6 +1182,7 @@ class JoinRoomDialog(QDialog):
 
         client.connected.connect(on_connected)
         client.auth_failed.connect(on_auth_failed)
+        client.host_unavailable.connect(on_host_unavailable)
         client.error_occurred.connect(on_error)
         timeout_timer.timeout.connect(on_timeout)
 
@@ -1194,6 +1215,7 @@ class JoinRoomDialog(QDialog):
                 try:
                     client.connected.disconnect(on_connected)
                     client.auth_failed.disconnect(on_auth_failed)
+                    client.host_unavailable.disconnect(on_host_unavailable)
                     client.error_occurred.disconnect(on_error)
                 except Exception:
                     pass
@@ -1221,6 +1243,8 @@ class JoinRoomDialog(QDialog):
                 return 'regress', ''
             if result['status'] == 'failed':
                 return 'failed', (result['message'] or I18n.tr('auth_failed'))
+            if result['status'] == 'host_unavailable':
+                return 'host_unavailable', (result['message'] or '')
             if result['status'] == 'timeout':
                 return 'timeout', I18n.tr('connection_failed')
             return 'error', (result['message'] or I18n.tr('connection_failed'))
@@ -1290,6 +1314,7 @@ class JoinRoomDialog(QDialog):
         for code, group in list(self._room_groups.items()):
             group['members'] = []
             group['count'] = 0
+            group['incompatible'] = []      # 本轮重扫版本不兼容成员
             group['probe_online'] = False  # 本轮 TCP 探活是否命中
             group['probe_ip'] = ""         # 命中时采用的 IP
             group['host_id'] = ""          # 本轮宿主 end_id（重新聚合）
@@ -1297,6 +1322,8 @@ class JoinRoomDialog(QDialog):
             if w is None:
                 continue
             w.set_count(0)
+            w.set_incompatible(False)
+            w.setToolTip("")
             if group.get('is_history'):
                 w.set_status(False)
             else:
@@ -1344,6 +1371,7 @@ class JoinRoomDialog(QDialog):
         group = {
             'room_code': room_code,
             'members': [], 'count': 0, 'is_history': is_history,
+            'incompatible': [],            # 本轮发现的版本不兼容成员（仅展示，不可加入）
             'ip': ip or '',                # 历史线索 IP（仅手动输入过 IP 的房间有）
             'probe_online': False, 'probe_ip': "",
             'host_id': '',                 # 扫描聚合到的宿主 end_id（用于"回归为主机"判定）
@@ -1370,18 +1398,32 @@ class JoinRoomDialog(QDialog):
         return group
 
     def _live_room_count(self) -> int:
-        """当前有在线成员的房间数（用于『发现 N 个房间』状态）"""
-        return sum(1 for g in self._room_groups.values() if g['count'] > 0)
+        """当前有在线成员的房间数（用于『发现 N 个房间』状态）
+
+        仅有版本不兼容成员的房间也计入：它们会以灰条展示，状态文字不能仍说"未发现"。
+        """
+        return sum(1 for g in self._room_groups.values()
+                   if g['count'] > 0 or g.get('incompatible'))
 
     def _apply_group_online(self, group: dict):
-        """按成员数刷新该行『在线X』并在有成员时点亮绿；扫描行固定蓝不受影响"""
+        """按成员数刷新该行『在线X』并点亮绿；扫到但版本不兼容时置灰。"""
         group['count'] = len(group['members'])
         w = group.get('widget')
         if w is None:
             return
         w.set_count(group['count'])
-        if group.get('is_history') and group['count'] > 0:
-            w.set_status(True)
+        if group['count'] == 0 and group.get('incompatible'):
+            versions = sorted({m.get('sync_version') or '?'
+                               for m in group['incompatible']})
+            w.set_incompatible(True)
+            w.setToolTip(I18n.tr('room_version_incompatible_tip',
+                                 versions=', '.join(versions),
+                                 mine=Config.SYNC_LOGIC_VERSION))
+        else:
+            w.set_incompatible(False)
+            w.setToolTip("")
+            if group.get('is_history') and group['count'] > 0:
+                w.set_status(True)
         self.scan_status_label.setText(I18n.tr('rooms_found_count', count=self._live_room_count()))
         self.scan_status_label.setStyleSheet("color: #51cf66; font-size: 12px;")
 
@@ -1407,20 +1449,32 @@ class JoinRoomDialog(QDialog):
         """扫描发现单个成员：按房间号聚合进分组，更新『在线X』。
 
         只有 sync_version 一致的兼容成员计入在线数且可作为加入目标（与
-        RoomDiscovery.get_room_aggregates 一致）；不兼容成员不记账、不参与加入。
+        RoomDiscovery.get_room_aggregates 一致）；不一致成员只登记为灰条展示，
+        不记账、不可加入。
         """
         # 过滤 127.0.0.1 地址（只保留真实 IP）
         if host_ip == '127.0.0.1':
             return
         if not room_code:
             return
-        # 兼容性过滤：局端同步逻辑版本一致者才计入在线N
-        if sync_version != Config.SYNC_LOGIC_VERSION:
-            return
 
         group = self._room_groups.get(room_code)
         if group is None:
             group = self._new_room_group(room_code, is_history=False)
+
+        # 兼容性过滤：局端同步逻辑版本一致者才计入在线N、可作为加入目标；
+        # 不一致者仅登记用于灰条展示（整房无兼容成员时提示需升级）。
+        if sync_version != Config.SYNC_LOGIC_VERSION:
+            for m in group['incompatible']:
+                if m['ip'] == host_ip and m['port'] == port:
+                    break
+            else:
+                group['incompatible'].append({
+                    'ip': host_ip, 'port': port,
+                    'version': version, 'sync_version': sync_version,
+                })
+            self._apply_group_online(group)
+            return
 
         # 成员按 (ip, port) 去重（同端多应答不重复计数）
         for m in group['members']:
@@ -1512,6 +1566,20 @@ class JoinRoomDialog(QDialog):
 
         # 填充房间号到输入框（不触发检测，避免重复刷新）
         self.room_code_input.set_room_code(room_code, trigger_check=False)
+
+        # 整房只有版本不兼容成员：仅展示，不发起加入（认证必被版本门禁拒绝）
+        if not group.get('members') and not group.get('probe_online') and group.get('incompatible'):
+            versions = sorted({m.get('sync_version') or '?'
+                               for m in group['incompatible']})
+            self.discovered_host = ""
+            self.host_address = ""
+            self.host_port = Config.DEFAULT_PORT
+            self._set_host_text("")
+            self._show_status(I18n.tr('room_version_incompatible_tip',
+                                      versions=', '.join(versions),
+                                      mine=Config.SYNC_LOGIC_VERSION),
+                              color='#868e96')
+            return
 
         # 入口优先用 TCP 探活命中的 IP（跨网段下的可靠锚点），其次广播成员
         entry_ip = group.get('probe_ip') if group.get('probe_online') else ""

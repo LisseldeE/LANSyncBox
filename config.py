@@ -50,8 +50,8 @@ class Config:
     # 应用信息
     APP_NAME = "LANSyncBox"
     APP_VERSION = "R1.2.3.0"
-    # 同步逻辑版本号
-    SYNC_LOGIC_VERSION = "26.11C1"
+    # 同步逻辑版本号：权限策略快照（PERM_POLICY）加入后必须双端一致，故提升
+    SYNC_LOGIC_VERSION = "26.11C2"
     # 序列号：P(历史沿用前缀) + 构建年月 YYMM(发布时手改) + . + 平台字母(自动识别) + H(GitHub 发布源固定)
     APP_SERIAL_DATE = "2611"
     APP_SERIAL = f"P{APP_SERIAL_DATE}.{_PLATFORM_LETTER}H"
@@ -328,7 +328,6 @@ class UserConfig:
             "confirm_leave_no_ask": False,
             "auto_check_update": False,
             "receive_announcements": True,
-            # 投递设置：总开关 all/send/recv/off + 内容开关（关闭总开关时内容开关保留状态）
             "delivery_mode": "all",
             "delivery_text_enabled": True,
             "delivery_file_enabled": True,
@@ -337,7 +336,7 @@ class UserConfig:
             "end_id": "",
             "room_history": [],
             "default_perm": "rw",
-            "room_perm": {},  # 每房间最近一次主机下发的本端权限档位（主机离线期间保持只读不放松）
+            "room_perm": {},
             "terms_accepted_version": "",
             "privacy_accepted_version": ""
         }
