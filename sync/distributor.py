@@ -192,6 +192,50 @@ class Distributor(QObject):
         with self._lock:
             self._states.pop(file, None)
 
+    def record_received(self, file: str, ts: float = 0.0) -> Optional[FileState]:
+        """接收端直推落盘后补记状态基线（旧通道补发文件时状态表无条目的兜底）。
+
+        清缓存退出的端回归后 _op_counters/_clocks 归零；若文件仅经主机直推
+        落盘而状态表无条目，随后本地删除只会发出 op_no=1，被其它端已记录的
+        该端旧 op_no 去重丢弃 → 删除永久失效（对账轮反复“补收删除”却不落盘）。
+        此处补一条仅含本端来源的基线，使后续本地操作从其上递增。不广播、不
+        声明远端版本，避免虚增对端知识；已有存活条目时不动（不覆盖本地胜者）。
+        """
+        if not file:
+            return None
+        try:
+            path = self._safe_join(file)
+        except ValueError:
+            return None
+        if not os.path.exists(path):
+            return None
+        with self._lock:
+            prev = self._states.get(file)
+            if prev is not None and prev.exists:
+                return None
+            floor_op = self._op_counters.get(file, 0)
+            floor_ck = self._clocks.get(file, 0)
+            if prev is not None:
+                floor_op = max(floor_op, prev.op_no, prev.vv.get(self.end_id, 0))
+                floor_ck = max(floor_ck, prev.clock)
+            op_no = floor_op + 1
+            clock = floor_ck + 1
+            self._op_counters[file] = op_no
+            self._clocks[file] = clock
+        if ts <= 0:
+            try:
+                ts = os.path.getmtime(path)
+            except OSError:
+                ts = time.time()
+        st = FileState(name=file, op_no=op_no, state=STATE_ADD, exists=True,
+                       clock=clock, ts=float(ts),
+                       vv={self.end_id: op_no},
+                       bytes_vv={self.end_id: op_no},
+                       bytes_clock=clock, bytes_ts=float(ts))
+        self._store(st)
+        self._notify_log(f"直推落盘补记状态: {file}")
+        return st
+
     def retry_pending_deletes(self, limit: int = 1) -> int:
         """补删磁盘残留：墓碑（变更 + 不存在）但磁盘仍在的路径重试删除。
 

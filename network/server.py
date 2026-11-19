@@ -664,6 +664,12 @@ class SyncServer(QObject):
                     # 设置修改时间
                     os.utime(final_file_path, (rf['mtime'], rf['mtime']))
 
+                    # 旧通道直推落盘后补记状态基线（同步模式）：避免“磁盘有、
+                    # 状态表无”的路径在本地删除时发出被对端旧知识去重的低版本。
+                    rel_name = rf.get('target_filename') or filename
+                    if self.mode == "sync" and self.distributor is not None:
+                        self.distributor.record_received(rel_name, rf['mtime'])
+
                     # 通知接收完成
                     self.file_received.emit(filename)
 
@@ -2182,6 +2188,7 @@ class SyncServer(QObject):
         """移除客户端"""
         end_id = None
         authenticated = False  # 仅已认证端才向 UI 通告"断开"；探活/失败连接未通告"连接"，静默移除
+        still_online = False   # 同 end_id 是否仍有其它已认证连接（重连产生的新旧条目）
         cancelled_receives = []
         with self._lock:
             if client_id in self.clients:
@@ -2195,6 +2202,10 @@ class SyncServer(QObject):
                 except Exception:
                     pass
                 del self.clients[client_id]
+                if end_id:
+                    still_online = any(
+                        info.get('authenticated') and info.get('end_id') == end_id
+                        for info in self.clients.values())
 
         # 锁外通告中止接收：该端上传中途断开，UI 清掉接收进度行与「同步中」
         for filename in cancelled_receives:
@@ -2207,14 +2218,19 @@ class SyncServer(QObject):
         except Exception:
             pass
 
-        if authenticated:
+        if authenticated and not still_online:
             self.client_disconnected.emit(client_id)
+        elif authenticated and still_online:
+            self.log_message.emit(
+                f"跳过离线通告: {end_id} 仍有其它在线连接")
 
         # 去中心化：端离线 → 通告其余端拆除直连 + 主机侧清掉其地址线索。
         # reuse 模式（全网状管理平面）下本服务仅作管理监听：guest 直连断开
         # 不代表该端离线（其 mesh 数据平面可能仍存活），不广播 LEAVE、
         # 不 mesh.remove_peer（避免误拆其网状直连），由主机权威下发生命周期。
-        if end_id and not self._reuse:
+        # 同 end_id 仍有在线连接（重连后旧连接被回收）同理：该端未离线，
+        # 广播 LEAVE / 拆除 mesh 会把刚建立的直连一起拆掉，导致在线状态闪烁。
+        if end_id and not self._reuse and not still_online:
             try:
                 self._broadcast_to_mesh_peers(Protocol.create_mesh_peer_leave(end_id))
             except Exception:

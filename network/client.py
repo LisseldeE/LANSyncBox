@@ -1089,6 +1089,11 @@ class SyncClient(QObject):
                     # 设置修改时间
                     os.utime(final_file_path, (rf['mtime'], rf['mtime']))
 
+                    # 旧通道直推落盘后补记状态基线：清缓存回归端若只有磁盘文件
+                    # 而无状态条目，后续本地删除的 op_no 会被对端旧知识去重丢弃。
+                    if self.distributor is not None:
+                        self.distributor.record_received(filename, rf['mtime'])
+
                     # 通知接收完成
                     self.file_received.emit(filename)
 
