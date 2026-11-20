@@ -117,6 +117,8 @@ class FileStateStore(QObject):
         self._round_exists_claim = set()
         self._round_deleted_claim = set()
         self._round_responded = set()
+        self._round_remote_keys = set()  # 本轮对端声明的活对象 (path, id)
+        self._align_remote_by_hash = {}
         # 普通回调通道（与 Distributor 同款）：GUI 用 Qt 信号；无事件循环场景
         # （后台/单测）经此同步回调——Qt 信号跨线程 emit 到 Python 槽在无事件
         # 循环时会排队丢失，回调通道保证可靠投递。
@@ -374,7 +376,7 @@ class FileStateStore(QObject):
     def snapshot(self) -> list:
         """本端活对象快照（wire 格式）；删除信息只经 TOMBSTONE_RESP 下发。
 
-        - 只导出 exists=True 的活对象（文件与目录）
+        - 只导出 exists=True 的文件（目录不是实体，不进快照）
         - 哈希未完成的文件暂不导出（不作为同步对象/拉取源）
         - 传输临时文件不入快照
         """
@@ -389,12 +391,10 @@ class FileStateStore(QObject):
                 continue  # 阶段 B：哈希未完成，不作为同步对象下发给对端
             if self._is_transient_temp(st.name):
                 continue  # 传输临时文件不入快照（防对端当作缺失文件来回拉取）
+            if st.is_dir or not st.file_id:
+                continue  # 目录不是实体，不参与同步
             try:
-                path = self._safe_join(st.name)
-                if st.is_dir or (st.hash_state == 'none' and not st.file_id):
-                    if not os.path.isdir(path):
-                        continue
-                elif not os.path.isfile(path):
+                if not os.path.isfile(self._safe_join(st.name)):
                     continue
             except ValueError:
                 continue
@@ -411,30 +411,6 @@ class FileStateStore(QObject):
                     and not self._is_transient_temp(st.name):
                 n += 1
         return n
-
-    def _local_dirs(self) -> list:
-        """本端存在的目录相对路径清单（空目录对账兜底的比对基准）。
-
-        只取状态表内条目：磁盘有目录但状态表无条目的情况已由 emit_local_missing
-        在建连时补扫，重复纳入只会让清单膨胀。
-        """
-        if self.distributor is None:
-            return []
-        out = []
-        seen = set()
-        for st in self.distributor.states().values():
-            if not st.exists:
-                continue
-            try:
-                if os.path.isdir(self._safe_join(st.name)):
-                    key = os.path.normcase(st.name)
-                    if key in seen:
-                        continue  # 大小写变体视为同一目录，只保留首个写法
-                    seen.add(key)
-                    out.append(st.name)
-            except ValueError:
-                continue
-        return out
 
     # ---- 收到 FILE_STATE_REQ：回 RESP ----
 
@@ -493,27 +469,10 @@ class FileStateStore(QObject):
             self.mesh.send_to_peer(
                 end_id, Protocol.create_file_state_resp(
                     self.end_id, self.snapshot(), session=session,
-                    dirs_missing=self._missing_dirs_from(content),
                     scan_complete=not aligning,
                     pending_count=self._pending_count()))
         except Exception as e:
             self.log_message.emit(f"文件状态响应失败: {e}")
-
-    def _missing_dirs_from(self, content) -> list:
-        """按请求方附来的目录清单算出「本端有而请求方无」的差异集。
-
-        比较按 os.path.normcase 归一：同一物理目录的大小写变体不视为缺失
-        （POSIX 下 normcase 为恒等，Linux 不受影响）。
-        请求方未附清单（旧端）→ 返回空，整段跳过（混版安全）。
-        """
-        if not isinstance(content, dict):
-            return []
-        raw = content.get('dirs')
-        if not isinstance(raw, list):
-            return []
-        theirs = {os.path.normcase(d) for d in raw if isinstance(d, str)}
-        return [d for d in self._local_dirs()
-                if os.path.normcase(d) not in theirs]
 
     # ---- 收到 FILE_STATE_RESP：对比 + 拉取队列 + 补收删除 + 清理 ----
 
@@ -544,6 +503,10 @@ class FileStateStore(QObject):
                     if name not in self._align_residues:
                         continue
                     remote = FileState.from_wire_dict(src_id, d)
+                    if (remote.hash_state == 'ok' and remote.hash
+                            and not remote.is_dir):
+                        self._align_remote_by_hash.setdefault(
+                            remote.hash, []).append(remote)
                     self._align_remote[name] = remote
                     self._align_sources[name] = src_id
                     if remote.hash_state != 'ok' or not remote.hash:
@@ -553,6 +516,38 @@ class FileStateStore(QObject):
         has_diff = False
         exists_claim = set()  # 本响应端声明「存在」的路径（在线闸门判据）
         remote_keys = set()   # 对端活对象 (path, id) 集合（删除确认判据）
+        skip_names = set()    # 同 ID 已由本端裁决，旧路径不再按路径补拉
+        # 同 ID 预扫描：同一身份在两端路径不同 = 改名。先按 ID 裁决路径归属，
+        # 再按路径补缺，避免把对端旧路径当缺失文件重复拉取（文档 §5 阶段 3）。
+        by_id = {}
+        for d in entries:
+            if not isinstance(d, dict):
+                continue
+            remote = FileState.from_wire_dict(src_id, d)
+            if remote.is_dir or not remote.name or not remote.file_id:
+                continue
+            by_id.setdefault(remote.file_id, []).append(remote)
+        for fid, group in by_id.items():
+            local = self.distributor.get_state_by_id(fid)
+            if local is None or not local.exists:
+                continue
+            rep = max(group, key=lambda r: (int(r.clock or 0),
+                                            float(r.ts or 0.0)))
+            if rep.name == local.name:
+                continue
+            action = self.distributor.reconcile_identity_path(rep, src_id)
+            if action == 'adopt':
+                has_diff = True
+                moved = self.distributor.get_state_by_id(fid)
+                if (moved is not None and session is not None
+                        and rep.hash_state == 'ok' and rep.hash
+                        and moved.hash_state == 'ok' and moved.hash
+                        and moved.hash != rep.hash):
+                    if self._enqueue_pull(moved.name, src_id, rep, session,
+                                          force=True):
+                        has_diff = True
+            # 对端该身份的所有其它路径一律不按路径处理（旧名或新名皆然）
+            skip_names |= {r.name for r in group if r.name != local.name}
         for d in entries:
             if not isinstance(d, dict):
                 continue
@@ -560,7 +555,6 @@ class FileStateStore(QObject):
             if not name:
                 continue
             remote = FileState.from_wire_dict(src_id, d)
-            remote_keys.add((name, remote.file_id or ''))
             # C3：仅用对端 vv 抬本端计数器地板，不并入状态表 vv
             raw_vv = d.get('vv')
             if isinstance(raw_vv, dict):
@@ -569,14 +563,16 @@ class FileStateStore(QObject):
                 except (TypeError, ValueError):
                     base = 0
                 if base > 0:
-                    self.distributor.recover_floor(name, base)
+                    self.distributor.recover_floor(
+                        remote.file_id, base, remote.clock)
+            if remote.is_dir:
+                continue  # 目录不是实体：旧端目录条目直接忽略
+            if name in skip_names:
+                continue
+            remote_keys.add((name, remote.file_id or ''))
             try:
                 local_exists = os.path.exists(self._safe_join(name))
             except ValueError:
-                continue
-            # 目录只参与存在声明与目录对账，不触发文件拉取
-            if remote.is_dir:
-                exists_claim.add(name)
                 continue
             # 冲突覆盖拉取（阶段 3）：信号路径裁决覆盖后，此 RESP 为取会话的应答
             with self._lock:
@@ -588,14 +584,20 @@ class FileStateStore(QObject):
             if pend and session is not None and remote.hash_state == 'ok' \
                     and remote.hash:
                 # 冲突覆盖：仲裁已判 src_id 胜，force 覆盖版本槽（无视列表内旧槽）
-                if not self._tombstone_blocks(name, remote.file_id) \
+                if not self._tombstone_blocks(name, remote.file_id, remote) \
                         and self._enqueue_pull(name, src_id, remote, session,
                                                force=True):
                     has_diff = True
             exists_claim.add(name)  # 对端仍持有该路径 → 保留本端墓碑（在线闸门）
             # 对端有该文件：本端缺失 → 入拉取队列（同文件排队去重）
             if not local_exists:
-                if self._tombstone_blocks(name, remote.file_id):
+                # 同身份已在本端另一路径存活：路径归属由 ID 裁决，不重复拉取
+                fid = remote.file_id or ''
+                other = (self.distributor.get_state_by_id(fid)
+                         if fid else None)
+                if other is not None and other.exists and other.name != name:
+                    continue
+                if self._tombstone_blocks(name, remote.file_id, remote):
                     self.log_message.emit(f"忽略拉取 {name}: 本端已有该 ID 墓碑")
                     continue
                 # 仅从哈希已算好的源补拉（待哈希条目不提供可信内容）
@@ -605,6 +607,23 @@ class FileStateStore(QObject):
             # 本端已有：冲突收敛（阶段 3）——远端胜出或本端为未验证副本才拉取
             else:
                 local_st = self.distributor.get_state(name)
+                # 同路径不同 ID：clock/ts 高者占原路径，落败方加后缀保留
+                if (local_st is not None and local_st.exists
+                        and local_st.file_id and remote.file_id
+                        and local_st.file_id != remote.file_id):
+                    target = self.distributor._claim_path(
+                        remote.file_id, name, remote.clock, remote.ts)
+                    if target != name:
+                        continue  # 本端占位者版本更高：等对端加后缀
+                    # 本端占位者已让位 → 该路径缺失，按远端补拉
+                    if (session is not None and remote.hash_state == 'ok'
+                            and remote.hash
+                            and not self._tombstone_blocks(
+                                name, remote.file_id, remote)
+                            and self._enqueue_pull(name, src_id, remote,
+                                                   session)):
+                        has_diff = True
+                    continue
                 if (local_st is not None and session is not None
                         and remote.hash_state == 'ok' and remote.hash):
                     # §5.2 同 path 同 hash 不同 ID：先合并身份（静默幂等），
@@ -628,7 +647,8 @@ class FileStateStore(QObject):
                                      and local_st.hash_state != 'ok')) \
                             and (not local_st.hash
                                  or local_st.hash != remote.hash) \
-                            and not self._tombstone_blocks(name, remote.file_id) \
+                            and not self._tombstone_blocks(
+                                name, remote.file_id, remote) \
                             and self._enqueue_pull(name, src_id, remote, session):
                         has_diff = True
         # 删除确认：仅在快照完整（扫描完成且无待哈希）时，缺失的 id 才算已删
@@ -642,48 +662,8 @@ class FileStateStore(QObject):
             if self._round_targets is not None:
                 self._round_exists_claim |= exists_claim
                 self._round_deleted_claim |= set()
-        # 空目录对账兜底（26.9C2）：对端回「我有你无」的目录 → 本端补建并扩散。
-        # 判定全在本地（删除优先/祖先已删/同名文件），不用对端信号的时间戳，
-        # 避免复活本端已删目录。
-        if self._apply_missing_dirs(content.get('dirs_missing')):
-            has_diff = True
+                self._round_remote_keys |= remote_keys
         self._finish_round(end_id, has_diff)
-
-    def _apply_missing_dirs(self, names) -> bool:
-        """补建对端报告的本端缺失目录（删除优先；只读端不动）。"""
-        if self._readonly or self.distributor is None or not isinstance(names, list):
-            return False
-        changed = False
-        last = None
-        for name in names:
-            if not isinstance(name, str) or not name:
-                continue
-            try:
-                path = self._safe_join(name)
-            except ValueError:
-                continue
-            if self.distributor.get_state(name) is not None:
-                continue  # 同名条目（含删除墓碑）→ 删除优先，不复活
-            if self._dir_case_equivalent(name):
-                continue  # 已有大小写等价的活目录 → 同一物理目录只注册一种写法
-            if self._ancestor_deleted(name):
-                continue
-            if os.path.isfile(path):
-                continue  # 同名文件已占位，不建同名目录
-            try:
-                os.makedirs(path, exist_ok=True)
-            except OSError as e:
-                self.log_message.emit(f"补建目录失败: {name}: {e}")
-                continue
-            self.distributor.emit('dir_create', name)
-            changed = True
-            last = name
-        if changed:
-            self.log_message.emit("对账补齐空目录并扩散")
-            # 本地 emit 不回投 UI（_on_distributor_applied 过滤本端信号），
-            # 补建的空目录须显式刷新文件列表，否则落盘了却看不到。
-            self._notify_file_added(last)
-        return changed
 
     def _slot_from_remote(self, name: str, src_id: str, remote: FileState,
                           session) -> dict:
@@ -786,59 +766,31 @@ class FileStateStore(QObject):
             return self._merge_slot_locked(
                 self._slot_from_remote(name, src_id, remote, session))
 
-    def _tombstone_blocks(self, name: str, file_id: str) -> bool:
-        """本端是否存在压制该目标的删除墓碑（同 ID 或目录墓碑）。"""
-        if self.distributor is None:
-            return False
-        if file_id and self.distributor.has_tombstone(name, file_id):
-            return True
-        return self.distributor.has_tombstone(name, '')
+    def _tombstone_blocks(self, name: str, file_id: str,
+                          remote: FileState = None) -> bool:
+        """仅「同路径 + 同 ID」的墓碑阻挡拉取；更高版本可复活。
 
-    def _cleanup_entry(self, name: str):
-        """双方均已删除：移除本端条目（防列表无限变长）。"""
-        if self.distributor is not None:
-            self.distributor.remove_state(name)
-            self.log_message.emit(f"状态条目收敛移除: {name}")
-
-    def _ancestor_deleted(self, name: str) -> bool:
-        """目标路径的任一祖先目录在本端已删除（墓碑）→ 不应再落盘。
-
-        目录删除后，其对端迟到的子文件拉取会 os.makedirs 重建已删目录（幽灵目录）。
-        此处拦截：父目录已是删除态即拒绝落盘，交由删除收敛。
+        目录墓碑在新模型中不存在，不再按 (path, '') 拦截。
         """
-        if self.distributor is None or '/' not in name:
+        if self.distributor is None or not file_id:
             return False
-        parts = name.split('/')
-        for i in range(1, len(parts)):
-            anc = '/'.join(parts[:i])
-            st = self.distributor.get_state(anc)
-            if st is not None:
-                if not st.exists and st.state == STATE_CHANGE:
-                    return True
-                continue
-            if self.distributor.has_tombstone(anc, ''):
-                return True
-        return False
-
-    def _dir_case_equivalent(self, name: str) -> bool:
-        """本端已有大小写等价的「存在」目录条目（Windows 下为同一物理目录）。
-
-        用于目录注册前查重：同一物理目录只允许一种写法落状态表，防止对端
-        dirs 清单里的另一种大小写变体再注册出一条重复条目。墓碑（exists=False）
-        不参与，删除判定仍按精确同名，避免复活已删目录。
-        """
-        if self.distributor is None:
+        tomb = self.distributor.get_tombstone(name, file_id)
+        if tomb is None:
             return False
-        key = os.path.normcase(name)
-        for n, st in self.distributor.states().items():
-            if st.exists and os.path.normcase(n) == key:
-                return True
-        return False
+        if remote is not None and (int(remote.clock or 0),
+                                   float(remote.ts or 0.0)) > (
+                int(tomb.get('clock') or 0), float(tomb.get('ts') or 0.0)):
+            return False  # 更高版本回到该路径 → 允许复活
+        st = self.distributor.get_state_by_id(file_id)
+        if st is not None and st.exists and st.name == name:
+            return False  # 同 ID 已在该路径以活状态回来
+        return True
 
     def emit_local_missing(self, exclude_dirs: Optional[set] = None) -> int:
         """本地补扫（建连时/切回同步时兜底）：扫描同步文件夹，对磁盘存在但
-        状态表缺失的文件 emit add、缺失的目录 emit dir_create，纳入同步体系。
+        状态表缺失的文件 emit add，纳入同步体系。
 
+        目录不是实体：只扫文件（空目录不同步，目录随文件写入自动创建）。
         覆盖三类场景：① mesh 未就绪窗口内添加文件（信号未发出、状态未记录）
         ——建连后补扫兜底；② 启动前已放置于文件夹的文件（状态表无条目）；
         ③ 收集模式期间主机对根目录的本地增删被「收集不转发」跳过、切回同步
@@ -848,10 +800,6 @@ class FileStateStore(QObject):
 
         Args:
             exclude_dirs: 需从扫描中剪枝的顶层目录名集合（收集模式 IP 文件夹）。
-                切回同步时这些文件夹是已连接/历史连接端的私有目录，内部文件归
-                属对应连接端、不应作为共享文件被扫描广播；不剪枝会把其内存误
-                emit add 广播给所有对端。按目录名匹配（os.walk 的 `_dirs` 元素
-                即目录 basename），命中即整棵子树剪掉。
 
         Returns:
             新 emit 的文件数
@@ -869,22 +817,6 @@ class FileStateStore(QObject):
             for root, _dirs, files in os.walk(self.sync_folder):
                 _dirs[:] = [d for d in _dirs
                             if not d.startswith('.') and d not in exclude_dirs]
-                # 目录补扫：磁盘存在但状态表无条目的目录 emit dir_create，纳入同步。
-                # 只扫文件会漏掉新建/空目录（仅靠对账被动收敛），此处令目录结构也能
-                # 主动扩散；已有条目（含已删墓碑）跳过，不复活已删目录。
-                for dn in _dirs:
-                    rel_d = os.path.relpath(os.path.join(root, dn),
-                                            self.sync_folder).replace('\\', '/')
-                    try:
-                        self._safe_join(rel_d)
-                    except ValueError:
-                        continue
-                    if self.distributor.get_state(rel_d) is not None:
-                        continue  # 状态表已有条目（含已删墓碑）→ 不重复 emit
-                    if self._dir_case_equivalent(rel_d):
-                        continue  # 大小写变体已注册 → 同一物理目录只留一种写法
-                    self.distributor.emit('dir_create', rel_d)
-                    count += 1
                 for fn in files:
                     if self._is_transient_temp(fn):
                         continue  # 传输临时文件不入同步（见 _is_transient_temp）
@@ -991,8 +923,15 @@ class FileStateStore(QObject):
             ts=float(item.get('ts', 0.0) or 0.0),
             vv={item['end_id']: int(item['op_no'] or 0)},
             file_id=item.get('id') or '')
-        if self._tombstone_blocks(name, cand.file_id) \
-                or self._ancestor_deleted(name):
+        other = (self.distributor.get_state_by_id(cand.file_id)
+                 if cand.file_id else None)
+        if other is not None and other.exists and other.name != name:
+            # 同身份已在本端另一路径存活：路径归属由快照 ID 裁决，不重复拉取
+            self.log_message.emit(
+                f"拉取 {name} 跳过: 同身份已在本端 {other.name}")
+            self.pull_done.emit(name, False)
+            return
+        if self._tombstone_blocks(name, cand.file_id, cand):
             self.log_message.emit(f"拉取 {name} 跳过: 本端已删除")
             self.pull_done.emit(name, False)
             return
@@ -1025,8 +964,7 @@ class FileStateStore(QObject):
             host, port, session_id, token, name, dest,
             msg_type=MessageType.SYNC_PULL_REQ,
             # 落盘前复核：拉取在途期间本端胜者内容若已确定且不同，放弃落盘
-            pre_replace=lambda: (self._slot_stale(name, item)
-                                 or self._ancestor_deleted(name)),
+            pre_replace=lambda: self._slot_stale(name, item),
             # 把本 store 的停止事件透传给拉取：退出房间/整体停止时设置 _stop，
             # pull_file 会在下一次 recv 超时(≤1s) 感知并取消，释放 .part 句柄并删除
             # 临时文件——否则工作线程会一直占着句柄（直到整体超时或对端关连接），
@@ -1037,9 +975,8 @@ class FileStateStore(QObject):
         if ok:
             # 删除优先（IO 后）：拉取期间本端已删除 → 移除复活字节；
             # 胜者内容已定且与槽目标不同 → 移除刚落的过时字节
-            if self._tombstone_blocks(name, cand.file_id) \
-                    or self._slot_stale(name, item) \
-                    or self._ancestor_deleted(name):
+            if self._tombstone_blocks(name, cand.file_id, cand) \
+                    or self._slot_stale(name, item):
                 self.log_message.emit(
                     f"拉取 {name} 落盘，但本地已删除/已更新，移除该字节")
                 try:
@@ -1354,12 +1291,11 @@ class FileStateStore(QObject):
             self._round_exists_claim = set()
             self._round_deleted_claim = set()
             self._round_responded = set()
-        # 目录清单每轮只算一次，供该轮所有对端复用（避免逐对端重复 isdir）
-        dirs = self._local_dirs()
+            self._round_remote_keys = set()
         for eid in targets:
             try:
                 self.mesh.send_to_peer(
-                    eid, Protocol.create_file_state_req(self.end_id, dirs))
+                    eid, Protocol.create_file_state_req(self.end_id))
             except Exception:
                 with self._lock:
                     self._round_targets.discard(eid)
@@ -1380,6 +1316,7 @@ class FileStateStore(QObject):
             self._round_exists_claim = set()
             self._round_deleted_claim = set()
             self._round_responded = set()
+            self._round_remote_keys = set()
         self._notify_sync_done(had)
 
     def _finish_round(self, end_id: str, has_diff: bool):
@@ -1421,6 +1358,8 @@ class FileStateStore(QObject):
                 return
             residues = dict(self._align_residues)
             remote_map = dict(self._align_remote)
+            remote_by_hash = {h: list(v)
+                              for h, v in self._align_remote_by_hash.items()}
             pending_paths = set(self._align_pending)
             sessions = dict(self._align_sessions)
             sources = dict(self._align_sources)
@@ -1479,6 +1418,18 @@ class FileStateStore(QObject):
             if incomplete:
                 keep[name] = rec
                 continue
+            # 同内容异名 = 对端改名：hash 在远端唯一时本地静默改名并绑定身份
+            cands = [r for r in remote_by_hash.get(rec['hash'], [])
+                     if not r.is_dir and r.name != name]
+            if len(cands) == 1:
+                try:
+                    dest = self._safe_join(cands[0].name)
+                    os.makedirs(os.path.dirname(dest) or '.', exist_ok=True)
+                    os.replace(abs_path, dest)
+                    self.distributor.adopt_remote_state(cands[0])
+                    continue
+                except (OSError, ValueError):
+                    pass
             # 删除必须身份对应：只有墓碑 ID 与残留对象相同时才删。不同 ID 说明
             # 是另一个对象（例如用户选择保留带入的本地文件），按路径删会误删。
             if self.distributor.has_tombstone(name, rec['file_id']):
@@ -1497,6 +1448,7 @@ class FileStateStore(QObject):
                 return
             self._align_residues = keep
             self._align_remote = {}
+            self._align_remote_by_hash = {}
             self._align_sources = {}
             self._align_got_response = False
             self._align_incomplete = False
@@ -1516,7 +1468,7 @@ class FileStateStore(QObject):
         if self.distributor is not None:
             for name in dropped_names:
                 try:
-                    self.distributor._register_new_local(name, False)
+                    self.distributor._register_new_local(name)
                 except Exception:
                     pass
         if done:
@@ -1541,22 +1493,24 @@ class FileStateStore(QObject):
             timer.start()
 
     def _cleanup_converged(self):
-        """在线闸门：本轮所有直连端均已应答、无人声明该路径存在、且确有对端
-        明确确认该路径已删除、本端磁盘已删 → 移除墓碑条目（防列表无限变长）。
+        """在线闸门：直连端全部应答后回收 rename 墓碑。
 
-        「对端沉默」（快照为空/目录本就不入快照）绝不等同于「对端已删」：必须
-        有对端在响应里显式声明该路径为删除态才算收敛。缺席端（未直连/未应答）
-        回归前一律保留墓碑，使其陈旧 add 继续被删除版本压制而不复活已删内容。
+        rename 墓碑只做本地压制、不下发：仅当本轮所有直连端都已应答、没有
+        端仍声明旧路径、且该身份确实已移到别的路径时才回收。delete 墓碑的
+        回收仍由 storage.gc_tombstones 负责。
         """
         if self.distributor is None:
             return
         with self._lock:
             claim = set(self._round_exists_claim)
-            deleted = set(self._round_deleted_claim)
+            remote_keys = set(self._round_remote_keys)
             responded = set(self._round_responded)
             self._round_exists_claim = set()
             self._round_deleted_claim = set()
             self._round_responded = set()
+            self._round_remote_keys = set()
+        if claim:
+            return  # 仍有端声明路径存在，不能确认改名已完成
         live = set()
         if self.mesh is not None:
             try:
@@ -1565,30 +1519,19 @@ class FileStateStore(QObject):
                 live = set()
             if not live.issubset(responded):
                 return  # 有直连端未应答（含本轮中途新连入）→ 本轮不清理
-        for name, st in self.distributor.states().items():
-            if st.exists or st.state != STATE_CHANGE:
+        active = {st.file_id: st.name
+                  for st in self.distributor.states().values()
+                  if st.exists and st.file_id}
+        for rec in self.distributor.rename_tombstones():
+            path = rec.get('rel_path', '')
+            fid = rec.get('file_id') or ''
+            if not path or not fid:
                 continue
-            # C3：只收敛目录条目；文件删除由墓碑 GC 清理
-            if not st.is_dir:
-                continue
-            if name in claim:
-                continue
-            # 目录墓碑须已被全部在线端确认（对端快照缺失或墓碑列表含之）
-            tomb = None
-            for t in self.distributor.wire_tombstones():
-                if t.get('rel_path') == name and not t.get('file_id'):
-                    tomb = t
-                    break
-            if tomb is None:
-                continue
-            if live and not live.issubset(set(tomb.get('confirmed_by') or [])):
-                continue
-            try:
-                if os.path.exists(self._safe_join(name)):
-                    continue  # 磁盘仍残留 → 交 Distributor.retry_pending_deletes
-            except ValueError:
-                continue
-            self._cleanup_entry(name)
+            if (path, fid) in remote_keys:
+                continue  # 仍有端持有旧路径
+            if active.get(fid) in (None, path):
+                continue  # 身份未移动，或又回到该路径
+            self.distributor.forget_tombstone(path, fid)
 
     # ---- 工具 ----
 

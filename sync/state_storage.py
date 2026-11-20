@@ -2,6 +2,9 @@
 房间状态持久化：SQLite 文件清单 / 墓碑 / 计数器 / 已知端（阶段 A）。
 Copyright (c) 2026 Lisselde_E <Lisselde.E@outlook.com>.
 Licensed under the GNU General Public License v3.0.
+
+身份模型：files 以 file_id 为主键、rel_path 唯一。改名只更新同一行的
+rel_path，不产生第二条路径记录。目录不是实体，不落库。
 """
 import json
 import os
@@ -17,9 +20,8 @@ CREATE TABLE IF NOT EXISTS meta (
 );
 
 CREATE TABLE IF NOT EXISTS files (
-    rel_path     TEXT PRIMARY KEY,
-    file_id      TEXT,
-    is_dir       INTEGER NOT NULL DEFAULT 0,
+    file_id      TEXT PRIMARY KEY,
+    rel_path     TEXT NOT NULL UNIQUE,
     op_no        INTEGER NOT NULL,
     clock        INTEGER NOT NULL,
     ts           REAL,
@@ -30,13 +32,10 @@ CREATE TABLE IF NOT EXISTS files (
     mtime        REAL,
     updated_at   REAL
 );
-CREATE UNIQUE INDEX IF NOT EXISTS idx_files_id
-    ON files(file_id) WHERE file_id IS NOT NULL;
 
 CREATE TABLE IF NOT EXISTS tombstones (
     rel_path     TEXT NOT NULL,
     file_id      TEXT NOT NULL DEFAULT '',
-    is_dir       INTEGER NOT NULL DEFAULT 0,
     origin       TEXT NOT NULL DEFAULT 'delete',
     op_no        INTEGER NOT NULL,
     clock        INTEGER NOT NULL,
@@ -48,7 +47,7 @@ CREATE TABLE IF NOT EXISTS tombstones (
 );
 
 CREATE TABLE IF NOT EXISTS counters (
-    rel_path   TEXT PRIMARY KEY,
+    file_id    TEXT PRIMARY KEY,
     op_no      INTEGER NOT NULL,
     clock      INTEGER NOT NULL,
     updated_at REAL
@@ -62,30 +61,30 @@ CREATE TABLE IF NOT EXISTS peers (
 """
 
 _UPSERT_FILE = """
-INSERT INTO files (rel_path, file_id, is_dir, op_no, clock, ts, vv, hash,
+INSERT INTO files (file_id, rel_path, op_no, clock, ts, vv, hash,
                    hash_state, size, mtime, updated_at)
-VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-ON CONFLICT(rel_path) DO UPDATE SET
-    file_id=excluded.file_id, is_dir=excluded.is_dir, op_no=excluded.op_no,
+VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+ON CONFLICT(file_id) DO UPDATE SET
+    rel_path=excluded.rel_path, op_no=excluded.op_no,
     clock=excluded.clock, ts=excluded.ts, vv=excluded.vv, hash=excluded.hash,
-    hash_state=excluded.hash_state, size=excluded.size, mtime=excluded.mtime,
-    updated_at=excluded.updated_at
+    hash_state=excluded.hash_state, size=excluded.size,
+    mtime=excluded.mtime, updated_at=excluded.updated_at
 """
 
 _UPSERT_TOMBSTONE = """
-INSERT INTO tombstones (rel_path, file_id, is_dir, origin, op_no, clock, ts,
+INSERT INTO tombstones (rel_path, file_id, origin, op_no, clock, ts,
                         vv, deleted_at, confirmed_by)
-VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
 ON CONFLICT(rel_path, file_id) DO UPDATE SET
-    is_dir=excluded.is_dir, origin=excluded.origin, op_no=excluded.op_no,
+    origin=excluded.origin, op_no=excluded.op_no,
     clock=excluded.clock, ts=excluded.ts, vv=excluded.vv,
     deleted_at=excluded.deleted_at, confirmed_by=excluded.confirmed_by
 """
 
 _UPSERT_COUNTER = """
-INSERT INTO counters (rel_path, op_no, clock, updated_at)
+INSERT INTO counters (file_id, op_no, clock, updated_at)
 VALUES (?, ?, ?, ?)
-ON CONFLICT(rel_path) DO UPDATE SET
+ON CONFLICT(file_id) DO UPDATE SET
     op_no=MAX(counters.op_no, excluded.op_no),
     clock=MAX(counters.clock, excluded.clock),
     updated_at=excluded.updated_at
@@ -109,9 +108,9 @@ def _loads(text, default):
 class StateStorage:
     """房间 db：内存脏集合 + 定时批量提交，读取前先刷盘保证一致。"""
 
-    SCHEMA_VERSION = 1
+    SCHEMA_VERSION = 2           # v2：file_id 主键；旧库直接重建
     TOMBSTONE_LIMIT = 10000
-    COUNTER_LIMIT = 100000       # 计数器行上限（§12.9）：超出后淘汰无引用最旧行
+    COUNTER_LIMIT = 100000       # 计数器行上限：超出后淘汰无引用最旧行
     COUNTER_TRIM_EVERY = 2000    # 累计写入多少计数器行后检查一次上限（限频）
 
     def __init__(self, db_path: str, flush_interval: float = 0.2,
@@ -126,15 +125,17 @@ class StateStorage:
         self._conn = sqlite3.connect(self.db_path, check_same_thread=False)
         self._conn.execute('PRAGMA journal_mode=WAL')
         self._conn.execute('PRAGMA synchronous=NORMAL')
+        self._rebuild_if_outdated()
         self._conn.executescript(_SCHEMA)
         self._conn.execute(
-            'INSERT OR IGNORE INTO meta(key, value) VALUES(?, ?)',
+            'INSERT INTO meta(key, value) VALUES(?, ?) '
+            'ON CONFLICT(key) DO UPDATE SET value=excluded.value',
             ('schema_version', str(self.SCHEMA_VERSION)))
         self._conn.commit()
 
-        self._dirty_files = {}     # rel_path -> record / None(删除)
+        self._dirty_files = {}     # file_id -> record / None(删除)
         self._dirty_tomb = {}      # (rel_path, file_id) -> record
-        self._dirty_counters = {}  # rel_path -> {op_no, clock}
+        self._dirty_counters = {}  # file_id -> {op_no, clock}
         self._dirty_peers = {}     # peer_id -> (first_seen, last_seen)
         self._dirty_meta = {}      # key -> value
 
@@ -146,6 +147,26 @@ class StateStorage:
             self._thread = threading.Thread(target=self._flush_loop,
                                             daemon=True)
             self._thread.start()
+
+    def _rebuild_if_outdated(self):
+        """旧版路径主键库不迁移：低于当前版本时清掉状态表重建。"""
+        try:
+            row = self._conn.execute(
+                'SELECT value FROM meta WHERE key=?',
+                ('schema_version',)).fetchone()
+        except sqlite3.Error:
+            row = None
+        if row is not None:
+            try:
+                if int(row[0]) >= self.SCHEMA_VERSION:
+                    return
+            except (TypeError, ValueError):
+                pass
+        with self._conn:
+            self._conn.executescript(
+                'DROP TABLE IF EXISTS files;'
+                'DROP TABLE IF EXISTS tombstones;'
+                'DROP TABLE IF EXISTS counters;')
 
     # ---- 生命周期 ----
 
@@ -172,13 +193,17 @@ class StateStorage:
             self._dirty_counters, self._dirty_peers, self._dirty_meta = {}, {}, {}
             try:
                 with self._conn:
-                    for path, rec in files.items():
+                    for fid, rec in files.items():
                         if rec is None:
                             self._conn.execute(
-                                'DELETE FROM files WHERE rel_path=?', (path,))
+                                'DELETE FROM files WHERE file_id=?', (fid,))
                             continue
+                        # rel_path 唯一：该路径若残留其他身份的行，以本次写入为准
+                        self._conn.execute(
+                            'DELETE FROM files WHERE rel_path=? AND file_id<>?',
+                            (rec['rel_path'], fid))
                         self._conn.execute(_UPSERT_FILE, (
-                            path, rec.get('file_id'), int(rec.get('is_dir', 0)),
+                            fid, rec['rel_path'],
                             int(rec.get('op_no', 0)), int(rec.get('clock', 0)),
                             float(rec.get('ts') or 0.0),
                             json.dumps(rec.get('vv') or {}, ensure_ascii=False),
@@ -187,17 +212,16 @@ class StateStorage:
                             float(rec.get('updated_at') or time.time())))
                     for (path, fid), rec in tombs.items():
                         self._conn.execute(_UPSERT_TOMBSTONE, (
-                            path, fid, int(rec.get('is_dir', 0)),
-                            rec.get('origin') or 'delete',
+                            path, fid, rec.get('origin') or 'delete',
                             int(rec.get('op_no', 0)), int(rec.get('clock', 0)),
                             float(rec.get('ts') or 0.0),
                             json.dumps(rec.get('vv') or {}, ensure_ascii=False),
                             float(rec.get('deleted_at') or 0.0),
                             json.dumps(list(rec.get('confirmed_by') or []),
                                        ensure_ascii=False)))
-                    for path, rec in counters.items():
+                    for fid, rec in counters.items():
                         self._conn.execute(_UPSERT_COUNTER, (
-                            path, int(rec.get('op_no', 0)),
+                            fid, int(rec.get('op_no', 0)),
                             int(rec.get('clock', 0)), time.time()))
                     for peer_id, seen in peers.items():
                         self._conn.execute(_UPSERT_PEER, (peer_id, seen[0], seen[1]))
@@ -261,9 +285,12 @@ class StateStorage:
     # ---- files ----
 
     def put_file(self, record: dict):
+        """写一条活文件记录；file_id 是主键，缺身份的文件不落库。"""
+        fid = record.get('file_id')
+        if not fid:
+            return
         rec = {
-            'file_id': record.get('file_id') or None,
-            'is_dir': 1 if record.get('is_dir') else 0,
+            'rel_path': record['rel_path'],
             'op_no': int(record.get('op_no') or 0),
             'clock': int(record.get('clock') or 0),
             'ts': float(record.get('ts') or 0.0),
@@ -275,23 +302,35 @@ class StateStorage:
             'updated_at': time.time(),
         }
         with self._lock:
-            self._dirty_files[record['rel_path']] = rec
+            self._dirty_files[fid] = rec
 
-    def remove_file(self, rel_path: str):
+    def remove_file(self, rel_path: str = None, file_id: str = None):
+        """按身份删除活记录；只给路径时立即按路径清理（收敛兜底）。"""
         with self._lock:
-            self._dirty_files[rel_path] = None
+            if file_id:
+                self._dirty_files[file_id] = None
+                return
+            if not rel_path:
+                return
+            for fid, rec in list(self._dirty_files.items()):
+                if rec is not None and rec.get('rel_path') == rel_path:
+                    del self._dirty_files[fid]
+            with self._conn:
+                self._conn.execute(
+                    'DELETE FROM files WHERE rel_path=?', (rel_path,))
 
     def load_files(self) -> dict:
+        """返回活文件清单，按 rel_path 索引（值内含 file_id）。"""
         self.flush()
         with self._lock:
             rows = self._conn.execute(
-                'SELECT rel_path, file_id, is_dir, op_no, clock, ts, vv, hash, '
+                'SELECT rel_path, file_id, op_no, clock, ts, vv, hash, '
                 'hash_state, size, mtime FROM files').fetchall()
         out = {}
-        for (path, fid, is_dir, op_no, clock, ts, vv, hash_, hash_state,
+        for (path, fid, op_no, clock, ts, vv, hash_, hash_state,
              size, mtime) in rows:
             out[path] = {
-                'rel_path': path, 'file_id': fid or '', 'is_dir': int(is_dir),
+                'rel_path': path, 'file_id': fid or '', 'is_dir': 0,
                 'op_no': int(op_no), 'clock': int(clock), 'ts': float(ts or 0.0),
                 'vv': _loads(vv, {}), 'hash': hash_ or '',
                 'hash_state': hash_state or 'none', 'size': size,
@@ -301,20 +340,22 @@ class StateStorage:
 
     # ---- counters ----
 
-    def put_counter(self, rel_path: str, op_no: int, clock: int):
+    def put_counter(self, file_id: str, op_no: int, clock: int):
+        if not file_id:
+            return
         with self._lock:
-            prev = self._dirty_counters.get(rel_path)
+            prev = self._dirty_counters.get(file_id)
             op_no = max(int(op_no), int(prev['op_no']) if prev else 0)
             clock = max(int(clock), int(prev['clock']) if prev else 0)
-            self._dirty_counters[rel_path] = {'op_no': op_no, 'clock': clock}
+            self._dirty_counters[file_id] = {'op_no': op_no, 'clock': clock}
 
     def load_counters(self) -> dict:
         self.flush()
         with self._lock:
             rows = self._conn.execute(
-                'SELECT rel_path, op_no, clock FROM counters').fetchall()
-        return {path: {'op_no': int(op_no), 'clock': int(clock)}
-                for path, op_no, clock in rows}
+                'SELECT file_id, op_no, clock FROM counters').fetchall()
+        return {fid: {'op_no': int(op_no), 'clock': int(clock)}
+                for fid, op_no, clock in rows}
 
     def enforce_counter_limit(self, limit: Optional[int] = None) -> int:
         """计数器超限淘汰：只淘汰既无活对象也无墓碑引用的最旧行。"""
@@ -332,13 +373,13 @@ class StateStorage:
             if excess <= 0:
                 return 0
             cur = self._conn.execute(
-                'DELETE FROM counters WHERE rel_path IN ('
-                'SELECT c.rel_path FROM counters c '
+                'DELETE FROM counters WHERE file_id IN ('
+                'SELECT c.file_id FROM counters c '
                 'WHERE NOT EXISTS (SELECT 1 FROM files f '
-                '                  WHERE f.rel_path=c.rel_path) '
+                '                  WHERE f.file_id=c.file_id) '
                 '  AND NOT EXISTS (SELECT 1 FROM tombstones t '
-                '                  WHERE t.rel_path=c.rel_path) '
-                'ORDER BY c.updated_at ASC, c.rel_path ASC LIMIT ?)',
+                '                  WHERE t.file_id=c.file_id) '
+                'ORDER BY c.updated_at ASC, c.file_id ASC LIMIT ?)',
                 (excess,))
             self._conn.commit()
             removed = max(int(cur.rowcount or 0), 0)
@@ -354,8 +395,7 @@ class StateStorage:
     def put_tombstone(self, record: dict):
         key = (record['rel_path'], record.get('file_id') or '')
         rec = {
-            'rel_path': key[0], 'file_id': key[1],
-            'is_dir': 1 if record.get('is_dir') else 0,
+            'rel_path': key[0], 'file_id': key[1], 'is_dir': 0,
             'origin': record.get('origin') or 'delete',
             'op_no': int(record.get('op_no') or 0),
             'clock': int(record.get('clock') or 0),
@@ -371,15 +411,15 @@ class StateStorage:
         self.flush()
         with self._lock:
             rows = self._conn.execute(
-                'SELECT rel_path, file_id, is_dir, origin, op_no, clock, ts, '
+                'SELECT rel_path, file_id, origin, op_no, clock, ts, '
                 'vv, deleted_at, confirmed_by FROM tombstones').fetchall()
         out = {}
-        for (path, fid, is_dir, org, op_no, clock, ts, vv, deleted_at,
+        for (path, fid, org, op_no, clock, ts, vv, deleted_at,
              confirmed) in rows:
             if origin is not None and org != origin:
                 continue
             out[(path, fid)] = {
-                'rel_path': path, 'file_id': fid, 'is_dir': int(is_dir),
+                'rel_path': path, 'file_id': fid, 'is_dir': 0,
                 'origin': org, 'op_no': int(op_no), 'clock': int(clock),
                 'ts': float(ts or 0.0), 'vv': _loads(vv, {}),
                 'deleted_at': float(deleted_at or 0.0),
@@ -409,7 +449,7 @@ class StateStorage:
         return True
 
     def remove_tombstone(self, rel_path: str, file_id: str = '') -> bool:
-        """删除指定墓碑行（加载时清理缺文件ID的无效删除记录）。"""
+        """删除指定墓碑行（加载时清理无效记录）。"""
         key = (rel_path, file_id or '')
         with self._lock:
             self._dirty_tomb.pop(key, None)

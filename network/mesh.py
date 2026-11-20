@@ -36,6 +36,8 @@ class MeshManager(QObject):
     RECONNECT_MAX = 30.0        # 断线重连最大退避（秒）
     HEARTBEAT_INTERVAL = 2.0    # 网状连接心跳间隔（秒）
     MESH_BROADCAST_TOTAL_TIMEOUT = 2.0  # 单端广播发送总时限（秒）：半开对端不拖慢整个 send_to_all
+    MESH_PEER_SEND_TOTAL_TIMEOUT = 5.0  # 单条点对点发送总时限（秒）：须明显小于判死阈值，
+                                        # 否则对端不读时消息无限占锁、心跳被挤掉而遭判死
     MAX_SILENT_SECONDS = 8.0    # 对端静默判死阈值（秒）：双方均每 2s 发心跳，
                                 # 连续超过该时长收不到对端任何字节（含心跳）即判半开/
                                 # 静默死亡，拆除连接并触发退避重连（防断电/拔线/WiFi
@@ -600,7 +602,9 @@ class MeshManager(QObject):
         if not info:
             return False
         try:
-            return info['send_guard'].send_resumable(info['socket'], data)
+            return info['send_guard'].send_resumable(
+                info['socket'], data,
+                total_timeout=MeshManager.MESH_PEER_SEND_TOTAL_TIMEOUT)
         except Exception:
             return False
 
