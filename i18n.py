@@ -180,6 +180,11 @@ class I18n:
             "export_log": "导出日志",
             "clean_cache_label": "退出时清理缓存",
             "clean_cache_tooltip": "退出当前同步房间时自动清理缓存文件",
+            "room_cache_conflict_title": "房间缓存不一致",
+            "room_cache_conflict_text": "本地保存的房间 {room} 与当前房间不是同一个实例，或缓存状态未知。请选择处理方式：",
+            "room_cache_delete_enter": "删除旧缓存进入",
+            "room_cache_keep_files": "保留旧文件带入",
+            "room_cache_clean_failed": "旧缓存文件删除失败，已取消进入。请关闭占用该目录的程序后重试。",
             # 手动同步
             "manual_sync": "手动同步",
             "manual_sync_operation": "操作",
@@ -607,6 +612,11 @@ class I18n:
             "export_log": "Export Log",
             "clean_cache_label": "Clean on Exit",
             "clean_cache_tooltip": "Automatically clean cache files when leaving the current sync room",
+            "room_cache_conflict_title": "Room Cache Mismatch",
+            "room_cache_conflict_text": "The local cache for room {room} belongs to a different room instance, or its state is unknown. Choose how to proceed:",
+            "room_cache_delete_enter": "Delete Old Cache and Enter",
+            "room_cache_keep_files": "Keep Old Files and Enter",
+            "room_cache_clean_failed": "Failed to delete the old cache files, so entering was cancelled. Close any program using that folder and try again.",
             # Manual sync
             "manual_sync": "Manual Sync",
             "manual_sync_operation": "Operation",

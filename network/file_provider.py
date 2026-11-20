@@ -1,4 +1,5 @@
-"""分布式文件轻量服务（局域网剪切板 - 文件/图片 端到端 TCP 直连）。
+"""
+分布式文件轻量服务（局域网剪切板 - 文件/图片 端到端 TCP 直连）。
 Copyright (c) 2026 Lisselde_E <Lisselde.E@outlook.com>.
 Licensed under the GNU General Public License v3.0.
 """

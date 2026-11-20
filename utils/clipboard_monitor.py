@@ -1,4 +1,5 @@
-"""剪切板监听与分发组件（局域网剪切板 - 文本部分）
+"""
+剪切板监听与分发组件（局域网剪切板 - 文本部分）
 Copyright (c) 2026 Lisselde_E <Lisselde.E@outlook.com>.
 Licensed under the GNU General Public License v3.0.
 """

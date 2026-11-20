@@ -69,6 +69,10 @@ class SyncClient(QObject):
         super().__init__(parent)
         self.room_code = room_code
         self.password = password
+        # 房间实例编号（阶段 D）：认证成功后由 AUTH_RESP 下发
+        self.room_instance_id = ''
+        self._room_instance_id = ''
+        self._inherited_room_instance_id = ''
         self.socket: Optional[socket.socket] = None
         self.running = False
         self.authenticated = False
@@ -79,6 +83,11 @@ class SyncClient(QObject):
         self.host_endpoint: Optional[Endpoint] = None  # 主机端身份（END_INFO 交换结果）
         self.distributor: Optional[Distributor] = None  # 分发链路引擎（认证成功后启动）
         self.file_state_store: Optional[FileStateStore] = None  # 自同步链路（阶段 2，认证后启动）
+        # 房间状态库（阶段 A）：持久化文件清单/计数器/墓碑；None=内存模式
+        self._state_storage = None
+        # 加入决策未定时延迟启动数据面：清缓存/保留文件选择可能改变缓存内容，
+        # 必须等决策完成再扫描残留，避免先广播后被清空或误当新增。
+        self.join_pending = False
         self._file_provider = None   # 本端 FileProvider（UI 注入；会话服务能力）
         self.sync_folder = Config.get_room_folder(room_code)
         self.receiving_files = {}  # 大文件接收状态：{filename: {handle, file_size, mtime, received_size, temp_path}}
@@ -299,6 +308,14 @@ class SyncClient(QObject):
         if self.file_state_store:
             self.file_state_store.stop()
             self.file_state_store = None
+
+        # 关闭房间状态库：务必在退出清缓存（删除 db）之前释放句柄
+        if self._state_storage is not None:
+            try:
+                self._state_storage.close()
+            except Exception:
+                pass
+            self._state_storage = None
 
         # 清理大文件接收状态：关闭句柄、删除临时文件
         # 先在锁内收集所有需要清理的条目，然后在锁外执行 IO 操作
@@ -1089,10 +1106,12 @@ class SyncClient(QObject):
                     # 设置修改时间
                     os.utime(final_file_path, (rf['mtime'], rf['mtime']))
 
-                    # 旧通道直推落盘后补记状态基线：清缓存回归端若只有磁盘文件
-                    # 而无状态条目，后续本地删除的 op_no 会被对端旧知识去重丢弃。
-                    if self.distributor is not None:
-                        self.distributor.record_received(filename, rf['mtime'])
+                    # 阶段 B：主机直推落盘登记 pending，哈希 ok 后才发布 add
+                    if self.mode == "sync" and self.distributor is not None:
+                        try:
+                            self.distributor.register_received_file(filename)
+                        except Exception:
+                            pass
 
                     # 通知接收完成
                     self.file_received.emit(filename)
@@ -1281,6 +1300,37 @@ class SyncClient(QObject):
         except Exception:
             pass
 
+    def _attach_state_storage(self, reconcile: bool = True):
+        """接入房间状态库：打开 db → 挂载 Distributor →（可选）启动磁盘对账。
+
+        失败降级为内存模式（不阻断同步）；storage 由 disconnect() 关闭。
+        """
+        from sync.room_instance import room_db_path
+        from sync.state_storage import open_room_state_storage
+        try:
+            self._state_storage = open_room_state_storage(
+                self.distributor, room_db_path(self.room_code),
+                log=self.log_message.emit, reconcile=reconcile)
+            self.log_message.emit("房间状态库已接入（持久化生效）")
+        except Exception as e:
+            self._state_storage = None
+            self.log_message.emit(f"状态库接入失败，本次运行使用内存模式: {e}")
+
+    def begin_after_join(self, silent_align: bool = False):
+        """加入决策确定后启动数据面（清缓存/保留文件选择完成之后调用）。
+
+        数据面在认证成功后不再自动启动，避免决策前扫描/广播残留；本方法先
+        固定 silent_align，再启动 mesh 链，使 FileStateStore 按最终模式构造。
+        """
+        self.join_pending = False
+        self.silent_align = bool(silent_align)
+        if self.mesh is None:
+            self._start_mesh_and_send_end_info()
+        elif silent_align and self.file_state_store is not None \
+                and not self.file_state_store.aligning:
+            # 兼容数据面已提前启动的路径：落后补开对齐（残留登记而非广播）
+            self.file_state_store.begin_silent_align()
+
     def _ensure_mesh_chain(self):
         """确保数据平面就绪：mesh/distributor/file_state_store（已存在则保留，
         仅 mesh 停止时重新 start）。故障切换重复调用不重建、不重连信号。"""
@@ -1300,13 +1350,22 @@ class SyncClient(QObject):
                 UserConfig.get_end_id(), self.sync_folder,
                 mesh=self.mesh)
             self.distributor.log_message.connect(self.log_message)
+            # 阶段 B：接入哈希队列，落盘文件 pending → 哈希 ok 后才发布 add
+            from sync.file_hasher import FileHasher
+            self.distributor.attach_hasher(
+                FileHasher(log=self.log_message.emit))
+            # 阶段 A：接入房间状态库（打开 db → 挂载 → 启动磁盘对账）。
+            # 静默对齐模式跳过对账：清缓存后的残留由 §8 对准流程裁决。
+            self._attach_state_storage(reconcile=not bool(
+                getattr(self, 'silent_align', False)))
             self.distributor.signal_applied.connect(self._on_distributor_applied)
             self.mesh.set_message_handler(self._on_mesh_message)
             # 自同步链路（阶段 2）：端到端状态对比与拉取；直连建立自动补齐
             self.file_state_store = FileStateStore(
                 UserConfig.get_end_id(), self.sync_folder,
                 mesh=self.mesh, distributor=self.distributor,
-                provider=self._file_provider)
+                provider=self._file_provider,
+                silent_align=bool(getattr(self, 'silent_align', False)))
             # 跨通道互斥（阶段 6）：同一文件被主机直推通道(A)经 FILE_BEGIN..FILE_END
             # 正在接收时，自同步拉取(B)应让位，避免同文件两通道重复投递/字节翻倍。
             self.file_state_store.set_host_push_guard(
@@ -1358,6 +1417,9 @@ class SyncClient(QObject):
             server.file_state_store = self.file_state_store
             server._file_provider = self._file_provider
             server.mode = self.mode
+            # 阶段 D：复用监听同样持有房间编号，供主机探活继承
+            server._room_instance_id = self.room_instance_id
+            server._inherited_room_instance_id = self.room_instance_id
             # H1：向接入本端复用管理监听的"新端"提供真主机信息，令其换接真主机。
             # 用"在线"版本：主机离线期间不把历史地址转发出去，否则新端被引向死地址，
             # 反复换接/断连形成管理面无限切换。
@@ -1418,6 +1480,23 @@ class SyncClient(QObject):
         elif msg_type == MessageType.FILE_STATE_RESP and isinstance(content, dict):
             if self.file_state_store:
                 self.file_state_store.handle_state_resp(end_id, content)
+        elif msg_type == MessageType.TOMBSTONE_REQ and isinstance(content, dict):
+            if self.file_state_store:
+                self.file_state_store.handle_tombstone_req(end_id, content)
+        elif msg_type == MessageType.TOMBSTONE_RESP and isinstance(content, dict):
+            if self.file_state_store:
+                self.file_state_store.handle_tombstone_resp(end_id, content)
+        elif msg_type == MessageType.ROOM_INFO_REQ:
+            try:
+                rid = self.room_instance_id or getattr(
+                    self, '_room_instance_id', '')
+                self.mesh.send_to_peer(
+                    end_id, Protocol.create_room_info(rid))
+            except Exception:
+                pass
+        elif msg_type == MessageType.ROOM_INFO and isinstance(content, dict):
+            self._inherited_room_instance_id = \
+                content.get('room_instance_id') or ''
         elif msg_type == MessageType.CLIPBOARD_NOTIFY_SIGNAL:
             # 阶段 5：投递通知沿网状直连到达（不经主机转发）→ 交 UI 展示远程文件胶囊
             if self.distributor:
@@ -1444,7 +1523,8 @@ class SyncClient(QObject):
                 self.file_state_store.emit_local_missing()
             except Exception:
                 pass
-            self.file_state_store.request_all()
+            # C3：先与该端做墓碑对账，完成后再发起文件状态对账
+            self.file_state_store.start_peer_sync(end_id)
 
     def set_file_provider(self, provider):
         """注入本端 FileProvider（会话服务能力；UI 启动 provider 后调用）。"""
@@ -1633,12 +1713,11 @@ class SyncClient(QObject):
     def _handle_auth_response(self, content: bytes):
         """处理验证响应"""
         try:
-            data = content.decode('utf-8').split(':', 1)
-            state = data[0] if data else ''
-            success = state == '1'
-            message = data[1] if len(data) > 1 else ''
+            info = Protocol.parse_auth_response(content)
+            success = info['ok']
+            message = info['message']
 
-            if state == '2':
+            if info['transient'] and not success:
                 # 暂时不可用（复用监听：主机暂不在）属瞬时态：不得当成永久拒绝，
                 # 也不 latch/停重连，交重连循环稍后重试；重连期静默（待机已有提示）
                 with self._auth_wait:
@@ -1672,6 +1751,9 @@ class SyncClient(QObject):
                         return
                     self._pending_server_identity = None
                 self.authenticated = True
+                self._room_id = info.get('room_id', '')
+                self.room_instance_id = info.get('room_instance_id', '')
+                self._room_instance_id = self.room_instance_id
                 self._perm_auth_denied = False  # 重新认证成功，重置"永久拒绝"提示标记
                 # 通知试连方（_try_attach）认证结果
                 with self._auth_wait:
@@ -1684,7 +1766,10 @@ class SyncClient(QObject):
                 # 确保 mgmt 监听就绪、_mgmt_server 已赋值，再接 connected（UI on_connected
                 # 里会读 mgmt_port() 广播自己的可接入端点）。在 connected.emit() 之后再
                 # 启动会因跨线程 queued 信号产生竞态，UI 可能读到未就绪的端口而回落默认值。
-                self._start_mesh_and_send_end_info()
+                # 加入流程（join_pending）延迟到缓存决策完成：begin_after_join() 再启动，
+                # 否则会先扫描/广播随后可能被清空或保留的残留缓存。
+                if not getattr(self, 'join_pending', False):
+                    self._start_mesh_and_send_end_info()
                 self.connected.emit()
                 # 主机离线期间保持先前只读档位：若主机此刻未下发权限（离线/挂其他端点），
                 # 仍按本机持久化档位落定只读态（禁自同步推送 + UI 只读），不放松成读写。

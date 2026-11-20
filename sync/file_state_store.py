@@ -13,8 +13,8 @@ from PySide6.QtCore import QObject, Signal
 
 from network.protocol import Protocol, MessageType
 from network.file_provider import pull_file, PULL_STALE_DISCARD_MSG, PULL_NO_SPACE_PREFIX
-from sync.vector import (FileState, STATE_ADD, STATE_CHANGE, compare_states,
-                         vv_covers)
+from sync.file_hasher import FileHasher
+from sync.vector import (FileState, STATE_ADD, STATE_CHANGE, compare_states)
 
 
 class FileStateStore(QObject):
@@ -45,7 +45,7 @@ class FileStateStore(QObject):
                            # 发送端 FileProvider 每条连接独立线程，天然并行服务
 
     def __init__(self, end_id: str, sync_folder: str, mesh=None, distributor=None,
-                 provider=None, parent=None):
+                 provider=None, parent=None, silent_align: bool = False):
         super().__init__(parent)
         self.end_id = end_id
         self.sync_folder = os.path.abspath(sync_folder)
@@ -54,6 +54,20 @@ class FileStateStore(QObject):
         self._provider = provider    # 本端 FileProvider（会话服务；None 时可后注入）
         # 阶段 4：只读端不发起自同步推送（回空 entries，不供他端拉取），仅单向下拉
         self._readonly = False
+
+        # 阶段 D：清缓存回归静默对齐。db 已删、目录有残留时，残留只登记在
+        # `_align_residues`，不进 Distributor、不进快照、不广播；与在线对端
+        # 完成一轮对账后按 §8 裁决。
+        self._align_mode = False
+        self._align_residues = {}   # name -> {file_id, hash, size, mtime}
+        self._align_remote = {}     # name -> 本轮对端 FileState
+        self._align_pending = set()  # 对端仍 pending 的路径
+        self._align_sessions = {}   # src_id -> session
+        self._align_sources = {}    # name -> src_id
+        self._align_got_response = False
+        self._align_incomplete = False
+        self._align_hasher = None
+        self._align_timer = None
 
         self._lock = threading.Lock()
         self._sync_tokens = {}   # src_id -> token（自同步会话令牌，每请求方固定）
@@ -67,6 +81,8 @@ class FileStateStore(QObject):
         # 置入在途集合后对账轮 `_enqueue_pull` 命中即跳过，根除重复接收；拉取结束
         # （成败皆然）即移除，后续轮次可再按需补拉。__cond__ 保护。
         self._in_flight = set()
+        # 墓碑对账在途端集合：建连后先分页拉墓碑，完成前不对该端发 FILE_STATE_REQ
+        self._tombstone_pending = set()
         # 在途期间被缓冲的候选槽（name -> slot）：在途窗口内到达的候选不能丢弃——
         # 丢弃即遗忘，只能等下一拍对账（上限 RECONCILE_INTERVAL）才补发，收敛延迟
         # 被对账周期支配。worker 收尾（_in_flight.discard 之后）立即并入 _pulls 重判。
@@ -126,6 +142,111 @@ class FileStateStore(QObject):
         # 周期对账线程（收敛背stop）：分发信号在稳定连接中丢失时，靠它周期触发
         # 端到端状态对比补拉，不依赖断线重连/手动同步。stop() 统一回收。
         threading.Thread(target=self._reconcile_loop, daemon=True).start()
+
+        if silent_align:
+            self.begin_silent_align()
+
+    # ---- 阶段 D：静默对齐 ----
+
+    @property
+    def aligning(self) -> bool:
+        with self._lock:
+            return self._align_mode
+
+    def begin_silent_align(self):
+        """扫描清缓存后残留：只登记待对齐集合，算哈希，不广播不供拉取。"""
+        if self.distributor is None:
+            return
+        residues = {}
+        try:
+            for root, dirs, files in os.walk(self.sync_folder):
+                dirs[:] = [d for d in dirs if not d.startswith('.')]
+                for fn in files:
+                    if fn.startswith('.tcp_') and fn.endswith('.part'):
+                        continue
+                    rel = os.path.relpath(os.path.join(root, fn),
+                                          self.sync_folder).replace('\\', '/')
+                    try:
+                        self._safe_join(rel)
+                    except ValueError:
+                        continue
+                    try:
+                        st = os.stat(self._safe_join(rel))
+                    except OSError:
+                        continue
+                    residues[rel] = {'file_id': uuid.uuid4().hex,
+                                     'hash': '', 'size': int(st.st_size),
+                                     'mtime': float(st.st_mtime)}
+        except OSError:
+            residues = {}
+        with self._lock:
+            if self._align_mode or not residues:
+                return
+            self._align_residues = residues
+            self._align_remote = {}
+            self._align_pending = set()
+            self._align_sessions = {}
+            self._align_sources = {}
+            self._align_got_response = False
+            self._align_incomplete = False
+            self._align_mode = True
+        hasher = FileHasher(callback=self._on_align_hash_done)
+        self._align_hasher = hasher
+        for rel, rec in residues.items():
+            hasher.submit(self._safe_join(rel), rel, rec['file_id'],
+                          kind='align')
+        # 无任何在线对端时，不能无限等待：一轮超时后按本端新增发布。
+        timer = threading.Timer(self.ROUND_TIMEOUT,
+                                self.finalize_offline_alignment)
+        timer.daemon = True
+        self._align_timer = timer
+        timer.start()
+
+    def _on_align_hash_done(self, result: dict):
+        rel = result.get('rel_path', '')
+        with self._lock:
+            rec = self._align_residues.get(rel)
+            if rec is None or not self._align_mode:
+                return
+            if result.get('error') or result.get('changed'):
+                return
+            rec['hash'] = result.get('hash') or ''
+            rec['size'] = int(result.get('size') or rec['size'])
+
+    def wait_align_hashed(self, timeout: float = 5.0) -> bool:
+        """等待残留哈希全部完成（测试/启动同步兜底）。"""
+        deadline = time.time() + timeout
+        while time.time() < deadline:
+            with self._lock:
+                if not self._align_mode:
+                    return True
+                pending = [r for r in self._align_residues.values()
+                           if not r.get('hash')]
+            if not pending:
+                return True
+            time.sleep(0.02)
+        return False
+
+    def finalize_offline_alignment(self):
+        """无在线对端兜底：残留视为本端新增并发布。"""
+        with self._lock:
+            if not self._align_mode or self._align_got_response:
+                return
+        # 仍有直连对端（只是尚未应答）不算离线：续超时等待，避免提前发布残留
+        try:
+            connected = self.mesh.connected_end_ids() if self.mesh else set()
+        except Exception:
+            connected = set()
+        if connected:
+            timer = threading.Timer(self.ROUND_TIMEOUT,
+                                    self.finalize_offline_alignment)
+            timer.daemon = True
+            with self._lock:
+                if self._align_mode:
+                    self._align_timer = timer
+            timer.start()
+            return
+        self._finalize_alignment(offline=True)
 
     # ---- 注入 ----
 
@@ -223,29 +344,45 @@ class FileStateStore(QObject):
         return removed
 
     def snapshot(self) -> list:
-        """本端文件状态（wire 格式）。
+        """本端活对象快照（wire 格式）；删除信息只经 TOMBSTONE_RESP 下发。
 
-        - 已删除条目（exists=False）也导出：对端据此补收删除或收敛清理
-          （计划：本地与对端均为 CHANGE 且已删 → 删除条目，防列表无限变长）
-        - 存在且为文件的条目导出：拉取只对文件字节
-        - 存在但为目录的条目不导出：避免对端尝试拉取目录而失败
+        - 只导出 exists=True 的活对象（文件与目录）
+        - 哈希未完成的文件暂不导出（不作为同步对象/拉取源）
+        - 传输临时文件不入快照
         """
         if self.distributor is None:
             return []
         out = []
         for st in self.distributor.states().values():
             if not st.exists:
-                out.append(st.to_wire_dict())
                 continue
+            if st.hash_state == 'pending' \
+                    and self.distributor.hash_gate_active():
+                continue  # 阶段 B：哈希未完成，不作为同步对象下发给对端
             if self._is_transient_temp(st.name):
                 continue  # 传输临时文件不入快照（防对端当作缺失文件来回拉取）
             try:
-                if not os.path.isfile(self._safe_join(st.name)):
+                path = self._safe_join(st.name)
+                if st.is_dir or (st.hash_state == 'none' and not st.file_id):
+                    if not os.path.isdir(path):
+                        continue
+                elif not os.path.isfile(path):
                     continue
             except ValueError:
                 continue
             out.append(st.to_wire_dict())
         return out
+
+    def _pending_count(self) -> int:
+        """仍待哈希的活对象数（文件）；非 0 时快照缺失不可作为删除确认。"""
+        if self.distributor is None:
+            return 0
+        n = 0
+        for st in self.distributor.states().values():
+            if st.exists and st.hash_state == 'pending' \
+                    and not self._is_transient_temp(st.name):
+                n += 1
+        return n
 
     def _local_dirs(self) -> list:
         """本端存在的目录相对路径清单（空目录对账兜底的比对基准）。
@@ -287,7 +424,7 @@ class FileStateStore(QObject):
             try:
                 self.mesh.send_to_peer(
                     end_id, Protocol.create_file_state_resp(
-                        self.end_id, [], session=None))
+                        self.end_id, [], session=None, scan_complete=False))
             except Exception as e:
                 self.log_message.emit(f"文件状态响应失败: {e}")
             return
@@ -323,10 +460,14 @@ class FileStateStore(QObject):
                     'port': provider.port,
                 }
         try:
+            with self._lock:
+                aligning = self._align_mode
             self.mesh.send_to_peer(
                 end_id, Protocol.create_file_state_resp(
                     self.end_id, self.snapshot(), session=session,
-                    dirs_missing=self._missing_dirs_from(content)))
+                    dirs_missing=self._missing_dirs_from(content),
+                    scan_complete=not aligning,
+                    pending_count=self._pending_count()))
         except Exception as e:
             self.log_message.emit(f"文件状态响应失败: {e}")
 
@@ -359,9 +500,31 @@ class FileStateStore(QObject):
         entries = content.get('entries') or []
         src_id = content.get('src_id') or end_id
         session = content.get('session')
+        # 阶段 D：静默对齐期间只累计对端状态，轮到收口时统一裁决
+        with self._lock:
+            if self._align_mode:
+                self._align_got_response = True
+                if (not content.get('scan_complete', True)
+                        or int(content.get('pending_count') or 0) > 0):
+                    self._align_incomplete = True
+                if session is not None:
+                    self._align_sessions[src_id] = session
+                for d in entries:
+                    if not isinstance(d, dict):
+                        continue
+                    name = d.get('name', '')
+                    if name not in self._align_residues:
+                        continue
+                    remote = FileState.from_wire_dict(src_id, d)
+                    self._align_remote[name] = remote
+                    self._align_sources[name] = src_id
+                    if remote.hash_state != 'ok' or not remote.hash:
+                        self._align_pending.add(name)
+                    else:
+                        self._align_pending.discard(name)
         has_diff = False
         exists_claim = set()  # 本响应端声明「存在」的路径（在线闸门判据）
-        deleted_claim = set()  # 本响应端「明确声明已删除」的路径（在线闸门判据）
+        remote_keys = set()   # 对端活对象 (path, id) 集合（删除确认判据）
         for d in entries:
             if not isinstance(d, dict):
                 continue
@@ -369,9 +532,23 @@ class FileStateStore(QObject):
             if not name:
                 continue
             remote = FileState.from_wire_dict(src_id, d)
+            remote_keys.add((name, remote.file_id or ''))
+            # C3：仅用对端 vv 抬本端计数器地板，不并入状态表 vv
+            raw_vv = d.get('vv')
+            if isinstance(raw_vv, dict):
+                try:
+                    base = int(raw_vv.get(self.end_id, 0) or 0)
+                except (TypeError, ValueError):
+                    base = 0
+                if base > 0:
+                    self.distributor.recover_floor(name, base)
             try:
                 local_exists = os.path.exists(self._safe_join(name))
             except ValueError:
+                continue
+            # 目录只参与存在声明与目录对账，不触发文件拉取
+            if remote.is_dir:
+                exists_claim.add(name)
                 continue
             # 冲突覆盖拉取（阶段 3）：信号路径裁决覆盖后，此 RESP 为取会话的应答
             with self._lock:
@@ -380,66 +557,63 @@ class FileStateStore(QObject):
                     self._pending_conflicts.pop(name, None)
                 else:
                     pend = None
-            if pend and remote.exists and session is not None \
-                    and self._source_byte_fresh(remote):
+            if pend and session is not None and remote.hash_state == 'ok' \
+                    and remote.hash:
                 # 冲突覆盖：仲裁已判 src_id 胜，force 覆盖版本槽（无视列表内旧槽）
-                if not self._state_delete_wins(name, remote, src_id):
-                    if self._enqueue_pull(name, src_id, remote, session, force=True):
-                        has_diff = True
-            if remote.exists:
-                exists_claim.add(name)  # 对端仍持有该路径 → 保留本端墓碑（在线闸门）
-                # 对端有该文件：本端缺失 → 入拉取队列（同文件排队去重）
-                if not local_exists:
-                    # 状态表已删除且删除版本严格胜出 → 该候选是过期 add，
-                    # 不入队（防删除-拉取-再删震荡）
-                    if self._state_delete_wins(name, remote, src_id):
-                        self.log_message.emit(
-                            f"忽略拉取 {name}: 本端已删除且版本更新")
-                        continue
-                    # 仅从持有胜者字节的可信源补拉（字节指纹 == 知识版本），
-                    # 拒绝陈旧字节端（bclk=0/指纹失配）→ 防装陈旧字节来回拉取
-                    if self._source_byte_fresh(remote) \
+                if not self._tombstone_blocks(name, remote.file_id) \
+                        and self._enqueue_pull(name, src_id, remote, session,
+                                               force=True):
+                    has_diff = True
+            exists_claim.add(name)  # 对端仍持有该路径 → 保留本端墓碑（在线闸门）
+            # 对端有该文件：本端缺失 → 入拉取队列（同文件排队去重）
+            if not local_exists:
+                if self._tombstone_blocks(name, remote.file_id):
+                    self.log_message.emit(f"忽略拉取 {name}: 本端已有该 ID 墓碑")
+                    continue
+                # 仅从哈希已算好的源补拉（待哈希条目不提供可信内容）
+                if remote.hash_state == 'ok' and remote.hash \
+                        and self._enqueue_pull(name, src_id, remote, session):
+                    has_diff = True
+            # 本端已有：冲突收敛（阶段 3）——远端胜出或本端为未验证副本才拉取
+            else:
+                local_st = self.distributor.get_state(name)
+                if (local_st is not None and session is not None
+                        and remote.hash_state == 'ok' and remote.hash):
+                    # §5.2 同 path 同 hash 不同 ID：先合并身份（静默幂等），
+                    # 否则 ADD 信号可能被 vv 去重跳过，两端 ID 长期分叉，
+                    # 后续删除信号会被“精确 ID 匹配”误判为过期而无法收敛。
+                    if (local_st.exists and local_st.hash_state == 'ok'
+                            and local_st.hash
+                            and local_st.hash == remote.hash
+                            and local_st.file_id and remote.file_id
+                            and local_st.file_id != remote.file_id
+                            and not self.distributor.has_tombstone(
+                                name, remote.file_id)):
+                        if self.distributor.merge_remote_identity(name, remote):
+                            has_diff = True
+                        local_st = self.distributor.get_state(name)
+                    cmp = compare_states(remote, local_st, src_id, self.end_id)
+                    # 同版本但本端 hash 未验证（无内容证据）→ 以对端为准补拉
+                    # （计划书 §6：未验证副本一律按对端内容校正，防元数据先到、
+                    #  字节未到后信号被去重而永久分叉）
+                    if (cmp == 1 or (cmp == 0
+                                     and local_st.hash_state != 'ok')) \
+                            and (not local_st.hash
+                                 or local_st.hash != remote.hash) \
+                            and not self._tombstone_blocks(name, remote.file_id) \
                             and self._enqueue_pull(name, src_id, remote, session):
                         has_diff = True
-                # 本端已有：冲突收敛（阶段 3）——三层裁决远端胜出则拉取覆盖
-                else:
-                    local_st = self.distributor.get_state(name)
-                    if (local_st is not None and session is not None
-                            and self._source_byte_fresh(remote)
-                            and compare_states(remote, local_st, src_id,
-                                               self.end_id) == 1):
-                        if self._enqueue_pull(name, src_id, remote, session):
-                            has_diff = True
-                    # C 兜底（竞态修正）：知识 vv 胜于 bytes_vv 且无在途槽 →
-                    # 强制补拉胜者字节。覆盖两类残留：① 胜者信号被 pulled 回执
-                    # 提前合并（vv 已覆盖 → 信号去重、永不触发冲突拉取）；
-                    # ② 低版本槽迟到落盘回退覆盖胜者字节（_do_pull 落盘前裁决
-                    # 之外的漏网）。仅当响应端条目与本地仲裁胜者指纹（clock/ts）
-                    # 一致且本端尚无其字节时补拉，避免反复重拉败者版本。
-                    elif (session is not None
-                          and self._need_bytes_backfill(name, local_st,
-                                                        remote)):
-                        if self._enqueue_pull(name, src_id, remote, session,
-                                              force=True):
-                            has_diff = True
-            else:
-                # 对端条目已删除：本端存在 → 补收删除（断网期间删除指令未达）。
-                # 仅当对端条目确为「变更（已删）」才补删——对端若是「add 信号
-                # 已应用、字节未拉取」的待命态（ADD + exists=False），本端文件
-                # 不应被误删，否则删除-拉取震荡。
-                if remote.state == STATE_CHANGE:
-                    deleted_claim.add(name)  # 对端明确确认该路径已删除
-                    if local_exists:
-                        self._apply_remote_delete(name, src_id, remote)
-                        has_diff = True
-                # 收敛清理改由本轮收口统一执行（_cleanup_converged）：须等本轮
-                # 所有直连端应答且无人再声明该路径存在、且确有对端明确确认该
-                # 路径已删除，避免「对端沉默」被误当作「对端已删」而清理墓碑，
-                # 导致离线端回归时陈旧 add 复活已删内容。
+        # 删除确认：仅在快照完整（扫描完成且无待哈希）时，缺失的 id 才算已删
+        if bool(content.get('scan_complete')) \
+                and int(content.get('pending_count') or 0) == 0:
+            for t in self.distributor.wire_tombstones():
+                key = (t.get('rel_path', ''), t.get('file_id') or '')
+                if key[0] and key not in remote_keys:
+                    self.distributor.confirm_tombstone(key[0], key[1], src_id)
         with self._lock:
             if self._round_targets is not None:
                 self._round_exists_claim |= exists_claim
-                self._round_deleted_claim |= deleted_claim
+                self._round_deleted_claim |= set()
         # 空目录对账兜底（26.9C2）：对端回「我有你无」的目录 → 本端补建并扩散。
         # 判定全在本地（删除优先/祖先已删/同名文件），不用对端信号的时间戳，
         # 避免复活本端已删目录。
@@ -485,41 +659,40 @@ class FileStateStore(QObject):
 
     def _slot_from_remote(self, name: str, src_id: str, remote: FileState,
                           session) -> dict:
-        """由远端状态构造拉取槽（含源端磁盘字节指纹与自同步会话）。"""
+        """由远端状态构造拉取槽（目标身份 + 哈希 + 大小 + 自同步会话）。"""
         return {
             'name': name,
             'end_id': src_id,
             'op_no': remote.op_no,
             'clock': remote.clock,
             'ts': remote.ts,
-            'bytes_clock': remote.bytes_clock,
-            'bytes_ts': remote.bytes_ts,
+            'id': remote.file_id,
+            'hash': remote.hash,
+            'size': int(remote.size or 0),
             'session': dict(session) if isinstance(session, dict) else None,
         }
 
     @staticmethod
-    def _slot_as_state(slot: dict) -> FileState:
-        """拉取槽 → 比较用 FileState（单源 vv = {槽端: op_no}）。"""
-        return FileState(
-            name=slot['name'], op_no=int(slot['op_no'] or 0),
-            state=STATE_ADD, exists=True,
-            clock=int(slot.get('clock', 0) or 0),
-            ts=float(slot.get('ts', 0.0) or 0.0),
-            vv={slot['end_id']: int(slot['op_no'] or 0)})
+    def _slot_key(slot: dict) -> tuple:
+        """拉取目标身份：id + hash + size（C3 去重口径）。"""
+        return (slot.get('id') or '', slot.get('hash') or '',
+                int(slot.get('size') or 0))
 
     def _merge_slot_locked(self, cand: dict) -> bool:
-        """候选槽并入拉取队列（调用方须持 _cond）：每文件仅一个槽，候选严格
-        胜出才覆盖，否则抛弃。Returns: True=槽被新建或升级。"""
+        """候选槽并入拉取队列（调用方须持 _cond）：每文件仅一个槽。
+
+        同一目标（id+hash+size 相同）不重复入队；不同目标按 (clock, ts)
+        择新者，避免迟到败者顶掉已入队的胜者版本。
+        """
         name = cand['name']
         prev = self._pulls.get(name)
         if prev is not None:
-            # compare_states(prev, cand)：1=现有槽胜 / -1=候选胜 / 0=收敛
-            # force 亦同：候选胜才覆盖——防「迟到败者版本顶掉已入队的胜者
-            # 版本」的覆盖拉取通道竞态（本环境 45s 超时复现过）
-            if compare_states(self._slot_as_state(prev),
-                              self._slot_as_state(cand),
-                              prev['end_id'], cand['end_id']) >= 0:
-                return False  # 现有槽不旧于新候选 → 抛弃新候选
+            if self._slot_key(prev) == self._slot_key(cand):
+                return False  # 同一对象同一内容：已在队，去重
+            if (int(prev.get('clock', 0) or 0), float(prev.get('ts', 0.0) or 0.0)) \
+                    >= (int(cand.get('clock', 0) or 0),
+                        float(cand.get('ts', 0.0) or 0.0)):
+                return False
         self._pulls[name] = cand
         # notify_all：一轮对比可能一次入队多个文件，多个等待 worker 可同时取件
         self._cond.notify_all()
@@ -553,6 +726,11 @@ class FileStateStore(QObject):
                     return False
             except Exception:
                 pass
+        # 阶段 B 门禁：本端该路径仍 pending（哈希未完成）→ 不参与同步，跳过拉取
+        if self.distributor is not None \
+                and self.distributor.is_hash_pending(name):
+            self.log_message.emit(f"跳过拉取 {name}: 本地哈希未完成")
+            return False
         # 阶段 5 冷却门：源端明确「没有此文件」且处于冷却中、候选版本未更新 →
         # 拦截入队，打断对账轮反复重拉同一文件（防空转/刷 UI/刷日志）。冷却到期
         # 或候选为更高版本（源端真的重新产出）则自动放行，不永久丢弃真实文件。
@@ -570,123 +748,29 @@ class FileStateStore(QObject):
                 # worker 收尾时立即并入队列重判。多个候选只保留更优者。
                 cand = self._slot_from_remote(name, src_id, remote, session)
                 held = self._pull_deferred.get(name)
-                if held is None or compare_states(
-                        self._slot_as_state(cand), self._slot_as_state(held),
-                        cand['end_id'], held['end_id']) == 1:
-                    self._pull_deferred[name] = cand  # 候选严格胜出 → 替换待办
+                if held is None or (
+                        int(cand.get('clock', 0) or 0),
+                        float(cand.get('ts', 0.0) or 0.0)) > (
+                        int(held.get('clock', 0) or 0),
+                        float(held.get('ts', 0.0) or 0.0)):
+                    self._pull_deferred[name] = cand  # 候选更新 → 替换待办
                 return False
             return self._merge_slot_locked(
                 self._slot_from_remote(name, src_id, remote, session))
 
-    def _apply_remote_delete(self, name: str, src_id: str, remote: FileState):
-        """补收删除：构造 delete 信号走分发链路应用（含防回声转发与状态合并）。"""
-        signal = {
-            'src_id': src_id,
-            'op_no': remote.op_no,
-            'op': 'delete',
-            'file': name,
-            'state': remote.state,
-            'clock': remote.clock,
-            'ts': remote.ts,
-        }
-        self.distributor.on_signal(signal)
-        self.log_message.emit(f"补收删除: {name}")
+    def _tombstone_blocks(self, name: str, file_id: str) -> bool:
+        """本端是否存在压制该目标的删除墓碑（同 ID 或目录墓碑）。"""
+        if self.distributor is None:
+            return False
+        if file_id and self.distributor.has_tombstone(name, file_id):
+            return True
+        return self.distributor.has_tombstone(name, '')
 
     def _cleanup_entry(self, name: str):
         """双方均已删除：移除本端条目（防列表无限变长）。"""
         if self.distributor is not None:
             self.distributor.remove_state(name)
             self.log_message.emit(f"状态条目收敛移除: {name}")
-
-    def _need_bytes_backfill(self, name: str, local_st, remote: FileState) -> bool:
-        """C 兜底判定：知识 vv 严格胜于 bytes_vv 且无在途槽 → 补拉胜者字节。
-
-        条件（防反复重拉败者版本/空转）：
-        - 知识 vv 已覆盖 bytes_vv（存在已应用但字节未到位或被回退覆盖的版本）
-         且 bytes_vv 未覆盖知识（确实有版本缺口）；
-        - 该文件无在途槽（_pulls）且无待命冲突拉取（_pending_conflicts）；
-        - 响应端条目与本地仲裁胜者指纹（clock/ts）一致——仅补拉真正胜者，
-          不拉败者版本（避免回退）；
-        - 字节指纹判定（防交叉反复重拉）：文件存在且本端字节指纹 == 状态表
-          胜者指纹 → 本端字节已是仲裁胜者内容，无需补拉。各端 emit_pulled
-          每次自增本端 op_no 并广播回执，对端快照版本号其他端永远「没见过」
-          （bytes_vv 覆盖判定恒为缺口），若仅靠 bytes_vv 覆盖判定会对账轮
-          反复交叉补拉同一内容；指纹一致即证明内容已对，与对端快照版本无关。
-          指纹不一致（字节确非胜者内容）才回退到 bytes_vv 覆盖判定。
-        """
-        if local_st is None or not remote.exists:
-            return False
-        with self._cond:
-            if name in self._pulls or name in self._pending_conflicts:
-                return False
-        if not vv_covers(local_st.vv, local_st.bytes_vv):
-            return False
-        if vv_covers(local_st.bytes_vv, local_st.vv):
-            return False
-        if remote.clock != local_st.clock \
-                or abs(remote.ts - local_st.ts) > 1e-6:
-            return False
-        # 仅从「磁盘字节 == 其知识版本」的可信源补拉：知识指纹（clock/ts）全网
-        # 收敛后每端都相同，即使字节各异（各自陈旧内容）——只看知识会把陈旧
-        # 字节端也当作可信源，多端互相拉取陈旧字节、胜者内容被覆盖销毁 →
-        # 来回拉取震荡。字节指纹失配 → 该端磁盘不是胜者内容，拒绝补拉。
-        # 字节指纹必须严格匹配（不允许 bytes_clock=0 降级放行）：本版本所有
-        # 写/拉路径都会设置字节指纹，0 只可能是「从未写过也从未成功拉取」的
-        # 陈旧磁盘端——降级放行会把其陈旧字节当作可信源，覆盖销毁胜者内容。
-        if remote.bytes_clock != remote.clock \
-                or abs(remote.bytes_ts - remote.ts) > 1e-6:
-            return False
-        # 字节指纹一致 → 本端磁盘已是胜者内容，无需补拉（无论对端快照版本）
-        if local_st.bytes_clock and local_st.bytes_clock == local_st.clock \
-                and abs(local_st.bytes_ts - local_st.ts) <= 1e-6:
-            try:
-                if os.path.exists(self._safe_join(name)):
-                    return False
-            except ValueError:
-                return False
-        return not vv_covers(local_st.bytes_vv, remote.vv)
-
-    @staticmethod
-    def _source_byte_fresh(remote: FileState) -> bool:
-        """拉取源是否持有仲裁胜者字节（字节可信源判定）。
-
-        知识指纹（clock/ts）全网收敛后每端相同，即使字节各异（各自陈旧内容）——
-        只看知识会把陈旧字节端也当作可信源，多端互相拉取陈旧字节、胜者内容被
-        覆盖销毁 → 来回拉取震荡。仅当源端磁盘字节指纹 == 其知识版本（clock/ts）
-        时，其字节才是仲裁胜者内容，可作拉取源。所有写/拉路径都会设置字节指纹
-        （emit/emit_pulled），bytes_clock=0 只可能是「从未写过也从未成功拉取」
-        的陈旧磁盘端；字节指纹失配则是「知识推进、字节未到位」的中间态。
-        """
-        return bool(remote.bytes_clock) and remote.bytes_clock == remote.clock \
-            and abs(remote.bytes_ts - remote.ts) <= 1e-6
-
-    def _state_delete_wins(self, name: str, cand: FileState, cand_end: str) -> bool:
-        """状态表已删除且删除版本严格胜于候选 → 忽略该候选的拉取/落盘。
-
-        防「删除 → 对账拉到过期 add → 复活 → 下轮再删」震荡：对端快照可能是
-        删除信号到达前生成的过期数据，本端状态表若已记录更高版本的删除，则
-        候选 add 不应再入队拉取或落盘。候选严格更新（对端确实重新添加）时
-        compare_states 判候选胜，返回 False，正常拉取覆盖。
-
-        Args:
-            cand: 候选拉取条目（对端 add 版本）
-            cand_end: 候选归属端（用于冲突仲裁末位裁决）
-        """
-        st = self.distributor.get_state(name) if self.distributor else None
-        if st is None or st.exists:
-            return False
-        if st.state != STATE_CHANGE:
-            # exists=False 但状态是 ADD：这是"add 信号已应用、字节尚未拉取"的
-            # 拉取待命态，不是删除。其 vv 可能已合并其他端 emit_pulled 回执
-            # 知识而"覆盖"候选，误判删除胜出会拦截正常缺失拉取。仅真正删除
-            # （STATE_CHANGE + exists=False）才参与删除胜出裁决。
-            return False
-        # 本地删除条目的归属端：取 vv 中 op_no 最大的源端（删除发起端，
-        # 仅用于末位裁决兜底；常规路径由 vv/clock/ts 层判定）
-        st_end = self.end_id
-        if st.vv:
-            st_end = max(st.vv, key=lambda k: st.vv[k])
-        return compare_states(st, cand, st_end, cand_end) == 1
 
     def _ancestor_deleted(self, name: str) -> bool:
         """目标路径的任一祖先目录在本端已删除（墓碑）→ 不应再落盘。
@@ -698,8 +782,13 @@ class FileStateStore(QObject):
             return False
         parts = name.split('/')
         for i in range(1, len(parts)):
-            st = self.distributor.get_state('/'.join(parts[:i]))
-            if st is not None and not st.exists and st.state == STATE_CHANGE:
+            anc = '/'.join(parts[:i])
+            st = self.distributor.get_state(anc)
+            if st is not None:
+                if not st.exists and st.state == STATE_CHANGE:
+                    return True
+                continue
+            if self.distributor.has_tombstone(anc, ''):
                 return True
         return False
 
@@ -741,6 +830,10 @@ class FileStateStore(QObject):
         """
         if self.distributor is None or self._readonly:
             return 0
+        with self._lock:
+            if self._align_mode:
+                # 静默对齐期间残留不得当作新增广播（§8）
+                return 0
         if exclude_dirs is None:
             exclude_dirs = set()
         count = 0
@@ -773,8 +866,10 @@ class FileStateStore(QObject):
                         self._safe_join(rel)
                     except ValueError:
                         continue
-                    if self.distributor.get_state(rel) is not None:
-                        continue  # 状态表已有条目（存在/已删）→ 不重复 emit
+                    if (self.distributor.get_state(rel) is not None
+                            or self.distributor.tombstone_for_path(rel)):
+                        # 状态表已有条目（存在/已删）或墓碑压制（删除残留）→ 不复活
+                        continue
                     self.distributor.emit('add', rel)
                     count += 1
         except OSError:
@@ -841,77 +936,19 @@ class FileStateStore(QObject):
                 self._file_locks[name] = lk
             return lk
 
-    def _is_pull_fresh(self, name: str, item: dict) -> bool:
-        """本份在途拉取版本是否仍应由本份落盘。
+    def _slot_stale(self, name: str, item: dict) -> bool:
+        """槽是否已过时：本端状态版本严格新于槽目标版本（计划书 §9.2）。
 
-        判定只对照列表（`_pulls`），不碰状态表——状态表 vv 是"已应用信号的分发
-        知识"，不等同"字节已到位"；若以状态表判过时，会误丢弃分态仍需要的字节。
-
-        item 已从列表弹出（在途）。若期间列表又入队了该文件**严格更高**的槽，
-        则本份过时（返回 False）→ 抛弃，交由更高版本槽收敛，避免旧版本回退
-        覆盖新版本。列表无更高槽（无槽 / 同版本）→ 本份新鲜，正常落盘。
-        """
-        with self._cond:
-            other = self._pulls.get(name)
-            if other is None:
-                return True
-            other_st = FileState(
-                name=name, op_no=int(other['op_no'] or 0), state=STATE_ADD,
-                exists=True, clock=int(other.get('clock', 0) or 0),
-                ts=float(other.get('ts', 0.0) or 0.0),
-                vv={other['end_id']: int(other['op_no'] or 0)})
-            item_st = FileState(
-                name=name, op_no=int(item['op_no'] or 0), state=STATE_ADD,
-                exists=True, clock=int(item.get('clock', 0) or 0),
-                ts=float(item.get('ts', 0.0) or 0.0),
-                vv={item['end_id']: int(item['op_no'] or 0)})
-            # compare_states(other, item)：1=列表槽严格更新 → 本份过时；否则应用
-            return compare_states(other_st, item_st, other['end_id'],
-                                  item['end_id']) != 1
-
-    def _pull_stale_by_state(self, name: str, item: dict) -> bool:
-        """状态表仲裁胜者严格胜于本份在途版本 → 本份过时，应丢弃。
-
-        竞态修正（三端并发改同一文件时低版本槽迟到落盘回退覆盖胜者字节）：
-        只比较第二/三层（逻辑钟、时间戳）——第一层 vv 会被 pulled 回执虚增
-        知识，直接对照会误丢「唯一字节源」的合法拉取；而状态表的 clock/ts
-        经 _store 取最大值合并，等于当前仲裁胜者的指纹。本份的 (clock, ts)
-        低于胜者 → 已收敛到更新版本，旧字节落盘即回退，丢弃交由胜者版本收敛；
-        与本份同指纹（同版本/待拉同版本）→ 不过时，正常落盘。
+        内容证据（hash）无法识别「源端真实持有旧内容」的迟到槽——旧槽的
+        hash 与源端字节相符，落盘会回退本端已推进的胜者字节，且会被
+        emit_pulled 以胜者版本钳制，污染状态表 hash。故以 (clock, ts) 版本
+        为准；同版本槽（含本端 hash 未定）不判过时，交由落盘后 hash 校验兜底。
         """
         st = self.distributor.get_state(name) if self.distributor else None
-        if st is None:
+        if st is None or not st.exists:
             return False
-        cand_clock = int(item.get('clock', 0) or 0)
-        cand_ts = float(item.get('ts', 0.0) or 0.0)
-        if st.clock != cand_clock:
-            return st.clock > cand_clock
-        if st.ts != cand_ts:
-            return st.ts > cand_ts
-        return False
-
-    def _mark_bytes_unknown(self, name: str):
-        """把本端字节知识清零（bytes_clock/bytes_ts/bytes_vv）：磁盘内容不可信时的兜底。
-
-        并发拉取迟到败者落盘后，磁盘字节已非仲裁胜者内容——清零字节指纹使
-        本端不再被 _source_byte_fresh 判定为可信拉取源（不会把败者字节散布
-        全网），对账 backfill 据此从字节新鲜的端补拉当前胜者覆盖收敛。
-
-        必须连同清空 bytes_vv：bytes_vv 声称持有胜者版本字节，仅清指纹时
-        _need_bytes_backfill（末行 bytes_vv 覆盖判定）与 _do_pull 去重会误判
-        「本端已持有胜者字节」而永久跳过补拉——磁盘停在败者字节且不自愈
-        （仅两端、无第三方字节副本时永久分叉）。清空后重拉成功，emit_pulled
-        以空 prev_bytes 重新写入 bytes_vv，闸门重新闭合，不无限重拉。
-        """
-        if self.distributor is None:
-            return
-        st = self.distributor.get_state(name)
-        if st is None:
-            return
-        with self.distributor._lock:
-            st.bytes_clock = 0
-            st.bytes_ts = 0.0
-            st.bytes_vv = {}
+        return (int(st.clock or 0), float(st.ts or 0.0)) > (
+            int(item.get('clock', 0) or 0), float(item.get('ts', 0.0) or 0.0))
 
     def _do_pull(self, item: dict):
         name = item['name']
@@ -919,20 +956,14 @@ class FileStateStore(QObject):
         if not session:
             self.log_message.emit(f"拉取 {name}: 对端未提供会话")
             return
-        # 应用前裁决（IO 前）：仲裁已推进到更高版本 → 本份过时，直接抛弃该槽
-        if not self._is_pull_fresh(name, item) \
-                or self._pull_stale_by_state(name, item):
-            self.log_message.emit(f"拉取 {name} 已过时，抛弃该槽")
-            return
-        # 删除优先（IO 前）：本端已记录删除该文件、或其祖先目录已删除 → 不落盘。
-        # 否则会在已删目录内写 .part（占用致后续删除 WinError 32、删除知识丢失），
-        # 并连带重建已删目录（幽灵目录/幽灵文件）。
+        # 删除优先（IO 前）：本端已有该 ID 墓碑、或其祖先目录已删除 → 不落盘
         cand = FileState(
             name=name, op_no=int(item['op_no'] or 0), state=STATE_ADD,
             exists=True, clock=int(item.get('clock', 0) or 0),
             ts=float(item.get('ts', 0.0) or 0.0),
-            vv={item['end_id']: int(item['op_no'] or 0)})
-        if self._state_delete_wins(name, cand, item['end_id']) \
+            vv={item['end_id']: int(item['op_no'] or 0)},
+            file_id=item.get('id') or '')
+        if self._tombstone_blocks(name, cand.file_id) \
                 or self._ancestor_deleted(name):
             self.log_message.emit(f"拉取 {name} 跳过: 本端已删除")
             self.pull_done.emit(name, False)
@@ -949,42 +980,24 @@ class FileStateStore(QObject):
         except ValueError as e:
             self.log_message.emit(f"拒绝非法路径: {e}")
             return
-        # 去重（IO 前）：本端字节已覆盖该候选版本 → 不再拉取。覆盖两类重复入队：
-        # ① 加入时「模式下发 + 直连建立」两次 request_all 各回一份 RESP，第二份在
-        # 第一份拉取在途期间被记入 _pull_deferred、收尾并入队列后又被拉一次；
-        # ② 大文件在途跨过对账拍，同一缺失被再次判定入队。仅认字节指纹覆盖
-        # （bytes_vv），知识覆盖但字节未到位（backfill 待补）不在此列照常拉取；
-        # 文件被删时 os.path.exists 兜底放行，不影响正常补拉。
+        # 去重（IO 前）：本端已持有该内容（id+hash+size 全部一致才跳过）
         st = self.distributor.get_state(name) if self.distributor else None
-        # 同一内容版本会被多个对端各公告一次（空白端回归、新端加入时每个对端
-        # 各回一份 RESP），同一文件因此会入队多次。第一份拉取落盘后，bytes_vv
-        # 只含「首份来源」的分量，第二份来源的 vv 分量不被覆盖 → 仅凭 vv 去重
-        # 会漏判（同源重复能去重、异源重复漏掉），把同一份字节再从另一个端
-        # 完整拉一遍。故补充「本端字节已认证为该版本」判据：
-        #   · bytes_clock == clock：本端磁盘字节已被认证为当前知识版本
-        #     （本地写入显式置等；拉取落盘仅当源端字节指纹 == 胜者版本才置等，
-        #      否则不等；字节不可信时被 _mark_bytes_unknown 清零 → 不等）；
-        #   · 候选版本 (clock, ts) 与本端知识版本一致 → 要拉的就是这一版。
-        # 两者同时成立即磁盘已是该版本内容，无需再拉。指纹为 0 不参与判定。
-        cand_clock = int(item.get('clock', 0) or 0)
-        cand_ts = float(item.get('ts', 0.0) or 0.0)
-        same_version = (st is not None
-                        and bool(st.bytes_clock)
-                        and st.bytes_clock == st.clock
-                        and st.clock == cand_clock
-                        and abs(st.ts - cand_ts) <= 1e-6)
-        if (st is not None and st.exists
-                and (vv_covers(st.bytes_vv, cand.vv) or same_version)
+        if (st is not None and st.exists and st.hash_state == 'ok'
+                and st.hash and st.hash == (item.get('hash') or '')
+                and int(st.size or 0) == int(item.get('size') or 0)
                 and os.path.exists(dest)):
-            self.log_message.emit(f"拉取 {name} 跳过: 本端已持有该版本字节")
+            self.log_message.emit(f"拉取 {name} 跳过: 本端已持有该内容")
+            return
+        # 过时槽（IO 前）：胜者内容已定且与槽目标不同 → 该槽会回退胜者字节
+        if self._slot_stale(name, item):
+            self.log_message.emit(f"拉取 {name} 已过时，抛弃该槽")
             return
         os.makedirs(os.path.dirname(dest) or '.', exist_ok=True)
         ok, _received, err = pull_file(
             host, port, session_id, token, name, dest,
             msg_type=MessageType.SYNC_PULL_REQ,
-            # 落盘前复核「本份是否已过时」：拉取在途期间本端若写入了更新版本，此刻
-            # 落盘会覆盖刚写的胜者字节（不可逆）。判过时则放弃落盘，保住本端字节。
-            pre_replace=lambda: self._pull_stale_by_state(name, item),
+            # 落盘前复核：拉取在途期间本端胜者内容若已确定且不同，放弃落盘
+            pre_replace=lambda: self._slot_stale(name, item),
             # 把本 store 的停止事件透传给拉取：退出房间/整体停止时设置 _stop，
             # pull_file 会在下一次 recv 超时(≤1s) 感知并取消，释放 .part 句柄并删除
             # 临时文件——否则工作线程会一直占着句柄（直到整体超时或对端关连接），
@@ -993,57 +1006,56 @@ class FileStateStore(QObject):
             progress_cb=lambda recv, size: self.pull_progress.emit(name, recv, size),
             overall_timeout=self.PULL_OVERALL_TIMEOUT)
         if ok:
-            # 应用前裁决（IO 后）：状态表已删除且删除版本严格胜出 → 本份为
-            # 过期 add 复活，移除字节不落应用、不 emit_pulled（防删除-拉取震荡）
-            if self._state_delete_wins(name, cand, item['end_id']):
+            # 删除优先（IO 后）：拉取期间本端已删除 → 移除复活字节；
+            # 胜者内容已定且与槽目标不同 → 移除刚落的过时字节
+            if self._tombstone_blocks(name, cand.file_id) \
+                    or self._slot_stale(name, item):
                 self.log_message.emit(
-                    f"拉取 {name} 落盘，但本地已删除该文件，移除复活字节")
+                    f"拉取 {name} 落盘，但本地已删除/已更新，移除该字节")
                 try:
                     os.remove(dest)
                 except OSError:
                     pass
                 self.pull_done.emit(name, False)
                 return
-            # 应用后裁决（并发池化修正）：拉取期间状态表推进到更高版本（更高版本
-            # 信号应用/更高版本已落盘）→ 本份为迟到败者。磁盘已被本份覆盖为败者
-            # 字节（可能覆盖了更早落盘的胜者字节），内容不可信：标记字节指纹未知
-            # （bytes_clock=0，_source_byte_fresh 据此拒绝以本端为拉取源），不推进
-            # bytes_vv；立即触发一轮对账，从字节新鲜的端补拉当前胜者覆盖收敛。
-            if self._pull_stale_by_state(name, item):
-                self._mark_bytes_unknown(name)
+            # 落盘校验：MD5+size 与目标身份一致才承认（不匹配则丢弃并重试）
+            want_hash = item.get('hash') or ''
+            want_size = int(item.get('size') or 0)
+            try:
+                got_hash, got_size = FileHasher.hash_file(dest)
+            except OSError as e:
+                self.log_message.emit(f"拉取 {name} 校验失败: {e}")
+                try:
+                    os.remove(dest)
+                except OSError:
+                    pass
                 self.pull_done.emit(name, False)
+                return
+            if (want_hash and got_hash != want_hash) \
+                    or (want_size and got_size != want_size):
                 self.log_message.emit(
-                    f"拉取 {name} 落盘后已过时，标记字节未知待补拉")
+                    f"拉取 {name} 字节校验不符，丢弃并重试")
+                try:
+                    os.remove(dest)
+                except OSError:
+                    pass
+                self.pull_done.emit(name, False)
+                # §9：校验不符同样计入重试上限（默认 3 次），超过转冷却，
+                # 防止源端持续提供错误字节时每轮对账无限重拉
+                self._record_pull_cooldown(name, item['end_id'], item['op_no'])
                 try:
                     self.request_all()
                 except Exception:
                     pass
                 return
-            # 记录本端已持有（vv 推进到远端 op_no）+ 广播 add 状态；UI 刷新。
-            # clock/ts 取远端条目仲裁知识版本（快照 clock/ts）——即当前仲裁胜者，
-            # 状态表不回退、对账指纹比对不失配（用本端自增会污染仲裁指纹）。
-            # 关键：bytes_clock/bytes_ts 用源端磁盘字节指纹——源端知识推进但磁盘
-            # 字节未到位时两者失配（fresh=False），本端 bytes_vv 不推进，对账兜底
-            # 仍会从可信源（字节指纹 == 胜者指纹的端）补拉收敛。
             src_clock = int(item.get('clock', 0) or 0)
             src_ts = float(item.get('ts', 0.0) or 0.0)
-            bclock = int(item.get('bytes_clock', 0) or 0)
-            bts = float(item.get('bytes_ts', 0.0) or 0.0)
-            # 以「实际收到内容」判定新鲜度，不信源端声明：pull_file 已把源磁盘
-            # mtime 复制到 dest，dest mtime 即源端磁盘真实内容版本的可靠标记
-            # （emit 时 os.utime 校准）。源端磁盘若被其自身并发拉取临时覆盖为
-            # 旧字节，其磁盘 mtime 与声明指纹不符 → 收到内容非仲裁胜者 →
-            # fresh=False，bytes_vv 不推进、bytes_ts 如实记录收到内容，对账
-            # backfill 从字节真实的端补拉收敛（杜绝「谎报 fresh」永久分叉）。
-            received_ts = os.path.getmtime(dest)
-            fresh = bool(bclock) and bclock == src_clock \
-                and abs(received_ts - bts) <= 1e-6
             self.distributor.emit_pulled(name, item['end_id'], item['op_no'],
-                                         src_clock, src_ts, fresh,
-                                         bclock, received_ts)
-            self._notify_file_added(name)
-            self.pull_done.emit(name, True)
-            self.log_message.emit(f"自同步拉取完成: {name}")
+                                         src_clock, src_ts,
+                                         on_done=lambda ok: self._finish_pull(name, ok),
+                                         file_hash=want_hash,
+                                         file_size=want_size,
+                                         remote_id=item.get('id') or '')
         else:
             self.pull_done.emit(name, False)
             # 落盘前已判过时 → 本份未触碰目标文件，胜者字节完好，属正常放弃而非失败：
@@ -1061,6 +1073,15 @@ class FileStateStore(QObject):
             if self._source_lacks_file(err):
                 self._record_pull_cooldown(name, item['end_id'], item['op_no'])
             self.log_message.emit(f"自同步拉取失败 {name}: {err}")
+
+    def _finish_pull(self, name: str, ok: bool):
+        """拉取落盘后的收尾：哈希完成才算完成（阶段 B）。"""
+        if not ok:
+            self.pull_done.emit(name, False)
+            return
+        self._notify_file_added(name)
+        self.pull_done.emit(name, True)
+        self.log_message.emit(f"自同步拉取完成: {name}")
 
     # ---- 拉取冷却（阶段 5：防「源端无此文件」反复回环） ----
 
@@ -1189,6 +1210,97 @@ class FileStateStore(QObject):
             except Exception:
                 pass
 
+    # ---- 墓碑对账（C3：连接建立后先拉墓碑，再拉文件状态） ----
+
+    TOMBSTONE_BATCH = 200  # 单次 TOMBSTONE_RESP 最大条目数（分页上限）
+
+    def start_peer_sync(self, end_id: str):
+        """对端建立连接后启动对账：先分页拉取墓碑，完成后再发 FILE_STATE_REQ。"""
+        if self.mesh is None or not end_id:
+            return
+        with self._lock:
+            self._tombstone_pending.add(end_id)
+        try:
+            self._send_tombstone_req(end_id, 0)
+        except Exception as e:
+            with self._lock:
+                self._tombstone_pending.discard(end_id)
+            self.log_message.emit(f"墓碑拉取失败: {e}")
+            self.request_all()
+
+    def _send_tombstone_req(self, end_id: str, offset: int):
+        self.mesh.send_to_peer(
+            end_id,
+            Protocol.create_tombstone_req(self.end_id, '', offset))
+
+    def handle_tombstone_req(self, end_id: str, content: dict):
+        """应答对端墓碑拉取：只下发 origin=delete，按 (path, id) 排序分页。"""
+        if self.mesh is None or self.distributor is None:
+            return
+        try:
+            offset = int((content or {}).get('offset') or 0)
+        except (TypeError, ValueError):
+            offset = 0
+        recs = sorted(self.distributor.wire_tombstones(),
+                      key=lambda r: (r.get('rel_path', ''),
+                                     r.get('file_id') or ''))
+        page = recs[max(0, offset):max(0, offset) + self.TOMBSTONE_BATCH]
+        entries = [{
+            'path': r.get('rel_path', ''),
+            'id': r.get('file_id') or '',
+            'is_dir': bool(r.get('is_dir')),
+            'op_no': int(r.get('op_no') or 0),
+            'clock': int(r.get('clock') or 0),
+            'ts': float(r.get('ts') or 0.0),
+            'vv': dict(r.get('vv') or {}),
+        } for r in page]
+        more = max(0, offset) + len(page) < len(recs)
+        try:
+            self.mesh.send_to_peer(
+                end_id,
+                Protocol.create_tombstone_resp(
+                    self.end_id, entries, more=more,
+                    next_offset=max(0, offset) + len(page)))
+        except Exception as e:
+            self.log_message.emit(f"墓碑响应失败: {e}")
+
+    def handle_tombstone_resp(self, end_id: str, content: dict):
+        """应用对端墓碑并回写 confirmed_by；全部分页拉完后才发起文件状态对账。"""
+        if not isinstance(content, dict) or self.distributor is None:
+            with self._lock:
+                self._tombstone_pending.discard(end_id)
+            self.request_all()
+            return
+        for d in content.get('entries') or []:
+            if not isinstance(d, dict):
+                continue
+            path = d.get('path', '')
+            if not path:
+                continue
+            fid = d.get('id') or ''
+            self.distributor.apply_tombstone(
+                path, fid, is_dir=bool(d.get('is_dir')), origin='delete',
+                op_no=int(d.get('op_no') or 0),
+                clock=int(d.get('clock') or 0),
+                ts=float(d.get('ts') or 0.0),
+                vv=dict(d.get('vv') or {}))
+            # 对端持有该墓碑即证明其已完成删除 → 记入本端墓碑 confirmed_by
+            self.distributor.confirm_tombstone(path, fid, end_id)
+        if bool(content.get('more')):
+            try:
+                self._send_tombstone_req(
+                    end_id, int(content.get('next_offset') or 0))
+            except Exception as e:
+                self.log_message.emit(f"墓碑续页失败: {e}")
+                with self._lock:
+                    self._tombstone_pending.discard(end_id)
+                self.request_all()
+            return
+        with self._lock:
+            self._tombstone_pending.discard(end_id)
+        self.log_message.emit("墓碑对账完成，开始文件状态对账")
+        self.request_all()
+
     def request_all(self) -> int:
         """向全部直连对端请求文件状态（手动同步/断线重连/周期对账自动补齐）。
 
@@ -1198,6 +1310,10 @@ class FileStateStore(QObject):
         if self.mesh is None:
             return 0
         targets = self.mesh.connected_end_ids()
+        with self._lock:
+            # 墓碑未拉完的端不参与文件状态对账（顺序固定：先墓碑后文件）
+            targets = [e for e in targets
+                       if e not in self._tombstone_pending]
         if not targets:
             return 0
         with self._lock:
@@ -1256,7 +1372,122 @@ class FileStateStore(QObject):
                 self._cleanup_converged()
             except Exception:
                 pass
+            # 墓碑 GC：所有已知端均已确认且无同 id 活对象的删除墓碑
+            try:
+                self.distributor.gc_tombstones()
+            except Exception:
+                pass
+            # 阶段 D：一轮应答收口后裁决静默对齐残留
+            try:
+                self._finalize_alignment()
+            except Exception:
+                pass
             self._notify_sync_done(had)
+
+    def _finalize_alignment(self, offline: bool = False):
+        """§8：按本轮对端状态处置残留（绑定/删除拉取/发布/墓碑压制）。"""
+        with self._lock:
+            if not self._align_mode:
+                return
+            residues = dict(self._align_residues)
+            remote_map = dict(self._align_remote)
+            pending_paths = set(self._align_pending)
+            sessions = dict(self._align_sessions)
+            sources = dict(self._align_sources)
+            got_response = self._align_got_response
+            incomplete = self._align_incomplete
+        if offline and got_response:
+            return
+        keep = {}
+        for name, rec in residues.items():
+            abs_path = self._safe_join(name)
+            if not rec.get('hash'):
+                keep[name] = rec
+                continue
+            if not os.path.exists(abs_path):
+                continue
+            if name in pending_paths:
+                keep[name] = rec
+                continue
+            remote = remote_map.get(name)
+            if remote is not None:
+                if remote.is_dir:
+                    try:
+                        os.remove(abs_path)
+                    except OSError:
+                        keep[name] = rec
+                    continue
+                if (int(remote.size or 0) == int(rec['size'])
+                        and remote.hash == rec['hash']):
+                    # 同 path 同 hash：丢弃本地临时 ID，绑定对端身份，静默收敛
+                    try:
+                        self.distributor.adopt_remote_state(remote)
+                    except Exception:
+                        keep[name] = rec
+                    continue
+                # 同 path 异 hash：以房间为准，删残留并从对端拉取
+                try:
+                    os.remove(abs_path)
+                except OSError:
+                    keep[name] = rec
+                    continue
+                session = sessions.get(sources.get(name, ''))
+                if session is not None and remote.hash:
+                    self._enqueue_pull(name, sources.get(name, ''),
+                                       remote, session)
+                continue
+            # 对端无该 path：对端扫描未完整时不能据缺席判新，留待下一轮
+            if incomplete:
+                keep[name] = rec
+                continue
+            # 有墓碑则删残留不发布，否则视为本端新增并发布
+            if self.distributor.tombstone_for_path(name):
+                try:
+                    os.remove(abs_path)
+                except OSError:
+                    keep[name] = rec
+                continue
+            try:
+                self.distributor.publish_residue(
+                    name, rec['file_id'], rec['hash'], rec['size'])
+            except Exception:
+                keep[name] = rec
+        with self._lock:
+            if not self._align_mode:
+                return
+            self._align_residues = keep
+            self._align_remote = {}
+            self._align_sources = {}
+            self._align_got_response = False
+            self._align_incomplete = False
+            self._align_pending = {p for p in pending_paths if p in keep}
+            done = not keep
+            if done:
+                self._align_mode = False
+                timer = self._align_timer
+                self._align_timer = None
+                hasher = self._align_hasher
+                self._align_hasher = None
+        if done:
+            if timer is not None:
+                try:
+                    timer.cancel()
+                except Exception:
+                    pass
+            if hasher is not None:
+                try:
+                    hasher.stop()
+                except Exception:
+                    pass
+        elif offline and not got_response:
+            # 离线兜底时仍有残留（如大文件哈希未完成）：续一个超时再判
+            timer = threading.Timer(self.ROUND_TIMEOUT,
+                                    self.finalize_offline_alignment)
+            timer.daemon = True
+            with self._lock:
+                if self._align_mode:
+                    self._align_timer = timer
+            timer.start()
 
     def _cleanup_converged(self):
         """在线闸门：本轮所有直连端均已应答、无人声明该路径存在、且确有对端
@@ -1275,6 +1506,7 @@ class FileStateStore(QObject):
             self._round_exists_claim = set()
             self._round_deleted_claim = set()
             self._round_responded = set()
+        live = set()
         if self.mesh is not None:
             try:
                 live = set(self.mesh.connected_end_ids())
@@ -1285,10 +1517,21 @@ class FileStateStore(QObject):
         for name, st in self.distributor.states().items():
             if st.exists or st.state != STATE_CHANGE:
                 continue
+            # C3：只收敛目录条目；文件删除由墓碑 GC 清理
+            if not st.is_dir:
+                continue
             if name in claim:
                 continue
-            if name not in deleted:
-                continue  # 无对端明确确认该路径已删除 → 保留墓碑压制其陈旧 add
+            # 目录墓碑须已被全部在线端确认（对端快照缺失或墓碑列表含之）
+            tomb = None
+            for t in self.distributor.wire_tombstones():
+                if t.get('rel_path') == name and not t.get('file_id'):
+                    tomb = t
+                    break
+            if tomb is None:
+                continue
+            if live and not live.issubset(set(tomb.get('confirmed_by') or [])):
+                continue
             try:
                 if os.path.exists(self._safe_join(name)):
                     continue  # 磁盘仍残留 → 交 Distributor.retry_pending_deletes
@@ -1314,6 +1557,18 @@ class FileStateStore(QObject):
 
     def stop(self):
         self._stop.set()
+        timer = self._align_timer
+        if timer is not None:
+            try:
+                timer.cancel()
+            except Exception:
+                pass
+        hasher = self._align_hasher
+        if hasher is not None:
+            try:
+                hasher.stop()
+            except Exception:
+                pass
         with self._cond:
             self._cond.notify_all()
         for w in getattr(self, '_workers', ()):
@@ -1322,3 +1577,5 @@ class FileStateStore(QObject):
                     w.join(timeout=2.0)
                 except Exception:
                     pass
+        # 退出清扫：本端已停止调度，残留临时文件不再有用（阶段 B）
+        self.sweep_transient_temp()

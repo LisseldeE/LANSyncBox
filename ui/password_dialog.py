@@ -1,4 +1,5 @@
-"""密码输入对话框
+"""
+密码输入对话框
 点击“加入房间”的连接后，若房间需要密码，由本对话框负责密码输入与验证。
 Copyright (c) 2026 Lisselde_E <Lisselde.E@outlook.com>.
 Licensed under the GNU General Public License v3.0.
@@ -147,6 +148,8 @@ class PasswordDialog(QDialog):
         self._set_verifying(True)
 
         client = SyncClient(self.room_code, self.password)
+        # 延迟数据面：加入决策（缓存冲突）完成后再启动
+        client.join_pending = True
         self._client = client
 
         loop = QEventLoop(self)

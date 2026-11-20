@@ -1,4 +1,5 @@
-"""系统级粘贴全局热键：Windows Ctrl+V / macOS Cmd+V（其余平台降级为无操作）。
+"""
+系统级粘贴全局热键：Windows Ctrl+V / macOS Cmd+V（其余平台降级为无操作）。
 Copyright (c) 2026 Lisselde_E <Lisselde.E@outlook.com>.
 Licensed under the GNU General Public License v3.0.
 """

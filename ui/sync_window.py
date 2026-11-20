@@ -31,7 +31,6 @@ from ui.capsule_notification import _RoundedProgressBar
 from ui.widgets import AnimatedButton, BUTTON_STYLES, ToggleSwitch, DeliverySettingsPanel
 from ui.about_dialog import AboutDialog
 from network.server import SyncServer
-from utils.clean_queue import get_clean_queue
 from network.client import SyncClient
 from network.discovery import RoomResponder, MeshPeerDiscovery
 from utils.transfer_queue import TransferQueue
@@ -625,7 +624,7 @@ class SyncWindow(QMainWindow):
     # 共享剪贴板回环识别窗口（秒）：本端复制后窗口期内收到同指纹通知视为回声
     _OWN_COPY_WINDOW = 8.0
 
-    def __init__(self, is_host: bool, room_code: str, password: str = "", host_address: str = "", host_port: int = None, existing_client=None):
+    def __init__(self, is_host: bool, room_code: str, password: str = "", host_address: str = "", host_port: int = None, existing_client=None, silent_align: bool = False):
         super().__init__()
         self.is_host = is_host
         self.room_code = room_code
@@ -633,10 +632,23 @@ class SyncWindow(QMainWindow):
         self.host_address = host_address
         self.host_port = host_port
         self._existing_client = existing_client  # 由 JoinRoomDialog 预验证成功的 client（可选，避免重复连接）
+
         
         # 获取房间文件夹
         self.room_folder = Config.get_room_folder(room_code)
-        
+        # 主机建房/回归：db 缺失但目录有残留 → 同样进入静默对齐（§8）
+        if is_host and not silent_align:
+            try:
+                from sync.room_instance import room_db_path
+                if not os.path.isfile(room_db_path(room_code)) \
+                        and self.room_folder.exists() \
+                        and any(self.room_folder.iterdir()):
+                    silent_align = True
+            except OSError:
+                pass
+        # 阶段 D：清缓存回归后保留旧文件进入 → 网络侧进入静默对齐
+        self._silent_align = bool(silent_align)
+
         # 网络组件
         self.server = None
         self.client = None
@@ -1029,6 +1041,7 @@ class SyncWindow(QMainWindow):
         if self.is_host:
             # 主机端：启动服务器和响应服务
             self.server = SyncServer(self.room_code, self.password)
+            self.server.silent_align = self._silent_align
             self.server.client_connected.connect(self.on_client_connected)
             self.server.client_disconnected.connect(self.on_client_disconnected)
             self.server.error_occurred.connect(self.on_network_error)
@@ -1102,6 +1115,7 @@ class SyncWindow(QMainWindow):
             else:
                 # 自行创建并连接
                 self.client = SyncClient(self.room_code, self.password)
+            self.client.silent_align = self._silent_align
             self.client.connected.connect(self.on_connected)
             self.client.disconnected.connect(self.on_disconnected)
             self.client.error_occurred.connect(self.on_network_error)
@@ -1145,6 +1159,10 @@ class SyncWindow(QMainWindow):
             port = self.host_port or Config.DEFAULT_PORT
             if self.client.authenticated:
                 self._add_record(f"{host}:{port}", "连接", "")
+                # 加入决策（清缓存/保留文件）已完成：此刻才启动延迟的数据面，
+                # 确保 FileStateStore 以最终 silent_align 模式构造、残留不被误广播；
+                # 且须在 on_connected 之前，使 mgmt_port() 返回真实监听端口。
+                self.client.begin_after_join(self._silent_align)
                 self.on_connected()
                 # 复用连接：MODE_RESP 可能早于 UI 信号连接已到达，补偿模式状态与初始差异同步
                 if self.client.mode_received:
@@ -4221,15 +4239,17 @@ class SyncWindow(QMainWindow):
             QApplication.instance().removeNativeEventFilter(self._global_hotkey)
             self._global_hotkey = None
 
-        # 清理缓存（如果开关开启）
+        # 清理缓存（如果开关开启）：先删房间目录文件，成功后才删房间 db
         if self.clean_cache_switch.isChecked():
             try:
-                # 清理当前房间号的缓存文件夹（异步清理）
-                if self.room_folder.exists():
-                    # 使用清理队列异步清理，避免文件锁问题
-                    get_clean_queue().add_clean_task(self.room_folder)
-            except Exception:
-                pass  # 清理失败不影响关闭
+                from sync import room_instance as room_inst
+                db_path = room_inst.room_db_path(self.room_code)
+                if not room_inst.clear_room_cache(self.room_folder, db_path):
+                    QMessageBox.warning(
+                        self, I18n.tr('room_cache_conflict_title'),
+                        I18n.tr('room_cache_clean_failed'))
+            except Exception as e:
+                self._add_record(f"清理缓存失败: {e}", "错误", "")
 
         self.closed.emit()
         event.accept()

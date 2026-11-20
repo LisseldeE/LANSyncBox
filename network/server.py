@@ -67,6 +67,10 @@ class SyncServer(QObject):
         super().__init__(parent)
         self.room_code = room_code
         self.password = password
+        # 房间实例编号（阶段 D）：主机建房时读取/继承，随 AUTH_RESP 下发
+        self._room_instance_id = ''
+        self._inherited_room_instance_id = ''
+        self._room_instance_lock = threading.Lock()
         self.server_socket: Optional[socket.socket] = None
         self.running = False
         self.port = Config.DEFAULT_PORT  # 实际使用的端口
@@ -126,6 +130,8 @@ class SyncServer(QObject):
 
         # 自同步链路（去中心化阶段 2）：端到端文件状态对比与拉取
         self.file_state_store: Optional[FileStateStore] = None
+        # 房间状态库（阶段 A）：持久化文件清单/计数器/墓碑；None=内存模式
+        self._state_storage = None
         self._file_provider = None   # 本端 FileProvider（UI 注入；会话服务能力）
         # reuse 模式（全网状管理平面）：连接端复用的管理监听服务，共享宿主
         # mesh/distributor/store，不重建、不回收；start(reuse=True) 时置 True
@@ -204,15 +210,29 @@ class SyncServer(QObject):
                         UserConfig.get_end_id(), self.sync_folder,
                         mesh=self.mesh, parent=self)
                     self.distributor.log_message.connect(self.log_message)
+                    # 阶段 B：接入哈希队列，落盘文件 pending → 哈希 ok 后才发布 add
+                    from sync.file_hasher import FileHasher
+                    self.distributor.attach_hasher(
+                        FileHasher(log=self.log_message.emit))
                     self.distributor.signal_applied.connect(self._on_distributor_applied)
                     self.distributor.set_protected_dirs(self._collect_ip_folders())
                     self.mesh.set_message_handler(self._on_mesh_message)
+
+                    # 阶段 D：房源编号在 mesh 就绪后立即解析（meta/继承/生成），
+                    # 保证随后认证的端在 AUTH_RESP 中拿到正确编号。
+                    self.ensure_room_instance_id()
+
+                    # 阶段 A：接入房间状态库（打开 db → 挂载 → 启动磁盘对账）。
+                    # 静默对齐模式跳过对账，残留交由 §8 对齐流程裁决。
+                    self._attach_state_storage(
+                        silent_align=bool(getattr(self, 'silent_align', False)))
 
                     # 自同步链路（阶段 2）：端到端状态对比与拉取；直连建立自动补齐
                     self.file_state_store = FileStateStore(
                         UserConfig.get_end_id(), self.sync_folder,
                         mesh=self.mesh, distributor=self.distributor,
-                        provider=self._file_provider, parent=self)
+                        provider=self._file_provider, parent=self,
+                        silent_align=bool(getattr(self, 'silent_align', False)))
                     self.file_state_store.log_message.connect(self.log_message)
                     self.file_state_store.sync_done.connect(self.state_sync_done)
                     self.file_state_store.file_added.connect(self.file_state_added)
@@ -246,6 +266,23 @@ class SyncServer(QObject):
         self.error_occurred.emit(f"启动服务器失败: 端口 {start_port}-{max_port-1} 均被占用")
         return False
     
+    def _attach_state_storage(self, silent_align: bool = False):
+        """接入房间状态库：打开 db → 挂载 Distributor → 启动磁盘对账。
+
+        失败降级为内存模式（不阻断同步）；storage 由 stop() 关闭。
+        静默对齐模式跳过启动对账：残留必须走 §8 裁决，不能直接当新增广播。
+        """
+        from sync.room_instance import room_db_path
+        from sync.state_storage import open_room_state_storage
+        try:
+            self._state_storage = open_room_state_storage(
+                self.distributor, room_db_path(self.room_code),
+                log=self.log_message.emit, reconcile=not silent_align)
+            self.log_message.emit("房间状态库已接入（持久化生效）")
+        except Exception as e:
+            self._state_storage = None
+            self.log_message.emit(f"状态库接入失败，本次运行使用内存模式: {e}")
+
     def stop(self):
         """停止服务器"""
         self.running = False
@@ -289,6 +326,14 @@ class SyncServer(QObject):
         if self.file_state_store and not self._reuse:
             self.file_state_store.stop()
             self.file_state_store = None
+
+        # 关闭房间状态库：务必在退出清缓存（删除 db）之前释放句柄
+        if self._state_storage is not None:
+            try:
+                self._state_storage.close()
+            except Exception:
+                pass
+            self._state_storage = None
     
     @staticmethod
     def _cleanup_client_receiving(client_info: dict) -> list:
@@ -664,11 +709,13 @@ class SyncServer(QObject):
                     # 设置修改时间
                     os.utime(final_file_path, (rf['mtime'], rf['mtime']))
 
-                    # 旧通道直推落盘后补记状态基线（同步模式）：避免“磁盘有、
-                    # 状态表无”的路径在本地删除时发出被对端旧知识去重的低版本。
-                    rel_name = rf.get('target_filename') or filename
+                    # 阶段 B：主机直推落盘登记 pending，哈希 ok 后才发布 add
                     if self.mode == "sync" and self.distributor is not None:
-                        self.distributor.record_received(rel_name, rf['mtime'])
+                        try:
+                            self.distributor.register_received_file(
+                                rf.get('target_filename') or filename)
+                        except Exception:
+                            pass
 
                     # 通知接收完成
                     self.file_received.emit(filename)
@@ -939,6 +986,45 @@ class SyncServer(QObject):
         except Exception:
             return []
 
+    def _probe_room_instance_id(self, timeout: float = 0.8) -> str:
+        """建房探活：向同房间在线端发 ROOM_INFO_REQ，短时等待任一应答。"""
+        self._inherited_room_instance_id = ''
+        if self.mesh is None:
+            return ''
+        try:
+            self.mesh.send_to_all(Protocol.create_room_info_req(self.room_code))
+        except Exception:
+            return ''
+        deadline = time.time() + max(0.0, float(timeout))
+        while time.time() < deadline:
+            inherited = getattr(self, '_inherited_room_instance_id', '')
+            if inherited:
+                return inherited
+            time.sleep(0.02)
+        return ''
+
+    def ensure_room_instance_id(self) -> str:
+        """确保主机持有房间实例编号（meta 复用 → 探活继承 → UUID4）。"""
+        # 测试/桩对象未经 __init__：不落库、不生成，按现有属性返回
+        if not hasattr(self, '_room_instance_lock'):
+            return getattr(self, '_room_instance_id', '')
+        if self._room_instance_id:
+            return self._room_instance_id
+        with self._room_instance_lock:
+            if not self._room_instance_id:
+                # accept 线程可能早于 start() 建 mesh：短等数据面就绪再探活，
+                # 避免提前生成编号而错失继承。
+                if not self._reuse and self.mesh is None:
+                    deadline = time.time() + 2.0
+                    while self.mesh is None and time.time() < deadline:
+                        time.sleep(0.01)
+                from sync.room_instance import (resolve_host_instance_id,
+                                                room_db_path)
+                self._room_instance_id = resolve_host_instance_id(
+                    room_db_path(self.room_code),
+                    probe=self._probe_room_instance_id)
+        return self._room_instance_id
+
     def _handle_auth(self, client_id: str, content: bytes):
         """处理验证请求"""
         try:
@@ -947,13 +1033,18 @@ class SyncServer(QObject):
             room_code = data[1] if len(data) > 1 else ''
             password_hash = data[2] if len(data) > 2 else ''
 
+            # 阶段 D：真主机认证前确保房间实例编号已就绪（随 AUTH_RESP 下发）
+            if not self._reuse:
+                self.ensure_room_instance_id()
+
             import hashlib
             expected_hash = hashlib.sha256(self.password.encode()).hexdigest() if self.password else ''
 
             # 同步逻辑版本比对（优先级最高；只比内部号，UI/展示变更不要求全员升级）
             if sync_version != Config.SYNC_LOGIC_VERSION:
                 fail_msg = f"同步逻辑版本不匹配（客户端 {sync_version}，本机 {Config.SYNC_LOGIC_VERSION}）"
-                response = Protocol.create_auth_response(False, fail_msg)
+                response = Protocol.create_auth_response(
+                    False, fail_msg, room_id=self.room_code)
                 self._socket_send(self.clients[client_id], response)
                 self.log_message.emit(f"客户端 {client_id} 验证失败: {fail_msg}")
                 self._remove_client(client_id)
@@ -962,7 +1053,8 @@ class SyncServer(QObject):
             # 房间号验证
             if room_code != self.room_code:
                 fail_msg = "房间号错误"
-                response = Protocol.create_auth_response(False, fail_msg)
+                response = Protocol.create_auth_response(
+                    False, fail_msg, room_id=self.room_code)
                 self._socket_send(self.clients[client_id], response)
                 self.log_message.emit(f"客户端 {client_id} 验证失败: {fail_msg}")
                 self._remove_client(client_id)
@@ -1011,7 +1103,9 @@ class SyncServer(QObject):
                     if password_hash != expected_hash:
                         fail_msg = "密码错误"
                         self._socket_send(self.clients[client_id],
-                                          Protocol.create_auth_response(False, fail_msg))
+                                          Protocol.create_auth_response(
+                                              False, fail_msg,
+                                              room_id=self.room_code))
                         self.log_message.emit(f"客户端 {client_id} 验证失败: {fail_msg}")
                         self._remove_client(client_id)
                         return
@@ -1032,7 +1126,10 @@ class SyncServer(QObject):
                     info['perm'] = perm
                     info['last_pong'] = time.time()
                     self._socket_send(info, Protocol.create_auth_response(
-                        True, "验证成功（主机离线，经对端引导接入）"))
+                        True, "验证成功（主机离线，经对端引导接入）",
+                        room_id=self.room_code,
+                        room_instance_id=getattr(
+                            self, '_room_instance_id', '')))
                     # 先于新增连接落地档位，避免新端窗口短暂与目标档位不一致
                     self._socket_send(info, Protocol.create_perm_message(
                         MessageType.PERM_UPDATE, perm))
@@ -1053,7 +1150,8 @@ class SyncServer(QObject):
             # 密码验证（仅真主机执行）
             if password_hash != expected_hash:
                 fail_msg = "密码错误"
-                response = Protocol.create_auth_response(False, fail_msg)
+                response = Protocol.create_auth_response(
+                    False, fail_msg, room_id=self.room_code)
                 self._socket_send(self.clients[client_id], response)
                 self.log_message.emit(f"客户端 {client_id} 验证失败: {fail_msg}")
                 self._remove_client(client_id)
@@ -1077,7 +1175,9 @@ class SyncServer(QObject):
             initial_perm = self._host_perm_for_end(end_id)
             self.clients[client_id]['perm'] = "rw"  # 先按读写初始化；目标为只读时随后经 set_perm 下发并应用
             self.clients[client_id]['last_pong'] = time.time()  # 心跳计时起点（防认证后立即误判离线）
-            response = Protocol.create_auth_response(True, "验证成功")
+            response = Protocol.create_auth_response(
+                True, "验证成功", room_id=self.room_code,
+                room_instance_id=self.ensure_room_instance_id())
             self._socket_send(self.clients[client_id], response)
             self.log_message.emit(f"客户端 {client_id} 验证成功（同步逻辑版本 {sync_version}）")
             # 初始档位为只读时，自动下发 PERM_UPDATE（set_perm 复用 ACK 通道，客户端据此
@@ -1238,6 +1338,25 @@ class SyncServer(QObject):
         elif msg_type == MessageType.FILE_STATE_RESP and isinstance(content, dict):
             if self.file_state_store:
                 self.file_state_store.handle_state_resp(end_id, content)
+        elif msg_type == MessageType.TOMBSTONE_REQ and isinstance(content, dict):
+            if self.file_state_store:
+                self.file_state_store.handle_tombstone_req(end_id, content)
+        elif msg_type == MessageType.TOMBSTONE_RESP and isinstance(content, dict):
+            if self.file_state_store:
+                self.file_state_store.handle_tombstone_resp(end_id, content)
+        elif msg_type == MessageType.ROOM_INFO_REQ:
+            # 向同房间在线端回本端持有的房间实例编号（主机探活继承用）
+            try:
+                rid = getattr(self, '_room_instance_id', '')
+                if not rid and not getattr(self, '_reuse', False):
+                    rid = self.ensure_room_instance_id()
+                self.mesh.send_to_peer(
+                    end_id, Protocol.create_room_info(rid))
+            except Exception:
+                pass
+        elif msg_type == MessageType.ROOM_INFO and isinstance(content, dict):
+            self._inherited_room_instance_id = \
+                content.get('room_instance_id') or ''
         elif msg_type == MessageType.CLIPBOARD_NOTIFY_SIGNAL:
             # 阶段 5：投递通知沿网状直连到达（不经主机转发）→ 交 UI 展示远程文件胶囊
             if self.distributor:
@@ -1262,7 +1381,8 @@ class SyncServer(QObject):
                     exclude_dirs=self._collect_ip_folders())
             except Exception:
                 pass
-            self.file_state_store.request_all()
+            # C3：先与该端做墓碑对账，完成后再发起文件状态对账
+            self.file_state_store.start_peer_sync(end_id)
 
     def set_file_provider(self, provider):
         """注入本端 FileProvider（会话服务能力；UI 启动 provider 后调用）。"""

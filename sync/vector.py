@@ -32,25 +32,18 @@ class FileState:
     clock: int = 0
     ts: float = 0.0
     vv: dict = field(default_factory=dict)
-    # 字节版本向量：真实落盘字节对应的版本。仅本地 emit / 自同步拉取落盘时推进，
-    # 回执 merge（pulled / 知识合并）不动它。用于修正「知识已覆盖但字节被旧槽
-    # 回退覆盖」的三端并发竞态：_do_pull 落盘前对照裁决，对账时作为
-    # 「知识胜于字节 → 强制补拉」兜底的判定依据。旧端（无字段）置空、兜底不生效。
-    bytes_vv: dict = field(default_factory=dict)
-    # 字节指纹：磁盘真实字节对应的 (clock, ts)（落盘内容的版本指纹）。
-    # 本地 emit / 自同步拉取落盘时设置；rename/move 延续旧名；delete 清零。
-    # 用于对账补拉兜底：文件存在且字节指纹 == 状态表胜者指纹 → 本端字节已
-    # 是仲裁胜者内容，无需再向任何对端补拉（各端 emit_pulled 自增 op_no 导致
-    # 对端快照版本号其他端永远「没见过」，bytes_vv 覆盖判定会误判缺口而
-    # 交叉反复重拉同一内容——指纹一致即证明内容已对）。旧端（无字段）默认 0，
-    # 一次补拉后收敛。
-    bytes_clock: int = 0
-    bytes_ts: float = 0.0
+    # 文件身份：路径从无到有时生成，内容更新/重命名保持；删除后重建换新。
+    file_id: str = ''
+    # 内容罗盘：MD5 hex + 文件大小；hash_state = pending / ok / none（目录）。
+    hash: str = ''
+    hash_state: str = 'none'
+    size: int = 0
+    # 目录条目（无身份，file_id 为空、hash_state='none'）。
+    is_dir: bool = False
 
     def to_dict(self) -> dict:
         d = asdict(self)
         d['vv'] = dict(self.vv)
-        d['bytes_vv'] = dict(self.bytes_vv)
         return d
 
     @classmethod
@@ -63,38 +56,43 @@ class FileState:
             clock=int(d.get('clock', 0) or 0),
             ts=float(d.get('ts', 0.0) or 0.0),
             vv=dict(d.get('vv', {}) or {}),
-            bytes_vv=dict(d.get('bytes_vv', {}) or {}),
-            bytes_clock=int(d.get('bytes_clock', 0) or 0),
-            bytes_ts=float(d.get('bytes_ts', 0.0) or 0.0),
+            file_id=d.get('file_id', '') or '',
+            hash=d.get('hash', '') or '',
+            hash_state=d.get('hash_state', 'none') or 'none',
+            size=int(d.get('size', 0) or 0),
+            is_dir=bool(d.get('is_dir', False)),
         )
 
     def to_wire_dict(self) -> dict:
-        """对端间传输用精简结构（vv 由对端 src_id 隐式关联，不随条目传输；
-        bytes_vv 供新端参考，旧端无字段 → 对端置空、兜底降级）。
+        """对端间传输用结构：只承载活对象，带身份、目录标记、哈希与完整 vv。
 
-        bytes_clock/bytes_ts 为磁盘真实字节指纹（落盘内容版本）：供拉取端在
-        落盘后判别「实际拉到的内容是否即仲裁胜者」——知识推进但磁盘字节未
-        到位时指纹失配，据此不推进 bytes_vv 并交由对账补拉可信源收敛。"""
+        删除信息不经此通道（由 TOMBSTONE_RESP 承载）；exists 恒为 True，不再传输。
+        """
         return {
             'name': self.name,
             'op_no': self.op_no,
             'state': self.state,
-            'exists': self.exists,
             'clock': self.clock,
             'ts': self.ts,
-            'bytes_vv': dict(self.bytes_vv),
-            'bytes_clock': self.bytes_clock,
-            'bytes_ts': self.bytes_ts,
+            'id': self.file_id,
+            'is_dir': bool(self.is_dir),
+            'hash': self.hash,
+            'hash_state': self.hash_state,
+            'size': int(self.size or 0),
+            'vv': dict(self.vv),
         }
 
     @classmethod
     def from_wire_dict(cls, src_id: str, d: dict) -> "FileState":
-        """由精简结构 + src_id 重建（vv 单条目 = {src_id: op_no}）。"""
+        """由传输结构 + src_id 重建；vv 优先用完整字典，缺省回退单条目。"""
         st = cls.from_dict(d)
-        st.vv = {src_id: st.op_no}
-        bv = d.get('bytes_vv')
-        if isinstance(bv, dict):
-            st.bytes_vv = {str(k): int(v or 0) for k, v in bv.items()}
+        st.exists = True
+        st.file_id = d.get('id', '') or d.get('file_id', '') or ''
+        raw_vv = d.get('vv')
+        if isinstance(raw_vv, dict) and raw_vv:
+            st.vv = {str(k): int(v or 0) for k, v in raw_vv.items()}
+        else:
+            st.vv = {src_id: st.op_no}
         return st
 
 

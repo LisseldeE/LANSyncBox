@@ -46,8 +46,9 @@ class MessageType:
     # ---- 去中心化架构消息（content=JSON；0x20-0x27 均为网状/直连链路） ----
     DISTRIBUTE_SIGNAL = 0x20  # 分发信号（端→网状各直连对端）：{src_id, op_no, op, file, state, clock, ts, dst?}
     FILE_STATE_REQ = 0x21     # 文件状态请求（端→对端）：{src_id, dirs?（26.9C2 可选，本端目录清单）}
-    FILE_STATE_RESP = 0x22    # 文件状态响应（对端→端）：{src_id, entries:[{name, op_no, state, exists, clock, ts}],
-                              #   dirs_missing?（26.9C2 可选，"我有你无"的目录差异集）}
+    FILE_STATE_RESP = 0x22    # 文件状态响应（对端→端）：{src_id, entries:[{name, op_no, state, clock, ts,
+                              #   id, is_dir, hash, hash_state, size, vv}], scan_complete, pending_count,
+                              #   dirs_missing?}；只含活对象，删除走 TOMBSTONE_RESP
     SYNC_PULL_REQ = 0x23      # 同步拉取请求（端→对端 FileProvider 会话）：{session_id, token, name}
     END_INFO = 0x24           # 端身份信息（握手后交换）：{end_id, name, mesh_port, mgmt_port}
     MESH_PEER_LIST = 0x25     # 对端清单（主机→新加入端引导；mesh 建连后亦端间互换实现"互相介绍"自扩散）：
@@ -87,6 +88,12 @@ class MessageType:
     # 主机离线时由引导端据此为新端适配档位。属协议语义变更（要求双端都懂），
     # 已随本类型提升 SYNC_LOGIC_VERSION：旧端不识别该帧会静默忽略，混版无意义。
     PERM_POLICY = 0x35         # 权限策略快照：{default: "rw"|"ro"|"", overrides: {end_id: "rw"|"ro"}}
+
+    # ---- 房间实例编号与墓碑对账（C3） ----
+    ROOM_INFO_REQ = 0x36       # 房间实例查询（主机建房前→同房间在线端）：{room_code}
+    ROOM_INFO = 0x37           # 房间实例应答（在线端→主机）：{room_instance_id}
+    TOMBSTONE_REQ = 0x38       # 墓碑拉取请求（端→对端）：{src_id, room_code, offset}
+    TOMBSTONE_RESP = 0x39      # 墓碑拉取应答（对端→端）：{src_id, entries:[...], more, next_offset}
 
 
 class RoomProbeState:
@@ -197,15 +204,42 @@ class Protocol:
     
     @staticmethod
     def create_auth_response(success: bool, message: str = '',
-                             transient: bool = False) -> bytes:
-        """创建验证响应（0x04）：content="{状态}:{消息}"。
+                             transient: bool = False, room_id: str = '',
+                             room_instance_id: str = '') -> bytes:
+        """创建验证响应（0x04）：content 为 JSON {ok, message, room_id}。
 
-        状态三态：`1`=成功、`2`=暂时不可用（瞬时，客户端不得视为永久拒绝）、
-        `0`=永久失败。旧端只判首字符是否 `1`，`2` 落到失败分支，混版安全。
+        transient 为瞬时不可用（复用监听：主机暂不在）的附加标记，客户端据此
+        与永久拒绝区分；C3 起不再发送旧的 "状态:消息" 文本格式。
+        room_instance_id 为房间实例编号，认证成功时随响应下发（阶段 D）。
         """
-        state = '2' if transient else ('1' if success else '0')
-        content = f"{state}:{message}".encode('utf-8')
-        return Protocol.pack_message(MessageType.AUTH_RESP, '', len(content), False, content)
+        data = {
+            'ok': bool(success),
+            'message': message,
+            'room_id': room_id or '',
+            'room_instance_id': room_instance_id or '',
+            'transient': bool(transient),
+        }
+        return Protocol._pack_json(MessageType.AUTH_RESP, data)
+
+    @staticmethod
+    def parse_auth_response(content) -> dict:
+        """解析 AUTH_RESP content（JSON）；非法输入返回 ok=False 的失败结构。"""
+        try:
+            data = json.loads(content.decode('utf-8') if isinstance(content, bytes)
+                              else content)
+        except (ValueError, TypeError, AttributeError):
+            return {'ok': False, 'message': '验证响应格式错误',
+                    'room_id': '', 'room_instance_id': '', 'transient': False}
+        if not isinstance(data, dict):
+            return {'ok': False, 'message': '验证响应格式错误',
+                    'room_id': '', 'room_instance_id': '', 'transient': False}
+        return {
+            'ok': bool(data.get('ok')),
+            'message': str(data.get('message') or ''),
+            'room_id': str(data.get('room_id') or ''),
+            'room_instance_id': str(data.get('room_instance_id') or ''),
+            'transient': bool(data.get('transient')),
+        }
     
     @staticmethod
     def create_heartbeat() -> bytes:
@@ -468,21 +502,56 @@ class Protocol:
 
     @staticmethod
     def create_file_state_resp(src_id: str, entries: list, session: dict = None,
-                              dirs_missing: list = None) -> bytes:
+                              dirs_missing: list = None,
+                              scan_complete: bool = True,
+                              pending_count: int = 0) -> bytes:
         """创建文件状态响应消息（0x22，对端→端）
 
-        entries: [{name, op_no, state, exists, clock, ts}]（vv 由 src_id 隐式关联）
-        session（可选）: {session_id, token, host, port} 自同步会话——拉取方据此
-            直连本端 FileProvider 端到端拉取（阶段 2 自同步链路）。
-        dirs_missing（可选，26.9C2）：本端有而请求方清单无的目录名，由请求方本地
-            判定落地（删除优先在其本端生效，避免补发信号的新时间戳复活已删目录）。
+        entries: 仅活对象 [{name, op_no, state, clock, ts, id, is_dir, hash,
+            hash_state, size, vv}]；删除信息不经此通道。
+        scan_complete: 本端扫描是否完成（静默对齐期间为 False）。
+        pending_count: 仍待哈希的活对象数；非 0 时快照缺失不可作为删除确认。
+        session（可选）: {session_id, token, host, port} 自同步会话。
+        dirs_missing（可选）：本端有而请求方清单无的目录名。
         """
-        data = {'src_id': src_id, 'entries': entries}
+        data = {'src_id': src_id, 'entries': entries,
+                'scan_complete': bool(scan_complete),
+                'pending_count': int(pending_count or 0)}
         if session:
             data['session'] = session
         if dirs_missing:
             data['dirs_missing'] = dirs_missing
         return Protocol._pack_json(MessageType.FILE_STATE_RESP, data)
+
+    @staticmethod
+    def create_room_info_req(room_code: str) -> bytes:
+        """房间实例查询（0x36，主机建房前→同房间在线端）。"""
+        return Protocol._pack_json(MessageType.ROOM_INFO_REQ,
+                                   {'room_code': room_code or ''})
+
+    @staticmethod
+    def create_room_info(room_instance_id: str) -> bytes:
+        """房间实例应答（0x37，在线端→主机）：返回本端持有的房间实例编号。"""
+        return Protocol._pack_json(MessageType.ROOM_INFO,
+                                   {'room_instance_id': room_instance_id or ''})
+
+    @staticmethod
+    def create_tombstone_req(src_id: str, room_code: str = '',
+                             offset: int = 0) -> bytes:
+        """墓碑拉取请求（0x38，端→对端）：offset 为分页偏移。"""
+        return Protocol._pack_json(
+            MessageType.TOMBSTONE_REQ,
+            {'src_id': src_id, 'room_code': room_code or '',
+             'offset': int(offset or 0)})
+
+    @staticmethod
+    def create_tombstone_resp(src_id: str, entries: list, more: bool = False,
+                              next_offset: int = 0) -> bytes:
+        """墓碑拉取应答（0x39，对端→端）：只含 origin=delete 的墓碑，无哈希。"""
+        return Protocol._pack_json(
+            MessageType.TOMBSTONE_RESP,
+            {'src_id': src_id, 'entries': entries,
+             'more': bool(more), 'next_offset': int(next_offset or 0)})
 
     @staticmethod
     def create_sync_pull_req(session_id: str, token: str, name: str, offset: int = 0) -> bytes:
@@ -691,6 +760,10 @@ class MessageReceiver:
         MessageType.HOST_INFO,
         MessageType.ROOM_PEER_LIST,
         MessageType.PERM_POLICY,
+        MessageType.ROOM_INFO_REQ,
+        MessageType.ROOM_INFO,
+        MessageType.TOMBSTONE_REQ,
+        MessageType.TOMBSTONE_RESP,
         MessageType.CHAT_TEXT,
         MessageType.CHAT_FILE_OFFER,
         MessageType.CHAT_SESSION_CLOSE,

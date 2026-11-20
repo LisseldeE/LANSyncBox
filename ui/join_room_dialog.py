@@ -1,4 +1,5 @@
-"""加入房间对话框
+"""
+加入房间对话框
 Copyright (c) 2026 Lisselde_E <Lisselde.E@outlook.com>.
 Licensed under the GNU General Public License v3.0.
 """
@@ -1133,6 +1134,8 @@ class JoinRoomDialog(QDialog):
 
         # 创建临时 Client 进行验证
         client = SyncClient(self.room_code, password)
+        # 延迟数据面：缓存冲突决策（删除/保留/取消）完成后再启动
+        client.join_pending = True
         self._verified_client = client
 
         # 用事件循环等待验证结果

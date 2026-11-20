@@ -8,7 +8,8 @@ import re
 import threading
 from PySide6.QtWidgets import (
     QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
-    QPushButton, QLabel, QFrame, QSpacerItem, QSizePolicy, QApplication
+    QPushButton, QLabel, QFrame, QSpacerItem, QSizePolicy, QApplication,
+    QMessageBox
 )
 from PySide6.QtCore import Qt, QSize, Signal, QFileSystemWatcher, QTimer, QRectF, QUrl
 from PySide6.QtGui import QFont, QPainter, QPixmap, QColor, QPalette, QDesktopServices
@@ -426,8 +427,66 @@ class MainWindow(QMainWindow):
             # 获取预验证成功的 Client 实例（避免 SyncWindow 重复连接）
             verified_client = dialog.get_verified_client()
 
+            silent_align = False
+            remote_rid = str(getattr(verified_client, 'room_instance_id', '') or '')
+            if verified_client is not None:
+                from sync import room_instance as room_inst
+                db_path = room_inst.room_db_path(room_code)
+                room_folder = Config.get_room_folder(room_code)
+                decision = room_inst.inspect_join(db_path, room_folder, remote_rid)
+                if decision == room_inst.JOIN_NO_DB_EMPTY:
+                    if remote_rid:
+                        room_inst.write_room_instance_id(db_path, remote_rid)
+                elif decision in (room_inst.JOIN_NO_DB_NONEMPTY,
+                                  room_inst.JOIN_MISMATCH):
+                    choice = self._ask_room_cache_conflict(room_code)
+                    if choice == 'cancel':
+                        try:
+                            verified_client.disconnect()
+                        except Exception:
+                            pass
+                        return
+                    if choice == 'delete':
+                        if not room_inst.clear_room_cache(room_folder, db_path):
+                            QMessageBox.warning(
+                                self, I18n.tr('room_cache_conflict_title'),
+                                I18n.tr('room_cache_clean_failed'))
+                            try:
+                                verified_client.disconnect()
+                            except Exception:
+                                pass
+                            return
+                        if remote_rid:
+                            room_inst.write_room_instance_id(db_path, remote_rid)
+                    else:
+                        room_inst.discard_room_db(db_path)
+                        if remote_rid:
+                            room_inst.write_room_instance_id(db_path, remote_rid)
+                        silent_align = True
+
             # 打开同步窗口
-            self.open_sync_window(is_host=False, room_code=room_code, password=password, host_address=host_address, host_port=host_port, existing_client=verified_client)
+            self.open_sync_window(is_host=False, room_code=room_code, password=password, host_address=host_address, host_port=host_port, existing_client=verified_client, silent_align=silent_align)
+
+    def _ask_room_cache_conflict(self, room_code: str) -> str:
+        """本地缓存与房间编号不一致：删除旧缓存 / 保留文件带入 / 取消。"""
+        box = QMessageBox(self)
+        box.setWindowTitle(I18n.tr('room_cache_conflict_title'))
+        box.setIcon(QMessageBox.Warning)
+        box.setText(I18n.tr('room_cache_conflict_text').format(room=room_code))
+        delete_btn = box.addButton(
+            I18n.tr('room_cache_delete_enter'), QMessageBox.DestructiveRole)
+        keep_btn = box.addButton(
+            I18n.tr('room_cache_keep_files'), QMessageBox.AcceptRole)
+        cancel_btn = box.addButton(I18n.tr('cancel'), QMessageBox.RejectRole)
+        box.setDefaultButton(cancel_btn)
+        box.setEscapeButton(cancel_btn)
+        box.exec()
+        clicked = box.clickedButton()
+        if clicked is delete_btn:
+            return 'delete'
+        if clicked is keep_btn:
+            return 'keep'
+        return 'cancel'
     
     def on_toggle_language(self):
         """切换语言"""
@@ -644,7 +703,7 @@ class MainWindow(QMainWindow):
         dialog = AboutDialog(self)
         dialog.exec()
     
-    def open_sync_window(self, is_host: bool, room_code: str, password: str = "", host_address: str = "", host_port: int = None, existing_client=None):
+    def open_sync_window(self, is_host: bool, room_code: str, password: str = "", host_address: str = "", host_port: int = None, existing_client=None, silent_align: bool = False):
         """打开同步窗口"""
         from ui.sync_window import SyncWindow
 
@@ -659,6 +718,7 @@ class MainWindow(QMainWindow):
             host_address=host_address,
             host_port=host_port,
             existing_client=existing_client,
+            silent_align=silent_align,
         )
         self._sync_window.setWindowTitle(I18n.tr('app_name'))
         self._sync_window.setMinimumSize(Config.WINDOW_MIN_WIDTH, Config.WINDOW_MIN_HEIGHT)
