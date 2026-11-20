@@ -408,6 +408,16 @@ class StateStorage:
             self._dirty_tomb[key] = rec
         return True
 
+    def remove_tombstone(self, rel_path: str, file_id: str = '') -> bool:
+        """删除指定墓碑行（加载时清理缺文件ID的无效删除记录）。"""
+        key = (rel_path, file_id or '')
+        with self._lock:
+            self._dirty_tomb.pop(key, None)
+            with self._conn:
+                cur = self._conn.execute(
+                    'DELETE FROM tombstones WHERE rel_path=? AND file_id=?', key)
+            return bool(cur.rowcount)
+
     def gc_tombstones(self) -> int:
         """清理全体已知端已确认、且本地无同 id 活对象的删除墓碑。"""
         self.flush()

@@ -3774,7 +3774,9 @@ class SyncWindow(QMainWindow):
     def add_log(self, log_type: str, message: str):
         """添加日志（兼容旧代码）"""
         # 广播文件日志不在表格中显示，但会保留在隐藏日志中供导出
-        if message.startswith("广播文件:"):
+        # 自同步拉取完成与传输行内容重复，同样只进导出、不占日志列表
+        if (message.startswith("广播文件:")
+                or message.startswith("自同步拉取完成:")):
             self._hidden_logs.append((log_type, message))
             return
         self._add_record(message, log_type, "")

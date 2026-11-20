@@ -43,6 +43,9 @@ class FileStateStore(QObject):
     PULL_CONCURRENCY = 5   # 自同步拉取并发 worker 数：一轮对比入队的多个差异
                            # 文件并发拉取（设计：发送/接收端均支持 5 并发）；
                            # 发送端 FileProvider 每条连接独立线程，天然并行服务
+    ALIGN_HASH_RETRIES = 3  # 静默对齐残留哈希失败重试上限：对齐期文件被改写时
+                            # 重算；超限放弃静默对齐，交由正常新增链路同步，
+                            # 避免空 hash 残留让 _align_mode 永久不结束
 
     def __init__(self, end_id: str, sync_folder: str, mesh=None, distributor=None,
                  provider=None, parent=None, silent_align: bool = False):
@@ -176,7 +179,8 @@ class FileStateStore(QObject):
                         continue
                     residues[rel] = {'file_id': uuid.uuid4().hex,
                                      'hash': '', 'size': int(st.st_size),
-                                     'mtime': float(st.st_mtime)}
+                                     'mtime': float(st.st_mtime),
+                                     'retries': 0, 'failed': False}
         except OSError:
             residues = {}
         with self._lock:
@@ -204,14 +208,38 @@ class FileStateStore(QObject):
 
     def _on_align_hash_done(self, result: dict):
         rel = result.get('rel_path', '')
+        resubmit = False
+        file_id = ''
+        hasher = None
         with self._lock:
             rec = self._align_residues.get(rel)
             if rec is None or not self._align_mode:
                 return
-            if result.get('error') or result.get('changed'):
+            err = result.get('error') or ''
+            if not err and not result.get('changed'):
+                rec['hash'] = result.get('hash') or ''
+                rec['size'] = int(result.get('size') or rec['size'])
+                rec['mtime'] = float(result.get('mtime') or rec.get('mtime') or 0.0)
                 return
-            rec['hash'] = result.get('hash') or ''
-            rec['size'] = int(result.get('size') or rec['size'])
+            if err == 'missing':
+                # 扫描后文件已被删除：重算不可能成功，直接落终态
+                rec['failed'] = True
+            else:
+                rec['retries'] = int(rec.get('retries') or 0) + 1
+                if rec['retries'] > self.ALIGN_HASH_RETRIES:
+                    rec['failed'] = True
+                    self.log_message.emit(
+                        f"静默对齐放弃残留（哈希失败 {rec['retries']} 次）: {rel}")
+                else:
+                    resubmit = True
+            if resubmit:
+                file_id = rec['file_id']
+                hasher = self._align_hasher
+        if resubmit and hasher is not None:
+            try:
+                hasher.submit(self._safe_join(rel), rel, file_id, kind='align')
+            except (OSError, ValueError):
+                pass
 
     def wait_align_hashed(self, timeout: float = 5.0) -> bool:
         """等待残留哈希全部完成（测试/启动同步兜底）。"""
@@ -221,7 +249,7 @@ class FileStateStore(QObject):
                 if not self._align_mode:
                     return True
                 pending = [r for r in self._align_residues.values()
-                           if not r.get('hash')]
+                           if not r.get('hash') and not r.get('failed')]
             if not pending:
                 return True
             time.sleep(0.02)
@@ -997,7 +1025,8 @@ class FileStateStore(QObject):
             host, port, session_id, token, name, dest,
             msg_type=MessageType.SYNC_PULL_REQ,
             # 落盘前复核：拉取在途期间本端胜者内容若已确定且不同，放弃落盘
-            pre_replace=lambda: self._slot_stale(name, item),
+            pre_replace=lambda: (self._slot_stale(name, item)
+                                 or self._ancestor_deleted(name)),
             # 把本 store 的停止事件透传给拉取：退出房间/整体停止时设置 _stop，
             # pull_file 会在下一次 recv 超时(≤1s) 感知并取消，释放 .part 句柄并删除
             # 临时文件——否则工作线程会一直占着句柄（直到整体超时或对端关连接），
@@ -1009,7 +1038,8 @@ class FileStateStore(QObject):
             # 删除优先（IO 后）：拉取期间本端已删除 → 移除复活字节；
             # 胜者内容已定且与槽目标不同 → 移除刚落的过时字节
             if self._tombstone_blocks(name, cand.file_id) \
-                    or self._slot_stale(name, item):
+                    or self._slot_stale(name, item) \
+                    or self._ancestor_deleted(name):
                 self.log_message.emit(
                     f"拉取 {name} 落盘，但本地已删除/已更新，移除该字节")
                 try:
@@ -1399,12 +1429,21 @@ class FileStateStore(QObject):
         if offline and got_response:
             return
         keep = {}
+        dropped = 0
+        dropped_names = []
         for name, rec in residues.items():
             abs_path = self._safe_join(name)
-            if not rec.get('hash'):
-                keep[name] = rec
-                continue
             if not os.path.exists(abs_path):
+                # 残留对象已不在盘上（对齐期被删/移走）：作废，落终态
+                dropped += 1
+                continue
+            if not rec.get('hash'):
+                if rec.get('failed'):
+                    # 哈希重试耗尽：放弃静默对齐，交由结束后的正常新增链路
+                    dropped += 1
+                    dropped_names.append(name)
+                    continue
+                keep[name] = rec
                 continue
             if name in pending_paths:
                 keep[name] = rec
@@ -1440,8 +1479,9 @@ class FileStateStore(QObject):
             if incomplete:
                 keep[name] = rec
                 continue
-            # 有墓碑则删残留不发布，否则视为本端新增并发布
-            if self.distributor.tombstone_for_path(name):
+            # 删除必须身份对应：只有墓碑 ID 与残留对象相同时才删。不同 ID 说明
+            # 是另一个对象（例如用户选择保留带入的本地文件），按路径删会误删。
+            if self.distributor.has_tombstone(name, rec['file_id']):
                 try:
                     os.remove(abs_path)
                 except OSError:
@@ -1468,6 +1508,17 @@ class FileStateStore(QObject):
                 self._align_timer = None
                 hasher = self._align_hasher
                 self._align_hasher = None
+        if dropped:
+            self.log_message.emit(
+                f"静默对齐放弃 {dropped} 个残留（已删除或哈希失败）")
+        # 哈希失败的残留立即按本端新增登记，交正常哈希链路接管：
+        # emit_local_missing 只在建连/模式切换时触发，不保证下一拍会来。
+        if self.distributor is not None:
+            for name in dropped_names:
+                try:
+                    self.distributor._register_new_local(name, False)
+                except Exception:
+                    pass
         if done:
             if timer is not None:
                 try:

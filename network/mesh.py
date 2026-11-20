@@ -462,9 +462,11 @@ class MeshManager(QObject):
                     break
                 last_activity = time.time()
                 receiver.feed(data)
-                while receiver.has_complete_message():
-                    message = receiver.get_message()
-                    self._dispatch(peer_ep.end_id, message)
+                if self._drain_messages(receiver, peer_ep.end_id):
+                    # 业务处理（墓碑 + 文件状态全量对账）可能耗时数秒：处理完立即
+                    # 刷新活动时间，不能把本端处理耗时算成对端静默——否则健康
+                    # 连接会被判死拆链，重连后再跑一轮对账，形成抖动自持循环。
+                    last_activity = time.time()
         except Exception:
             pass
         finally:
@@ -578,11 +580,13 @@ class MeshManager(QObject):
             while not stop.wait(self.HEARTBEAT_INTERVAL):
                 if not self.running:
                     return
-                try:
-                    guard.send(conn_socket, Protocol.create_heartbeat())
-                except Exception:
-                    stop.set()
-                    return
+                # 背压时放弃本拍而非退出线程：sendall 遇缓冲满会抛 socket.timeout，
+                # 若据此终止线程，对端处理全量对账的几秒内本端会永久失去心跳，
+                # 随后被对端判死拆链；重连再跑一轮对账，形成抖动自持循环。
+                guard.send_resumable(
+                    conn_socket, Protocol.create_heartbeat(),
+                    best_effort=True,
+                    total_timeout=self.HEARTBEAT_INTERVAL * 0.75)
 
         threading.Thread(target=_loop, daemon=True).start()
         return stop
@@ -643,6 +647,19 @@ class MeshManager(QObject):
             self.mesh_message.emit(end_id, msg_type, filename, file_size, mtime, hide, content)
         except Exception:
             pass
+
+    def _drain_messages(self, receiver: MessageReceiver, end_id: str) -> bool:
+        """派发接收缓冲中已完整的消息，返回本轮是否处理过业务。
+
+        业务派发是同步的（可能耗时数秒的全量对账），调用方据此在派发结束后
+        刷新活动时间：静默判死只应对“对端真的没说话”生效，不应对“本端正在
+        处理”生效。
+        """
+        handled = False
+        while receiver.has_complete_message():
+            self._dispatch(end_id, receiver.get_message())
+            handled = True
+        return handled
 
     # ---- 工具 ----
 
