@@ -12,7 +12,7 @@ from PySide6.QtCore import QThread, Signal
 
 
 def _is_temp_name(name: str) -> bool:
-    """传输临时文件（与 FileManager.get_file_list_for_sync 的跳过规则一致）。"""
+    """非同步临时文件（与 FileManager.get_file_list_for_sync 跳过规则一致）。"""
     return name.endswith('.tmp') or (name.startswith('.tcp_')
                                      and name.endswith('.part'))
 

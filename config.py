@@ -102,6 +102,26 @@ class Config:
 
     # 默认同步文件夹
     SYNC_FOLDER_NAME = "SyncFolder"
+
+    # 同步根目录内的本地提示文件：只在本机存在，不参与同步
+    SYNC_NOTICE_NAME = "请勿直接操作此目录.txt"
+    SYNC_NOTICE_TEXT = (
+        "LANSyncBox 同步目录使用提示\n"
+        "================================\n\n"
+        "为保证多台设备之间的文件同步准确，避免文件丢失、重复或版本错乱，\n"
+        "请勿直接在本目录（含下方各房间目录）中新建、修改、删除、重命名或移动文件。\n\n"
+        "请打开 LANSyncBox，在软件内的文件列表中完成全部文件操作：\n"
+        "  · 在软件内重命名或移动，会被识别为同一文件的路径变更，不会重复传输；\n"
+        "  · 在本目录中直接操作，可能被识别为「新增 + 删除」，造成重复文件或额外传输。\n\n"
+        "本提示文件只存在于当前设备，不会同步给其他设备；\n"
+        "如果它被删除，下次启动时会自动补建。\n\n"
+        "--------------------------------\n"
+        "Important\n"
+        "To keep files consistent across devices, please do not create, edit,\n"
+        "delete, rename or move files in this folder directly. Use LANSyncBox\n"
+        "instead. This notice is local only and is never synchronized; it is\n"
+        "recreated automatically on the next start if removed.\n"
+    )
     
     # 房间号配置
     ROOM_CODE_LENGTH = 6
@@ -243,11 +263,45 @@ class Config:
 
     @staticmethod
     def get_room_folder(room_code: str) -> Path:
-        """获取指定房间的同步文件夹"""
+        """获取指定房间的同步文件夹（提示文件只放在同步根目录，不进房间目录）"""
         sync_folder = Config.get_sync_folder()
         room_folder = sync_folder / room_code
         room_folder.mkdir(exist_ok=True)
         return room_folder
+
+    @staticmethod
+    def is_sync_notice(name: str) -> bool:
+        """是否为同步目录提示文件（只比较文件名，大小写不敏感）。"""
+        base = os.path.basename(str(name or ''))
+        return base.casefold() == Config.SYNC_NOTICE_NAME.casefold()
+
+    @staticmethod
+    def ensure_sync_notice(folder) -> None:
+        """确保目录内存在提示文件；已存在则保持原样，不覆盖用户改动。"""
+        try:
+            path = Path(folder) / Config.SYNC_NOTICE_NAME
+            if not path.exists():
+                path.write_text(Config.SYNC_NOTICE_TEXT, encoding='utf-8')
+        except OSError:
+            pass  # 只读目录/权限不足：提示文件缺失不影响同步
+
+    @staticmethod
+    def ensure_sync_notices() -> None:
+        """启动检查：同步根目录补建提示文件，并清理旧版本遗留在房间目录内的副本。
+
+        提示文件只放根目录：根目录不属于任何房间的同步范围，既不会被同步，
+        也不会被当成房间缓存内容（曾导致首次加入误报房间缓存不一致）。
+        """
+        try:
+            root = Config.get_sync_folder()
+            Config.ensure_sync_notice(root)
+            for child in root.iterdir():
+                if child.is_dir() and child.name != "preview":
+                    stale = child / Config.SYNC_NOTICE_NAME
+                    if stale.is_file():
+                        stale.unlink()
+        except OSError:
+            pass
 
     @staticmethod
     def get_preview_folder(room_code: str = "") -> Path:
@@ -280,6 +334,8 @@ class Config:
                 # 忽略 preview 预览文件夹（不算缓存占用）
                 dirnames[:] = [d for d in dirnames if d != "preview"]
                 for filename in filenames:
+                    if Config.is_sync_notice(filename):
+                        continue  # 本地提示文件不算缓存占用
                     filepath = os.path.join(dirpath, filename)
                     # 忽略符号链接等特殊情况
                     if os.path.isfile(filepath):

@@ -4,7 +4,8 @@ Copyright (c) 2026 Lisselde_E <Lisselde.E@outlook.com>.
 Licensed under the GNU General Public License v3.0.
 
 身份模型：files 以 file_id 为主键、rel_path 唯一。改名只更新同一行的
-rel_path，不产生第二条路径记录。目录不是实体，不落库。
+rel_path，不产生第二条路径记录。显式创建的目录同样是实体（is_dir=1 落库），
+参与创建/改名/删除与身份合并；拉取时自动产生的父目录不建身份。
 """
 import json
 import os
@@ -30,12 +31,14 @@ CREATE TABLE IF NOT EXISTS files (
     hash_state   TEXT,
     size         INTEGER,
     mtime        REAL,
+    is_dir       INTEGER NOT NULL DEFAULT 0,
     updated_at   REAL
 );
 
 CREATE TABLE IF NOT EXISTS tombstones (
     rel_path     TEXT NOT NULL,
     file_id      TEXT NOT NULL DEFAULT '',
+    is_dir       INTEGER NOT NULL DEFAULT 0,
     origin       TEXT NOT NULL DEFAULT 'delete',
     op_no        INTEGER NOT NULL,
     clock        INTEGER NOT NULL,
@@ -62,23 +65,25 @@ CREATE TABLE IF NOT EXISTS peers (
 
 _UPSERT_FILE = """
 INSERT INTO files (file_id, rel_path, op_no, clock, ts, vv, hash,
-                   hash_state, size, mtime, updated_at)
-VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                   hash_state, size, mtime, is_dir, updated_at)
+VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 ON CONFLICT(file_id) DO UPDATE SET
     rel_path=excluded.rel_path, op_no=excluded.op_no,
     clock=excluded.clock, ts=excluded.ts, vv=excluded.vv, hash=excluded.hash,
     hash_state=excluded.hash_state, size=excluded.size,
-    mtime=excluded.mtime, updated_at=excluded.updated_at
+    mtime=excluded.mtime, is_dir=excluded.is_dir,
+    updated_at=excluded.updated_at
 """
 
 _UPSERT_TOMBSTONE = """
-INSERT INTO tombstones (rel_path, file_id, origin, op_no, clock, ts,
+INSERT INTO tombstones (rel_path, file_id, is_dir, origin, op_no, clock, ts,
                         vv, deleted_at, confirmed_by)
-VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 ON CONFLICT(rel_path, file_id) DO UPDATE SET
-    origin=excluded.origin, op_no=excluded.op_no,
-    clock=excluded.clock, ts=excluded.ts, vv=excluded.vv,
-    deleted_at=excluded.deleted_at, confirmed_by=excluded.confirmed_by
+    is_dir=excluded.is_dir, origin=excluded.origin,
+    op_no=excluded.op_no, clock=excluded.clock, ts=excluded.ts,
+    vv=excluded.vv, deleted_at=excluded.deleted_at,
+    confirmed_by=excluded.confirmed_by
 """
 
 _UPSERT_COUNTER = """
@@ -108,7 +113,7 @@ def _loads(text, default):
 class StateStorage:
     """房间 db：内存脏集合 + 定时批量提交，读取前先刷盘保证一致。"""
 
-    SCHEMA_VERSION = 2           # v2：file_id 主键；旧库直接重建
+    SCHEMA_VERSION = 3           # v3：files/tombstones 增加 is_dir；v2 库原地补列
     TOMBSTONE_LIMIT = 10000
     COUNTER_LIMIT = 100000       # 计数器行上限：超出后淘汰无引用最旧行
     COUNTER_TRIM_EVERY = 2000    # 累计写入多少计数器行后检查一次上限（限频）
@@ -127,6 +132,7 @@ class StateStorage:
         self._conn.execute('PRAGMA synchronous=NORMAL')
         self._rebuild_if_outdated()
         self._conn.executescript(_SCHEMA)
+        self._migrate_columns()
         self._conn.execute(
             'INSERT INTO meta(key, value) VALUES(?, ?) '
             'ON CONFLICT(key) DO UPDATE SET value=excluded.value',
@@ -149,7 +155,11 @@ class StateStorage:
             self._thread.start()
 
     def _rebuild_if_outdated(self):
-        """旧版路径主键库不迁移：低于当前版本时清掉状态表重建。"""
+        """旧版路径主键库（v1 及更早）不迁移：清表重建。
+
+        v2 起结构兼容（file_id 主键），is_dir 列由 _migrate_columns 原地补齐，
+        不清数据——避免升级后全量重扫、重广播。
+        """
         try:
             row = self._conn.execute(
                 'SELECT value FROM meta WHERE key=?',
@@ -158,7 +168,7 @@ class StateStorage:
             row = None
         if row is not None:
             try:
-                if int(row[0]) >= self.SCHEMA_VERSION:
+                if int(row[0]) >= 2:
                     return
             except (TypeError, ValueError):
                 pass
@@ -167,6 +177,25 @@ class StateStorage:
                 'DROP TABLE IF EXISTS files;'
                 'DROP TABLE IF EXISTS tombstones;'
                 'DROP TABLE IF EXISTS counters;')
+
+    def _migrate_columns(self):
+        """就地补 is_dir 列（v2 → v3），保留既有文件清单与墓碑。"""
+        for table in ('files', 'tombstones'):
+            try:
+                cols = {r[1] for r in self._conn.execute(
+                    f'PRAGMA table_info({table})').fetchall()}
+            except sqlite3.Error as e:
+                self._log_msg(f"读取表结构失败 {table}: {e}")
+                continue
+            if 'is_dir' in cols:
+                continue
+            try:
+                with self._conn:
+                    self._conn.execute(
+                        f'ALTER TABLE {table} ADD COLUMN '
+                        f'is_dir INTEGER NOT NULL DEFAULT 0')
+            except sqlite3.Error as e:
+                self._log_msg(f"补 is_dir 列失败 {table}: {e}")
 
     # ---- 生命周期 ----
 
@@ -209,10 +238,12 @@ class StateStorage:
                             json.dumps(rec.get('vv') or {}, ensure_ascii=False),
                             rec.get('hash') or '', rec.get('hash_state') or 'none',
                             rec.get('size'), float(rec.get('mtime') or 0.0),
+                            1 if rec.get('is_dir') else 0,
                             float(rec.get('updated_at') or time.time())))
                     for (path, fid), rec in tombs.items():
                         self._conn.execute(_UPSERT_TOMBSTONE, (
-                            path, fid, rec.get('origin') or 'delete',
+                            path, fid, 1 if rec.get('is_dir') else 0,
+                            rec.get('origin') or 'delete',
                             int(rec.get('op_no', 0)), int(rec.get('clock', 0)),
                             float(rec.get('ts') or 0.0),
                             json.dumps(rec.get('vv') or {}, ensure_ascii=False),
@@ -299,6 +330,7 @@ class StateStorage:
             'hash_state': record.get('hash_state') or 'none',
             'size': record.get('size'),
             'mtime': float(record.get('mtime') or 0.0),
+            'is_dir': 1 if record.get('is_dir') else 0,
             'updated_at': time.time(),
         }
         with self._lock:
@@ -325,12 +357,13 @@ class StateStorage:
         with self._lock:
             rows = self._conn.execute(
                 'SELECT rel_path, file_id, op_no, clock, ts, vv, hash, '
-                'hash_state, size, mtime FROM files').fetchall()
+                'hash_state, size, mtime, is_dir FROM files').fetchall()
         out = {}
         for (path, fid, op_no, clock, ts, vv, hash_, hash_state,
-             size, mtime) in rows:
+             size, mtime, is_dir) in rows:
             out[path] = {
-                'rel_path': path, 'file_id': fid or '', 'is_dir': 0,
+                'rel_path': path, 'file_id': fid or '',
+                'is_dir': int(is_dir or 0),
                 'op_no': int(op_no), 'clock': int(clock), 'ts': float(ts or 0.0),
                 'vv': _loads(vv, {}), 'hash': hash_ or '',
                 'hash_state': hash_state or 'none', 'size': size,
@@ -395,7 +428,8 @@ class StateStorage:
     def put_tombstone(self, record: dict):
         key = (record['rel_path'], record.get('file_id') or '')
         rec = {
-            'rel_path': key[0], 'file_id': key[1], 'is_dir': 0,
+            'rel_path': key[0], 'file_id': key[1],
+            'is_dir': 1 if record.get('is_dir') else 0,
             'origin': record.get('origin') or 'delete',
             'op_no': int(record.get('op_no') or 0),
             'clock': int(record.get('clock') or 0),
@@ -412,14 +446,15 @@ class StateStorage:
         with self._lock:
             rows = self._conn.execute(
                 'SELECT rel_path, file_id, origin, op_no, clock, ts, '
-                'vv, deleted_at, confirmed_by FROM tombstones').fetchall()
+                'vv, deleted_at, confirmed_by, is_dir FROM tombstones').fetchall()
         out = {}
         for (path, fid, org, op_no, clock, ts, vv, deleted_at,
-             confirmed) in rows:
+             confirmed, is_dir) in rows:
             if origin is not None and org != origin:
                 continue
             out[(path, fid)] = {
-                'rel_path': path, 'file_id': fid, 'is_dir': 0,
+                'rel_path': path, 'file_id': fid,
+                'is_dir': int(is_dir or 0),
                 'origin': org, 'op_no': int(op_no), 'clock': int(clock),
                 'ts': float(ts or 0.0), 'vv': _loads(vv, {}),
                 'deleted_at': float(deleted_at or 0.0),

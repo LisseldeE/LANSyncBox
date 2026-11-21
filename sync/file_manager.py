@@ -12,8 +12,6 @@ from pathlib import Path
 from typing import List, Dict, Optional
 from datetime import datetime
 
-from config import Config
-
 
 def safe_rmtree(path, onerror=None):
     """安全删除目录树，处理 Windows 只读文件导致的权限问题。

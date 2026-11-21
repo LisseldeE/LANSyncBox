@@ -684,6 +684,15 @@ class SyncWindow(QMainWindow):
         self._sync_active_sends = set()   # "session_id:name:conn_id"
         self._sync_active_recvs = set()   # 相对路径
 
+        # 总体同步状态防抖：进入「同步中」立即切换，退出延迟回落，
+        # 避免频繁收发时状态图标在两个状态间来回闪烁
+        self._sync_state_shown = None      # 当前已提交给胶囊的状态
+        self._sync_state_pending = None    # 等待延迟应用的退出状态
+        self._sync_state_timer = QTimer(self)
+        self._sync_state_timer.setSingleShot(True)
+        self._sync_state_timer.setInterval(600)
+        self._sync_state_timer.timeout.connect(self._flush_sync_state)
+
         # 局域网剪切板监控（房间连接成功后才使能；本端复制→上报主机分发）
         from utils.clipboard_monitor import ClipboardMonitor
         self._monitor = ClipboardMonitor(self)
@@ -2731,6 +2740,38 @@ class SyncWindow(QMainWindow):
             state = 'syncing'
         else:
             state = 'synced'
+        self._apply_sync_state_debounced(state)
+
+    def _apply_sync_state_debounced(self, state: str):
+        """同步状态防抖：立即进入「同步中」，退出延迟 0.6s，避免图标频繁闪烁。"""
+        if state == self._sync_state_shown:
+            self._sync_state_pending = None
+            self._sync_state_timer.stop()
+            return
+        if self._sync_state_shown is None or state == 'syncing':
+            # 首次显示与开始同步都即时生效，保证反馈不延迟
+            self._sync_state_timer.stop()
+            self._sync_state_pending = None
+            self._sync_state_shown = state
+            file_list = getattr(self, 'file_list', None)
+            if file_list is not None:
+                file_list.set_sync_state(state)
+            return
+        # 退出「同步中」：挂起目标状态，0.6s 内若又回到同步中则取消回落
+        self._sync_state_pending = state
+        self._sync_state_timer.start()
+
+    @Slot()
+    def _flush_sync_state(self):
+        """防抖超时：持续空闲满 0.6s 后才真正切换到退出状态。"""
+        state = self._sync_state_pending
+        self._sync_state_pending = None
+        if not state or state == self._sync_state_shown:
+            return
+        file_list = getattr(self, 'file_list', None)
+        if file_list is None:
+            return
+        self._sync_state_shown = state
         file_list.set_sync_state(state)
 
     def _collect_recv_active(self) -> bool:
@@ -3507,6 +3548,24 @@ class SyncWindow(QMainWindow):
             lines.append(Config.APP_SERIAL_FULL)
             # 第二行写入导出时间（精确到秒，无标题）
             lines.append(now.strftime('%Y-%m-%d %H:%M:%S'))
+            # 本端角色、房间号与房间内部编号：排障时用于区分是哪一端导出的日志。
+            # 房间号是六位数字（用户可见）；房间内部编号用于校验同号房间是否仍是
+            # 之前那一间（换实例后缓存需要重新对齐），两者概念不同，不能混用。
+            lines.append(f"角色: {'主机端' if self.is_host else '连接端'}")
+            lines.append(f"房间号: {self.room_code}")
+            room_rid = ''
+            try:
+                if self.is_host and self.server is not None:
+                    rid = getattr(self.server, '_room_instance_id', '') or ''
+                    if not rid and hasattr(self.server, 'ensure_room_instance_id'):
+                        rid = self.server.ensure_room_instance_id()
+                    room_rid = str(rid or '')
+                elif not self.is_host and self.client is not None:
+                    room_rid = str(getattr(self.client, 'room_instance_id', '') or '')
+            except Exception:
+                room_rid = ''
+            if room_rid:
+                lines.append(f"房间内部编号: {room_rid}")
             for row in range(self.records_table.rowCount()):
                 action_item = self.records_table.item(row, 0)
                 info_item = self.records_table.item(row, 1)
@@ -3984,6 +4043,12 @@ class SyncWindow(QMainWindow):
                 # 去中心化阶段 1：同步模式下删除指令沿网状直连传播（不再经主机转发）
                 if self._mesh_sync_active():
                     self._emit_mesh_signal('delete', rel_path)
+                elif self._mode == "sync":
+                    # 同步模式但网状链路未就绪：仍走分发器记账（无对端时零投递），
+                    # 靠建连对账收敛；绝不回退无 ID 的旧通道——旧通道绕过状态表，
+                    # 会让对端身份停留在旧路径。
+                    if not (self.client and self.client.perm == "ro"):
+                        self._emit_mesh_signal('delete', rel_path)
                 elif self.is_host and self.server:
                     self.server.broadcast_delete(file_path)
                 elif self.client:
@@ -4017,6 +4082,12 @@ class SyncWindow(QMainWindow):
                 # 去中心化阶段 1：同步模式下变更指令沿网状直连传播（不再经主机转发）
                 if self._mesh_sync_active():
                     self._emit_mesh_signal('rename', new_rel_path, old=old_rel_path)
+                elif self._mode == "sync":
+                    # 同步模式但网状链路未就绪：仍走分发器记账（含目录补建身份），
+                    # 绝不回退无 ID 的旧通道，否则对端账本停在旧路径、身份被换掉。
+                    if not (self.client and self.client.perm == "ro"):
+                        self._emit_mesh_signal('rename', new_rel_path,
+                                               old=old_rel_path)
                 elif self.is_host and self.server:
                     self.server.broadcast_rename(old_path, new_path)
                 elif self.client:
@@ -4045,6 +4116,11 @@ class SyncWindow(QMainWindow):
                 # 去中心化阶段 1：同步模式下目录创建沿网状直连传播（不再经主机转发）
                 if self._mesh_sync_active():
                     self._emit_mesh_signal('dir_create', rel_path)
+                elif self._mode == "sync":
+                    # 同步模式但网状链路未就绪：仍由分发器登记目录身份（无对端时
+                    # 零投递）；旧通道只会 mkdir、不建身份，后续删除将无 ID 可用。
+                    if not (self.client and self.client.perm == "ro"):
+                        self._emit_mesh_signal('dir_create', rel_path)
                 elif self.is_host and self.server:
                     self.server.broadcast_dir_create(dir_path)
                 elif self.client:

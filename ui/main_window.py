@@ -155,6 +155,8 @@ class MainWindow(QMainWindow):
 
     def __init__(self):
         super().__init__()
+        # 同步目录提示文件：每次启动检查并补建（本地文件，不参与同步）
+        Config.ensure_sync_notices()
         self._sync_window = None  # 保持同步窗口引用
         self._settings_dialog = None  # 设置对话框引用（非模态需持有防 GC）
         self._version_label = None  # 版本和缓存信息标签

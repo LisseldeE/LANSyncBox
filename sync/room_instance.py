@@ -82,9 +82,10 @@ def resolve_host_instance_id(db_path: str, probe=None, timeout: float = 0.8) -> 
 
 
 def _has_entries(room_folder) -> bool:
+    """目录内是否有用户缓存内容：程序自动补建的提示文件不算（首次加入不误报）。"""
     try:
         with os.scandir(str(room_folder)) as it:
-            return any(True for _ in it)
+            return any(not Config.is_sync_notice(entry.name) for entry in it)
     except OSError:
         return False
 

@@ -6,6 +6,7 @@ Copyright (c) 2026 Lisselde_E <Lisselde.E@outlook.com>.
 Licensed under the GNU General Public License v3.0.
 """
 import os
+import stat
 import threading
 import shutil
 import time
@@ -1650,6 +1651,30 @@ class FileListWidget(QWidget):
             QApplication.processEvents(QEventLoop.ExcludeUserInputEvents)
             time.sleep(0.01)
 
+    @staticmethod
+    def _rename_force(src, dst):
+        """移动/改名；Windows 下只读对象拒绝 rename，先清只读位再重试。"""
+        try:
+            return src.rename(dst)
+        except OSError:
+            try:
+                os.chmod(str(src), stat.S_IWRITE)
+            except OSError:
+                pass
+            return src.rename(dst)
+
+    @staticmethod
+    def _unlink_force(path):
+        """删除文件；Windows 下只读文件拒绝删除，先清只读位再重试。"""
+        try:
+            path.unlink()
+        except OSError:
+            try:
+                os.chmod(str(path), stat.S_IWRITE)
+            except OSError:
+                pass
+            path.unlink()
+
     def _refresh_after_mutation(self):
         """本地增删改完成后刷新视图：搜索态重新扫描，普通态刷新当前目录。"""
         if not self._search_mode:
@@ -2378,7 +2403,7 @@ class FileListWidget(QWidget):
                                 from sync.file_manager import safe_rmtree
                                 safe_rmtree(src_file)
                             else:
-                                src_file.unlink()
+                                self._unlink_force(src_file)
                     except Exception as e:
                         print(f"删除源文件失败: {e}")
                     break
@@ -2441,10 +2466,10 @@ class FileListWidget(QWidget):
                         from sync.file_manager import safe_rmtree
                         safe_rmtree(dst_file)
                     else:
-                        dst_file.unlink()
+                        self._unlink_force(dst_file)
 
                 # 使用 rename 快速移动
-                src_file.rename(dst_file)
+                self._rename_force(src_file, dst_file)
 
                 # 发射重命名信号（本质是移动）
                 if not self.is_syncing(str(dst_file)):
@@ -2513,7 +2538,7 @@ class FileListWidget(QWidget):
                             if file.is_dir():
                                 safe_rmtree(file)
                             else:
-                                file.unlink()
+                                self._unlink_force(file)
                             deleted = True
                             break
                         except PermissionError as pe:
@@ -2792,7 +2817,7 @@ class FileListWidget(QWidget):
                     last_error = None
                     for attempt in range(30):
                         try:
-                            old_path.rename(new_path)
+                            self._rename_force(old_path, new_path)
                             renamed = True
                             break
                         except PermissionError as pe:
@@ -3106,8 +3131,8 @@ class FileListWidget(QWidget):
                             from sync.file_manager import safe_rmtree
                             safe_rmtree(dst)
                         else:
-                            dst.unlink()
-                    src.rename(dst)
+                            self._unlink_force(dst)
+                    self._rename_force(src, dst)
 
                     # 触发同步信号
                     if not self.is_syncing(str(src)):

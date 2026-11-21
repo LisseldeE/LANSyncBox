@@ -1496,6 +1496,12 @@ class SyncServer(QObject):
                 safe_rmtree(file_path)
 
             self.log_message.emit(f"删除: {target}")
+
+            # 旧通道无 ID：同步模式下补记删除，避免状态表残留活对象
+            if (self.mode == "sync" and self.distributor
+                    and self.distributor.get_state(target) is not None):
+                self.distributor.emit('delete', target)
+
             self.file_deleted.emit(filename)
             
             # 转发给其他客户端（收集模式下不转发）
@@ -1524,7 +1530,11 @@ class SyncServer(QObject):
         os.makedirs(dir_path, exist_ok=True)
         
         self.log_message.emit(f"创建目录: {target}")
-        
+
+        # 旧通道无身份：同步模式下补登记目录身份，否则后续删除无 ID 可用
+        if self.mode == "sync" and self.distributor:
+            self.distributor.emit('dir_create', target)
+
         # 发射目录创建信号
         self.dir_created.emit(dirname)
         
@@ -1559,8 +1569,12 @@ class SyncServer(QObject):
             old_path = self._safe_join(old_target)
             new_path = self._safe_join(new_target)
 
-            # 如果目标文件已存在，先删除
+            # 目标已存在：同步模式交给身份仲裁与周期对账，绝不无 ID 覆盖删除
             if os.path.exists(new_path):
+                if self.mode == "sync":
+                    self.log_message.emit(
+                        f"变更跳过（目标已存在）: {old_target} → {new_target}")
+                    return
                 if os.path.isdir(new_path):
                     from sync.file_manager import safe_rmtree
                     safe_rmtree(new_path)
@@ -1570,6 +1584,10 @@ class SyncServer(QObject):
             os.rename(old_path, new_path)
 
             self.log_message.emit(f"变更: {old_target} → {new_target}")
+
+            # 旧通道无 ID：同步模式下补记到分发器，避免状态表停在旧路径
+            if self.mode == "sync" and self.distributor:
+                self.distributor.emit('rename', new_target, old=old_target)
 
             # 发射变更信号
             self.file_renamed.emit(old_name, new_name)

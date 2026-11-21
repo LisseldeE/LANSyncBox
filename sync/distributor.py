@@ -77,6 +77,10 @@ class Distributor(QObject):
         # 阶段 A：房间 db 持久化（None = 纯内存，单测/离线场景）
         self._storage = None
         self._tombstones = {}   # (path, file_id) -> 墓碑记录
+        # 已收到目录删除信号的根（rel -> 删除 clock）：子项删除信号可能后到，
+        # 每处理一个子项就重试清理这批根下的空壳目录，直到整棵子树消失。
+        self._deleted_dir_roots = {}
+        self._rmdir_fail_logged = set()  # 诊断：已记录过删除失败的目录，防日志刷屏
         self._db_meta = {}      # file_id -> (size, mtime)：db 落库时的磁盘内容快照
         self._peers = set()     # 认证成功连接过的已知端（持久 end_id）
         # 阶段 B：哈希队列（None = 不启用 pending 门禁，同步广播语义不变）
@@ -194,7 +198,7 @@ class Distributor(QObject):
             ts=float(rec.get('ts') or 0.0), vv=dict(rec.get('vv') or {}),
             file_id=rec.get('file_id') or '', hash=rec.get('hash') or '',
             hash_state=rec.get('hash_state') or 'none',
-            size=int(rec.get('size') or 0), is_dir=False)
+            size=int(rec.get('size') or 0), is_dir=bool(rec.get('is_dir')))
 
     def attach_hasher(self, hasher):
         """接入哈希队列：pending 条目算完 MD5+size 后才发布 add（阶段 B）。"""
@@ -356,7 +360,7 @@ class Distributor(QObject):
         result = {'deleted': 0, 'added': 0, 'updated': 0}
         if self._storage is None:
             return result
-        disk_files, _disk_dirs, scan_complete = self._scan_disk()
+        disk_files, disk_dirs, scan_complete = self._scan_disk()
         if not os.path.isdir(self.sync_folder):
             self._notify_log('同步目录不可达，本轮不核对删除')
         elif not scan_complete:
@@ -367,12 +371,23 @@ class Distributor(QObject):
         if os.path.isdir(self.sync_folder):
             for st in states:
                 kind = self._path_kind(st.name)
+                if st.is_dir:
+                    # 目录身份要求磁盘上仍是目录；被文件取代或消失 → 落删态
+                    if kind == 'dir':
+                        continue
+                    self._mark_local_deleted(st)
+                    if kind == 'file':
+                        # 同路径已换成文件：摘掉旧目录的路径索引，让新文件在
+                        # 本轮按文件身份登记（删态仍留在状态表里）。
+                        self._free_path(st.name, st.file_id)
+                    result['deleted'] += 1
+                    continue
                 if kind == 'missing':
                     self._mark_local_deleted(st)
                     result['deleted'] += 1
                 elif kind == 'dir':
                     # 文件被同名目录取代：旧文件身份落墓碑；目录内的文件由
-                    # 扫描按新身份登记（目录本身不是实体）。
+                    # 扫描按新身份登记。
                     self._mark_local_deleted(st)
                     result['deleted'] += 1
         for path in sorted(disk_files):
@@ -381,6 +396,20 @@ class Distributor(QObject):
             if known:
                 continue  # 已有条目或墓碑残留 → 不复活
             self._register_new_local(path)
+            result['added'] += 1
+        # 磁盘上的空目录：显式目录身份（无墓碑才登记）。非空目录通常是拉取
+        # 时自动创建的隐式父目录，不建身份。
+        for path in sorted(disk_dirs, key=lambda p: (p.count('/'), p)):
+            with self._lock:
+                known = path in self._by_path or path in tomb_paths
+            if known:
+                continue
+            try:
+                if os.listdir(self._safe_join(path)):
+                    continue
+            except (OSError, ValueError):
+                continue
+            self._register_new_dir(path)
             result['added'] += 1
         # db 有、盘在但 size/mtime 变化：视为同一 ID 的更新（§6），提版本重算哈希
         with self._lock:
@@ -528,7 +557,9 @@ class Distributor(QObject):
         self._store(FileState(
             name=remote.name, op_no=remote.op_no, state=STATE_ADD,
             exists=True, clock=remote.clock, ts=remote.ts, vv=dict(remote.vv),
-            file_id=remote.file_id, hash=remote.hash, hash_state='ok',
+            file_id=remote.file_id,
+            hash='' if remote.is_dir else remote.hash,
+            hash_state='none' if remote.is_dir else 'ok',
             size=int(remote.size or 0), is_dir=bool(remote.is_dir)))
 
     def publish_residue(self, path: str, file_id: str, hash_value: str,
@@ -550,7 +581,7 @@ class Distributor(QObject):
         signal = {
             'src_id': self.end_id, 'op_no': op_no, 'op': self.OP_ADD,
             'file': path, 'state': STATE_ADD, 'clock': clock, 'ts': ts,
-            'vv': vv, 'id': file_id or '', 'hash': hash_value or '',
+            'vv': vv, 'id': fid, 'hash': hash_value or '',
         }
         self._broadcast_signal(signal)
         return signal
@@ -669,8 +700,9 @@ class Distributor(QObject):
         证明是同一对象，也不允许按路径删同名文件——只记录墓碑。
         """
         if origin != 'delete':
-            self._record_tombstone(path, file_id, origin=origin,
-                                   op_no=op_no, clock=clock, ts=ts, vv=vv)
+            self._record_tombstone(path, file_id, is_dir=is_dir,
+                                   origin=origin, op_no=op_no, clock=clock,
+                                   ts=ts, vv=vv)
             return False
         if not file_id:
             self._notify_log(f"拒绝无效删除墓碑（缺文件ID）: {path}")
@@ -680,24 +712,42 @@ class Distributor(QObject):
         if st is None or not st.exists or st.name != path:
             # 身份不成立：可能是同一路径的新对象，也可能是本端从未持有
             # 该 ID 的对象。两种情况都不能删盘，只保留墓碑用于去重。
-            self._record_tombstone(path, file_id, origin=origin,
-                                   op_no=op_no, clock=clock, ts=ts, vv=vv)
+            self._record_tombstone(path, file_id, is_dir=is_dir,
+                                   origin=origin, op_no=op_no, clock=clock,
+                                   ts=ts, vv=vv)
             return False
         removed = False
         try:
-            self._delete_local(path)
-            removed = True
-        except OSError as e:
-            self._notify_log(f"本地删除失败，仍记录墓碑: {path}: {e}")
+            dir_path = self._safe_join(path)
+        except ValueError:
+            dir_path = None
+        if st.is_dir or is_dir:
+            # 目录身份删除：只在目录为空时 rmdir；非空只落墓碑，由子项各自的
+            # 删除信号与空目录收敛完成物理删除（绝不整棵 rmtree）。
+            if dir_path is not None:
+                try:
+                    os.rmdir(dir_path)
+                    removed = True
+                except OSError:
+                    removed = False
+        else:
+            try:
+                self._delete_local(path)
+                removed = True
+            except OSError as e:
+                self._notify_log(f"本地删除失败，仍记录墓碑: {path}: {e}")
         op, ck = self._bump_version(file_id, st)
         t = float(ts or time.time())
         vv2 = dict(vv or {})
         vv2[self.end_id] = op
         self._store(FileState(name=path, op_no=op, state=STATE_CHANGE,
                               exists=False, clock=ck, ts=t, vv=vv2,
-                              file_id=file_id))
-        self._record_tombstone(path, file_id, origin=origin, op_no=op,
-                               clock=ck, ts=t, vv=vv2)
+                              file_id=file_id, is_dir=st.is_dir or is_dir))
+        self._record_tombstone(path, file_id, is_dir=(st.is_dir or is_dir),
+                               origin=origin, op_no=op, clock=ck, ts=t, vv=vv2)
+        if removed:
+            # 目录不是实体：删掉最后一个文件后，空父目录（含各级祖先）自然消失
+            self._prune_empty_dirs(os.path.dirname(path).replace('\\', '/'))
         return removed
 
     def _forget_tombstone(self, path: str, file_id: str):
@@ -721,13 +771,14 @@ class Distributor(QObject):
         with self._lock:
             prev = self._tombstones.get(key)
             rec = dict(prev) if prev else {
-                'rel_path': key[0], 'file_id': key[1], 'is_dir': 0,
+                'rel_path': key[0], 'file_id': key[1],
+                'is_dir': 1 if is_dir else 0,
                 'origin': origin, 'op_no': 0, 'clock': 0, 'ts': 0.0,
                 'vv': {}, 'deleted_at': time.time(), 'confirmed_by': [],
             }
             if prev is not None:
                 rec['origin'] = prev.get('origin') or 'delete'
-            rec['is_dir'] = 0
+            rec['is_dir'] = 1 if (is_dir or rec.get('is_dir')) else 0
             if op_no:
                 rec['op_no'] = int(op_no)
                 rec['clock'] = int(clock or 0)
@@ -787,6 +838,7 @@ class Distributor(QObject):
             'op_no': st.op_no, 'clock': st.clock, 'ts': st.ts, 'vv': st.vv,
             'hash': st.hash, 'hash_state': st.hash_state,
             'size': size, 'mtime': mtime,
+            'is_dir': 1 if st.is_dir else 0,
         })
         with self._lock:
             self._db_meta[st.file_id] = (size, mtime)
@@ -844,9 +896,20 @@ class Distributor(QObject):
         vv[self.end_id] = op_no
         self._store(FileState(name=st.name, op_no=op_no, state=STATE_CHANGE,
                               exists=False, clock=clock, ts=ts, vv=vv,
-                              file_id=st.file_id))
-        self._record_tombstone(st.name, st.file_id, origin='delete',
-                               op_no=op_no, clock=clock, ts=ts, vv=vv)
+                              file_id=st.file_id, is_dir=st.is_dir))
+        self._record_tombstone(st.name, st.file_id, is_dir=st.is_dir,
+                               origin='delete', op_no=op_no, clock=clock,
+                               ts=ts, vv=vv)
+
+    def _free_path(self, path: str, file_id: str):
+        """把路径从旧身份的路径索引上摘除（旧身份的删态仍留在状态表里）。
+
+        只在「同路径被另一种类型接管」时使用：新旧身份必须能在同一轮对账里
+        各自登记；普通删除仍需保留路径索引，避免磁盘残留被误判成新对象复活。
+        """
+        with self._lock:
+            if path and self._by_path.get(path) == file_id:
+                self._by_path.pop(path, None)
 
     def _register_new_local(self, path: str):
         fid = new_file_id()
@@ -868,6 +931,20 @@ class Distributor(QObject):
                       'vv': dict(st.vv) if st else {self.end_id: op_no},
                       'id': fid}
             self._enqueue_hash(st, 'local_add', {'signal': signal})
+
+    def _register_new_dir(self, path: str):
+        """启动对账发现磁盘空目录：登记显式目录身份（不发哈希、不拉取）。"""
+        fid = new_file_id()
+        op_no, clock = self._bump_version(fid, None)
+        ts = time.time()
+        self._store(FileState(
+            name=path, op_no=op_no, state=STATE_ADD, exists=True,
+            clock=clock, ts=ts, vv={self.end_id: op_no},
+            file_id=fid, hash='', hash_state='none', is_dir=True))
+        self._broadcast_signal({
+            'src_id': self.end_id, 'op_no': op_no, 'op': self.OP_DIR_CREATE,
+            'file': path, 'state': STATE_ADD, 'clock': clock, 'ts': ts,
+            'vv': {self.end_id: op_no}, 'id': fid, 'is_dir': True})
 
     def _scan_disk(self):
         """扫描同步目录，返回 (files, dirs, complete)。
@@ -977,7 +1054,16 @@ class Distributor(QObject):
             file_id=remote.file_id,
             hash=local.hash if hash_ok else remote.hash,
             hash_state='ok' if hash_ok else remote.hash_state,
-            size=local.size or remote.size))
+            size=local.size or remote.size, is_dir=local.is_dir))
+        if local.is_dir or remote.is_dir:
+            # 采纳的是目录改名：子树账本必须跟着走，否则本端会继续按旧前缀
+            # 上报子项，对端再按旧路径把子树搬回去。
+            self._move_descendant_states(local.name, target)
+        old_parent = os.path.dirname(local.name).replace('\\', '/')
+        if old_parent:
+            # 旧父目录被搬空后立即收敛：否则会留下空壳目录，被补扫登记成
+            # 新身份后反向广播，表现为「改名前的目录以空目录复活」。
+            self._prune_empty_dirs(old_parent)
         base = int(remote.vv.get(self.end_id, 0) or 0)
         self.recover_floor(remote.file_id, base, remote.clock)
         self._persist_state(self._states[remote.file_id])
@@ -999,41 +1085,66 @@ class Distributor(QObject):
     # ---- 本地操作入口 ----
 
     def emit(self, op: str, file: str, old: str = None) -> Optional[dict]:
-        """本地文件操作 → 生成 DISTRIBUTE_SIGNAL 沿网状传播并记录本端状态。
+        """本地文件/目录操作 → 生成 DISTRIBUTE_SIGNAL 沿网状传播并记录本端状态。
 
         本地 FS 已由调用方完成（本方法不重复执行 FS 操作，仅记录状态 + 传播）。
-        目录不是实体：dir_create 一律忽略（空目录不同步）；目录删除展开为其下
-        每个已登记文件各自的删除信号。
+        显式创建的目录是实体：dir_create 携带身份（is_dir=True）参与同步；隐式
+        目录（拉取时 makedirs 出来的父目录）不建身份。目录删除 = 子项各自删除
+        + 一条目录删除信号。
         """
         if not file:
             return None
-        if op == self.OP_DIR_CREATE:
-            return None  # 空目录不参与同步（与 git 一致）
+        # 复制/拖入文件夹时根目录走的是 file_added（add 信号）：早期这里直接
+        # 丢弃，导致「添加端添加的文件夹」根目录从未登记身份，另一端删除它时
+        # 本端无 ID 可用、空壳只能靠兜底清理。统一按目录创建登记身份。
         if op == self.OP_ADD and self._path_is_dir(file):
-            return None
-        if op == self.OP_DELETE and self.get_state(file) is None \
-                and (self._path_is_dir(file) or self._has_child_states(file)):
-            self._delete_dir_local(file)
-            return None
+            op = self.OP_DIR_CREATE
         prev = None
         fid = ''
-        if op in (self.OP_RENAME, self.OP_MOVE):
-            prev = self.get_state(old or file) or self.get_state(file)
-            fid = prev.file_id if prev else ''
-            if not prev and old and self._has_child_states(old):
-                # 目录改名：没有目录身份，只把子树路径前缀平移
-                self._move_descendant_states(old, file)
-                self._prune_empty_dirs(old)
-                return None
-            if not fid:
-                fid = new_file_id()
+        is_dir = False
+        if op == self.OP_DIR_CREATE:
+            if not self._path_is_dir(file):
+                return None  # 建后即删：无对象可登记
+            existing = self.get_state(file)
+            if existing is not None and existing.exists:
+                return None  # 该路径已有活身份（重复事件）
+            # 删除后再建：给新身份，旧墓碑只压制旧 ID，不会拦死同名重建
+            fid = new_file_id()
+            is_dir = True
         elif op == self.OP_DELETE:
             prev = self.get_state(file)
-            fid = prev.file_id if prev else ''
-            if not fid:
+            if prev is not None and prev.is_dir:
+                # 显式目录删除：子项各自删除（身份独立），目录自身只发一条信号
+                self._delete_dir_children(file)
+                fid = prev.file_id
+                is_dir = True
+                # 目录删掉后，其上的隐式父目录若已空也随之收敛
+                self._prune_empty_dirs(
+                    os.path.dirname(file).replace('\\', '/'))
+            elif prev is None and (self._path_is_dir(file)
+                                   or self._has_child_states(file)):
+                self._delete_dir_local(file)
+                return None
+            elif prev is None:
                 self._notify_log(
                     f"本地删除缺少文件ID（对象未登记），不广播: {file}")
                 return None
+            else:
+                fid = prev.file_id
+        elif op in (self.OP_RENAME, self.OP_MOVE):
+            prev = self.get_state(old or file) or self.get_state(file)
+            fid = prev.file_id if prev else ''
+            if prev is not None and prev.is_dir:
+                is_dir = True
+            elif not prev and (self._has_child_states(old or file)
+                               or self._path_is_dir(file)):
+                # 目录此前没有身份（隐式目录或旧通道建出的目录）：用户显式改名
+                # 即视为显式目录，补建身份并发出带 ID 的改名信号。否则对端拿不到
+                # 身份，后续删除/再改名只能按路径猜，出现「目录没有ID」。
+                fid = new_file_id()
+                is_dir = True
+            if not fid:
+                fid = new_file_id()
         else:
             prev = self.get_state(file)
             fid = self._file_id_for_content(file)
@@ -1064,6 +1175,8 @@ class Distributor(QObject):
         }
         if old is not None:
             signal['old'] = old
+        if is_dir:
+            signal['is_dir'] = True
         # 阶段 B：删除/改名先撤销在途哈希，防止旧路径结果迟到发布
         if self._hasher is not None and op in (self.OP_DELETE, self.OP_RENAME,
                                                self.OP_MOVE):
@@ -1086,6 +1199,18 @@ class Distributor(QObject):
         self._broadcast_signal(signal)
         return signal
 
+    def _delete_dir_children(self, folder: str):
+        """显式目录删除前：逐个发送其下已登记子项（文件/子目录）的删除信号。
+
+        不做空目录收敛——父目录身份还在，物理删除由调用方（UI）已完成。
+        """
+        pfx = folder.rstrip('/') + '/'
+        with self._lock:
+            names = sorted(st.name for st in self._states.values()
+                           if st.exists and st.name.startswith(pfx))
+        for name in names:
+            self.emit(self.OP_DELETE, name)
+
     def _has_child_states(self, folder: str) -> bool:
         pfx = folder.rstrip('/') + '/'
         with self._lock:
@@ -1093,30 +1218,165 @@ class Distributor(QObject):
                        for st in self._states.values())
 
     def _delete_dir_local(self, folder: str):
-        """目录删除退化为「其下文件逐个删除 + 清理空目录」（目录不是实体）。"""
+        """隐式目录删除：其下文件逐个删除 + 清理空目录。
+
+        显式目录身份走 emit 的目录分支（一条目录信号），不经过这里。
+        """
         pfx = folder.rstrip('/') + '/'
         with self._lock:
-            names = sorted(st.name for st in self._states.values()
-                           if st.exists and st.name.startswith(pfx))
+            alive = [st for st in self._states.values()
+                     if st.exists and st.name.startswith(pfx)]
+        names = sorted(st.name for st in alive)
+        max_clock = max((st.clock for st in alive), default=0)
         for name in names:
             self.emit(self.OP_DELETE, name)
+        # 目录自身无身份（隐式建出/旧版本数据）：仍要广播一条目录删除信号。
+        # 否则对端同一目录若有身份，收不到删除授权，会作为「显式空目录」被
+        # _prune_empty_dirs 永久保护。全新 ID 只承载删除知识，接收端仅在本地
+        # 目录版本不更新时空壳清理（见 _prune_deleted_dir_tree 的 clock 保护）。
+        if names:
+            with self._lock:
+                key = '@orphan_dir_delete'
+                op_no = self._op_counters.get(key, 0) + 1
+                self._op_counters[key] = op_no
+            self._broadcast_signal({
+                'src_id': self.end_id, 'op_no': op_no, 'op': self.OP_DELETE,
+                'file': folder, 'state': STATE_CHANGE,
+                'clock': max_clock + 1, 'ts': time.time(),
+                'vv': {self.end_id: op_no}, 'id': new_file_id(),
+                'is_dir': True, 'orphan': True,
+            })
         self._prune_empty_dirs(folder)
 
+    def _clear_readonly(self, path: str):
+        """清除只读属性：Windows 下只读对象拒绝删除/移动，失败则忽略。"""
+        try:
+            os.chmod(path, stat.S_IWRITE)
+        except OSError:
+            pass
+
+    def _rmdir_force(self, path: str) -> bool:
+        """删除空目录；Windows 下只读目录（WinError 5）先清属性再重试。
+
+        返回是否已删除。只对空目录操作，绝不递归删内容。
+        """
+        try:
+            os.rmdir(path)
+            return True
+        except OSError:
+            pass
+        self._clear_readonly(path)  # 清除 ReadOnly 位
+        try:
+            os.rmdir(path)
+            return True
+        except OSError as e:
+            self._log_rmdir_failure(path, e)
+            return False
+
+    def _log_rmdir_failure(self, path: str, err: OSError):
+        """诊断：记录删除空目录失败的原因（错误码 / 剩余条目 / 文件属性）。"""
+        if path in self._rmdir_fail_logged:
+            return
+        self._rmdir_fail_logged.add(path)
+        try:
+            names = os.listdir(path)
+            rest = f'{len(names)}项 {names[:5]}'
+        except OSError as e:
+            rest = f'无法列举({e})'
+        attr = ''
+        try:
+            attr = f'|属性={os.stat(path).st_file_attributes}'
+        except Exception:
+            pass
+        self._notify_log(f'诊断: 空目录删除失败 {path} | 错误={err} | 剩余={rest}{attr}')
+
     def _prune_empty_dirs(self, folder: str):
-        """自底向上移除空目录；非空（含未知身份文件）时保留。"""
+        """自底向上移除空目录（含其祖先，直到同步根）；非空/受保护时保留。"""
         if not folder:
             return  # 同步根目录本身永不删除
-        try:
-            path = self._safe_join(folder)
-        except ValueError:
-            return
-        if folder in self._protected_dirs or not os.path.isdir(path):
-            return
-        for root, _dirs, _files in os.walk(path, topdown=False):
+        rel = folder.replace('\\', '/').strip('/')
+        while rel:
             try:
-                os.rmdir(root)
-            except OSError:
-                pass
+                path = self._safe_join(rel)
+            except ValueError:
+                return
+            if rel in self._protected_dirs:
+                return
+            with self._lock:
+                _fid = self._by_path.get(rel)
+                _st = self._states.get(_fid) if _fid else None
+            if _st is not None and _st.exists and _st.is_dir:
+                return  # 显式目录：文件删空后保留身份，不再向上收敛
+            if os.path.isdir(path):
+                for root, _dirs, _files in os.walk(path, topdown=False):
+                    self._rmdir_force(root)
+                if os.path.isdir(path):
+                    return  # 本层仍非空（或被占用），祖先必然也非空
+            # 本层已不在：继续向上，祖先可能同样已经空了
+            rel = os.path.dirname(rel).replace('\\', '/')
+
+    def _prune_deleted_dir_roots(self, path: str):
+        """子项删除后重试清理已删目录留下的空壳子树。"""
+        if not self._deleted_dir_roots:
+            return
+        norm = (path or '').replace('\\', '/')
+        for root, info in list(self._deleted_dir_roots.items()):
+            if norm == root or norm.startswith(root.rstrip('/') + '/'):
+                self._prune_deleted_dir_tree(
+                    root, int(info.get('clock', 0)),
+                    ignore_clock=bool(info.get('orphan')))
+        # 防御性上限：并发新增内容导致长期非空的删除根不能无限积累
+        if len(self._deleted_dir_roots) > 256:
+            for root in list(self._deleted_dir_roots)[:64]:
+                self._deleted_dir_roots.pop(root, None)
+
+    def _prune_deleted_dir_tree(self, root: str, clock: int,
+                                ignore_clock: bool = False):
+        """删除目录后后序清空其下空壳目录（只删空目录，绝不删文件）。
+
+        子目录可能带过空目录身份（空目录补扫登记），文件删空后
+        _prune_empty_dirs 会因「显式目录」停手，留下大量空壳。父目录删除
+        意味着整棵子树都应消失：空目录删除，且其身份（不晚于删除版本）记
+        墓碑摘除；非空目录（并发新增内容）保留，后续子项删除时重试。
+        """
+        rel = (root or '').strip('/')
+        if not rel:
+            return
+        try:
+            full = self._safe_join(rel)
+        except ValueError:
+            self._deleted_dir_roots.pop(rel, None)
+            return
+        if not os.path.isdir(full):
+            self._deleted_dir_roots.pop(rel, None)
+            return
+        try:
+            names = os.listdir(full)
+        except OSError:
+            return
+        for name in names:
+            child = f"{rel}/{name}"
+            try:
+                child_full = self._safe_join(child)
+            except ValueError:
+                continue
+            if os.path.isdir(child_full):
+                self._prune_deleted_dir_tree(child, clock, ignore_clock)
+        with self._lock:
+            fid = self._by_path.get(rel)
+            st = self._states.get(fid) if fid else None
+        if (not ignore_clock and st is not None and st.exists and st.is_dir
+                and st.clock > clock):
+            return  # 比删除更新：并发新建的显式目录，保留
+        if not self._rmdir_force(full):
+            return  # 仍有内容：保留，等后续子项删除再试
+        if st is not None and st.exists:
+            self._record_tombstone(rel, st.file_id, is_dir=bool(st.is_dir),
+                                   origin='delete', op_no=st.op_no,
+                                   clock=st.clock, ts=st.ts, vv=dict(st.vv))
+            self._drop_identity(st.file_id)
+        self._deleted_dir_roots.pop(rel, None)
+        self._prune_empty_dirs(os.path.dirname(rel).replace('\\', '/'))
 
     def remove_state(self, file: str):
         """移除端内文件状态条目（自同步链路列表收敛：双方均已删除的文件）。
@@ -1144,7 +1404,8 @@ class Distributor(QObject):
         with self._lock:
             candidates = [(path, fid, rec) for (path, fid), rec
                           in self._tombstones.items()
-                          if rec.get('origin') == 'delete' and fid]
+                          if rec.get('origin') == 'delete' and fid
+                          and not rec.get('is_dir')]
         for file, fid, rec in candidates:
             if done >= limit:
                 break
@@ -1200,6 +1461,19 @@ class Distributor(QObject):
                 fid = new_file_id()
             op_no = self._op_counters.get(fid, 0) + 1
             self._op_counters[fid] = op_no
+        if prev is not None and prev.exists and prev.name and prev.name != file:
+            # 同身份已在另一路径存活（改名信号先于拉取回执应用）：回执只能
+            # 记知识，不得把身份路径写回旧名——否则磁盘留下两份字节，重启后
+            # 旧路径那份成为无身份新文件，永久重复。
+            self._record_knowledge(fid, {remote_src_id: int(remote_op_no or 0)})
+            self._notify_log(
+                f"拉取回执忽略：同身份已在 {prev.name}，不回退路径 {file}")
+            if on_done is not None:
+                try:
+                    on_done(False)
+                except Exception:
+                    pass
+            return None
         ts = float(remote_ts or 0.0) or time.time()
         clock = int(remote_clock or 0)
         # 防胜者端被低版本拉取降级：仅当拉取版本严格强于本端状态时才采纳
@@ -1459,24 +1733,40 @@ class Distributor(QObject):
                              file_id=signal.get('id', '')
                              or signal.get('file_id', '') or '',
                              hash=signal.get('hash', '') or '',
-                             hash_state=('ok' if signal.get('hash') else 'pending'))
-        # 身份优先仲裁：已知 file_id 的状态优先于同路径的其他身份；
-        # 同一身份换了路径（改名）也按身份取本地状态，避免拿旧名的新对象比对。
+                             hash_state=('ok' if signal.get('hash') else 'pending'),
+                             is_dir=bool(signal.get('is_dir')))
+        # 全链路身份驱动：无 ID 的分发信号（只有旧版本端才会发）无法映射到
+        # 唯一身份，接收端凭空补 ID 会与对端永久分叉，改名/删除再也对不上。
+        # 版本闸门已拦旧端，这里整条拒收：不建状态、不转发、不动磁盘。
+        if not incoming.file_id:
+            self._notify_log(
+                f"拒绝无文件ID的分发信号（对端版本不兼容）: {op} {file}")
+            return
+        if op == self.OP_DIR_CREATE or (op == self.OP_ADD
+                                        and incoming.is_dir):
+            # 目录创建：建目录 + 登记目录身份（不参与拉取/哈希）
+            self._apply_dir_create(file, signal, src_id, op_no, clock, ts, vv)
+            return
+        # 身份优先仲裁：按 ID 取本地状态；同一身份换了路径（改名）也按身份取，
+        # 避免拿旧名的新对象比对。未知 ID 不得借用同路径/旧路径上的其他身份。
         with self._lock:
-            local = self._states.get(incoming.file_id) if incoming.file_id else None
-        if local is None and op != self.OP_DELETE:
-            local = self.get_state(file)
-            if local is None and op in (self.OP_RENAME, self.OP_MOVE):
-                local = self.get_state(old or file)
-            if local is not None and not incoming.file_id:
-                incoming.file_id = local.file_id or ''
+            local = self._states.get(incoming.file_id)
+        if local is None and op == self.OP_ADD:
+            # 同路径同内容不同 ID：身份合并（不搬字节、不产生重复文件）。
+            # 此处只做身份代次裁决，不借用占位者身份参与改名/仲裁。
+            occupant = self.get_state(file)
+            if (occupant is not None and occupant.exists
+                    and occupant.hash_state == 'ok' and occupant.hash
+                    and signal.get('hash') == occupant.hash):
+                self._merge_same_content(file, occupant, incoming)
+                self._record_knowledge(occupant.file_id, vv)
+                self._forward(signal, src_id)
+                return
         if local is not None and op != self.OP_DELETE:
-            same_id = (not incoming.file_id or not local.file_id
-                       or incoming.file_id == local.file_id)
             # 删除不参与版本仲裁：文件 ID 是唯一身份，ID 对应即删（由下方
             # 删除分支精确匹配）。若先走四层裁决，回归端拉取后继承的版本
             # 高于删除信号版本时会判「本地胜出」，删除永远传播不出去。
-            if same_id and pulled:
+            if pulled:
                 # 拉取回执：仅合并对端知识，不应用、不覆盖（防回声风暴）
                 self._record_knowledge(local.file_id, vv)
                 self._forward(signal, src_id)
@@ -1489,28 +1779,24 @@ class Distributor(QObject):
                 self._record_knowledge(local.file_id, vv)
                 self._forward(signal, src_id)
                 return
-            if not same_id:
-                # 同路径不同身份：不按版本仲裁，交给下方「clock 高者占路径」处理
-                pass
-            else:
-                result = compare_states(incoming, local, src_id, self.end_id)
-                if (result == 0 and local.exists and local.hash_state != 'ok'
-                        and incoming.hash_state == 'ok'
-                        and incoming.hash != local.hash):
-                    # 同版本但本端是无内容证据的副本（元数据先到、字节未到）→
-                    # 借源端迟到的哈希信号补拉校正，避免永久分叉
-                    self._request_conflict_pull(file, src_id)
-                if result <= 0:
-                    if result == -1:
-                        # 本地胜出：忽略远端信号，仅记对端 vv 知识
-                        self._record_knowledge(incoming.file_id, vv)
-                        self._notify_log(
-                            f"本地版本胜出，忽略远端 {src_id} 信号: {file}")
-                    self._forward(signal, src_id)  # 已收敛也继续转发（其他端可能需应用）
-                    return
-                # 远端胜出：覆盖本地内容
-                if local.clock > 0:
-                    self._notify_log(f"本地修改被远端覆盖: {file}")
+            result = compare_states(incoming, local, src_id, self.end_id)
+            if (result == 0 and local.exists and local.hash_state != 'ok'
+                    and incoming.hash_state == 'ok'
+                    and incoming.hash != local.hash):
+                # 同版本但本端是无内容证据的副本（元数据先到、字节未到）→
+                # 借源端迟到的哈希信号补拉校正，避免永久分叉
+                self._request_conflict_pull(file, src_id)
+            if result <= 0:
+                if result == -1:
+                    # 本地胜出：忽略远端信号，仅记对端 vv 知识
+                    self._record_knowledge(incoming.file_id, vv)
+                    self._notify_log(
+                        f"本地版本胜出，忽略远端 {src_id} 信号: {file}")
+                self._forward(signal, src_id)  # 已收敛也继续转发（其他端可能需应用）
+                return
+            # 远端胜出：覆盖本地内容
+            if local.clock > 0:
+                self._notify_log(f"本地修改被远端覆盖: {file}")
         # 目录不是实体：没有祖先目录状态需要拦截，文件各自按 ID 仲裁。
         want_pull = False
         try:
@@ -1574,10 +1860,6 @@ class Distributor(QObject):
                 # 删除留「删态」（exists=False）：源端延迟的 add 信号到达时
                 # 本端 state.exists=False 判本地胜出，只记知识并转发、不再重建。
                 sig_id = incoming.file_id
-                if not sig_id:
-                    # 缺 ID 的删除指令不成立：不删本地、不建墓碑、不再转发
-                    self._notify_log(f"删除信号缺少文件ID，已忽略: {file}")
-                    return
                 st = self._states.get(sig_id)
                 if st is None or not st.exists or st.name != file:
                     # 身份不对应：本地是另一个活对象（可能同路径重建），或本端
@@ -1588,41 +1870,92 @@ class Distributor(QObject):
                     self._record_tombstone(file, sig_id, origin='delete',
                                            op_no=op_no, clock=clock, ts=ts,
                                            vv=vv)
+                    if incoming.is_dir:
+                        # 目录删除信号身份不匹配（旧端无身份、或信号只承载删除
+                        # 授权）：只要本端该路径目录版本不更新，就清空壳子树。
+                        # 删除后并发新建的目录 clock 更新，由 clock 保护保留；
+                        # orphan 信号明确表示「删除方已删整棵目录」，此时本端
+                        # 对账抬高的 clock 不应阻止清理（只删空目录，绝不删文件）。
+                        orphan = bool(signal.get('orphan'))
+                        local = self.get_state(file)
+                        if (orphan or local is None or not local.exists
+                                or (local.is_dir
+                                    and local.clock <= int(clock))):
+                            self._deleted_dir_roots[file] = {
+                                'clock': int(clock), 'orphan': orphan}
+                            self._prune_deleted_dir_tree(
+                                file, int(clock), ignore_clock=orphan)
+                    # 属于已登记删除根时重试清空（文件/目录删空后触发）
+                    self._prune_empty_dirs(
+                        os.path.dirname(file).replace('\\', '/'))
+                    self._prune_deleted_dir_roots(file)
                     self._forward(signal, src_id)
                     return
-                try:
-                    self._delete_local(file)
-                except OSError as e:
-                    # 在途拉取的 .part 被占用（WinError 32）等：磁盘删不掉也
-                    # 必须记录墓碑并转发，否则删除知识丢失、删除永不收敛。
-                    self._notify_log(f"本地删除失败，仍记录删除: {file}: {e}")
+                is_dir_del = bool(incoming.is_dir or st.is_dir)
+                if is_dir_del:
+                    # 目录身份删除：先尝试直接 rmdir；大量子目录带过空目录
+                    # 身份（补扫登记过），逐个文件删除后它们会变成「带活身份
+                    # 的空壳」并阻断 _prune_empty_dirs。登记删除根并后序清空。
+                    self._deleted_dir_roots[file] = {
+                        'clock': int(clock), 'orphan': False}
+                    self._prune_deleted_dir_tree(file, int(clock))
+                else:
+                    try:
+                        self._delete_local(file)
+                    except OSError as e:
+                        # 在途拉取的 .part 被占用（WinError 32）等：磁盘删不掉也
+                        # 必须记录墓碑并转发，否则删除知识丢失、删除永不收敛。
+                        self._notify_log(f"本地删除失败，仍记录删除: {file}: {e}")
                 self._store(FileState(name=file, op_no=op_no, state=STATE_CHANGE,
                                       exists=False, clock=clock, ts=ts,
-                                      vv=vv, file_id=sig_id))
-                self._record_tombstone(file, sig_id, origin='delete',
-                                       op_no=op_no, clock=clock, ts=ts, vv=vv)
-                # 目录不是实体：最后一个文件删除后父目录自然消失
+                                      vv=vv, file_id=sig_id,
+                                      is_dir=is_dir_del))
+                self._record_tombstone(file, sig_id, is_dir=is_dir_del,
+                                       origin='delete', op_no=op_no,
+                                       clock=clock, ts=ts, vv=vv)
+                # 最后一个文件删除后父目录自然消失（显式目录身份会阻断收敛）
                 self._prune_empty_dirs(os.path.dirname(file).replace('\\', '/'))
+                # 该文件属于某个已删目录：重试清空那一批根下的空壳子树
+                self._prune_deleted_dir_roots(file)
             elif op in (self.OP_RENAME, self.OP_MOVE):
                 old_name = old or file
                 if local is None:
-                    # 本端未登记该身份：按信号把磁盘上的旧名改到新名后登记。
-                    # 源路径不存在不再静默丢弃，仍推进到信号终态（字节缺失由
-                    # 后续快照按 ID 补拉）。
-                    if old_name != file:
+                    # 本端未登记该身份：只按 (clock, ts) 争目标路径，绝不搬
+                    # 本端字节——旧路径上的字节属于另一个身份；缺的字节由
+                    # 快照按 ID 补拉。
+                    fid = incoming.file_id
+                    target = self._claim_path(fid, file, clock, ts)
+                    if target != file:
+                        # 目标路径被本端更高版本身份占据，该改名不得抢路径
+                        self._notify_log(
+                            f"改名信号身份未知且版本较低，暂不应用: {file}")
+                        self._forward(signal, src_id)
+                        return
+                    exists = os.path.exists(self._safe_join(target))
+                    self._forget_tombstone(target, fid)
+                    if incoming.is_dir and old_name != target:
+                        # 对端把本端未登记的目录改名到 target：旧路径上的目录
+                        # 通常就是同一次改名的物理对象（旧通道建出/两端身份
+                        # 已分叉）。整体搬过去，避免只在新路径建空目录、把旧
+                        # 目录留成空壳后被补扫成新身份反向广播。
+                        self._adopt_unregistered_dir_rename(
+                            old_name, target, fid)
+                        exists = os.path.exists(self._safe_join(target))
+                    if incoming.is_dir and not exists:
                         try:
-                            self._rename_local(old_name, file)
-                        except OSError as e:
-                            self._notify_log(
-                                f"重命名失败: {old_name}→{file}: {e}")
-                    fid = incoming.file_id or new_file_id()
-                    exists = os.path.exists(self._safe_join(file))
-                    self._forget_tombstone(file, fid)
+                            os.makedirs(self._safe_join(target), exist_ok=True)
+                            exists = True
+                        except (OSError, ValueError) as e:
+                            self._notify_log(f"创建目录失败: {target}: {e}")
+                            return
                     self._store(FileState(
-                        name=file, op_no=op_no, state=STATE_CHANGE,
+                        name=target, op_no=op_no, state=STATE_CHANGE,
                         exists=exists, clock=clock, ts=ts, vv=vv,
-                        file_id=fid, hash=incoming.hash,
-                        hash_state=incoming.hash_state))
+                        file_id=fid,
+                        hash='' if incoming.is_dir else incoming.hash,
+                        hash_state='none' if incoming.is_dir
+                        else incoming.hash_state,
+                        is_dir=incoming.is_dir))
                     self._forward(signal, src_id)
                     self._notify_applied(signal)
                     return
@@ -1637,22 +1970,25 @@ class Distributor(QObject):
                         self._rename_local(src_name, target)
                     except OSError as e:
                         self._notify_log(
-                            f"重命名失败: {src_name}→{target}: {e}")
+                            f"变更失败: {src_name}→{target}: {e}")
                         return
                 vv_merged = merge_vv(dict(local.vv), vv)
                 exists = os.path.exists(self._safe_join(target))
                 self._forget_tombstone(target, fid)
+                moved_dir = bool(incoming.is_dir or local.is_dir)
                 self._store(FileState(
                     name=target, op_no=op_no, state=STATE_CHANGE,
                     exists=exists, clock=clock, ts=ts, vv=vv_merged,
-                    file_id=fid, hash=local.hash,
-                    hash_state=local.hash_state, size=local.size))
+                    file_id=fid,
+                    hash='' if moved_dir else local.hash,
+                    hash_state='none' if moved_dir else local.hash_state,
+                    size=local.size, is_dir=moved_dir))
                 if old_name != target:
                     # 旧路径墓碑只做本地压制：origin=rename 不下发，避免
                     # 对端先按「删除」删盘再收到改名时已无字节可移。
-                    self._record_tombstone(old_name, fid, origin='rename',
-                                           op_no=op_no, clock=clock, ts=ts,
-                                           vv=vv_merged)
+                    self._record_tombstone(old_name, fid, is_dir=moved_dir,
+                                           origin='rename', op_no=op_no,
+                                           clock=clock, ts=ts, vv=vv_merged)
                 self._move_descendant_states(old_name, target)
             else:
                 return  # 未知操作：不应用、不转发
@@ -1670,6 +2006,67 @@ class Distributor(QObject):
                 self._request_conflict_pull(file, src_id)
         self._forward(signal, src_id)
         self._notify_applied(signal)
+
+    def _apply_dir_create(self, file: str, signal: dict, src_id: str,
+                          op_no: int, clock: int, ts: float, vv: dict):
+        """应用远端目录创建：建目录 + 登记目录身份。
+
+        同路径若已有另一个目录身份（两端各自 mkdir），按 (clock, ts) 合并：
+        高版本存活，败者落 merge 墓碑并移出状态表（磁盘上本来就是同一个目录）。
+        同路径被文件占用时按 _claim_path 裁决，目录去带后缀的路径。
+        """
+        fid = signal.get('id', '') or signal.get('file_id', '') or ''
+        with self._lock:
+            local = self._states.get(fid)
+        if local is not None and local.exists and local.is_dir \
+                and local.name == file:
+            self._record_knowledge(fid, vv)
+            self._forward(signal, src_id)
+            return
+        target = file
+        occupant = self.get_state(file)
+        if occupant is not None and occupant.exists \
+                and occupant.file_id != fid:
+            if occupant.is_dir:
+                # 同路径两个目录身份：高版本存活，同版本按 ID 字典序决胜，
+                # 保证两端各自计算也收敛到同一个胜者。
+                occupant_key = (occupant.clock, occupant.ts, occupant.file_id)
+                remote_key = (clock, ts, fid)
+                if occupant_key >= remote_key:
+                    self.record_merge_tombstone(file, fid)
+                    self._record_knowledge(occupant.file_id, vv)
+                    self._forward(signal, src_id)
+                    return
+                self.record_merge_tombstone(file, occupant.file_id)
+                self._drop_identity(occupant.file_id)
+            else:
+                target = self._claim_path(fid, file, clock, ts)
+                if target != file:
+                    self._notify_log(
+                        f"同名冲突：目录改名为 {target}（原路径被文件占用）")
+        try:
+            os.makedirs(self._safe_join(target), exist_ok=True)
+        except (OSError, ValueError) as e:
+            self._notify_log(f"创建目录失败: {target}: {e}")
+            return
+        self._forget_tombstone(target, fid)
+        self._store(FileState(
+            name=target, op_no=op_no, state=STATE_CHANGE, exists=True,
+            clock=clock, ts=ts, vv=vv, file_id=fid, hash='',
+            hash_state='none', is_dir=True))
+        self._forward(signal, src_id)
+        self._notify_applied(signal)
+
+    def _drop_identity(self, file_id: str):
+        """身份合并败者：移出状态表与 db（磁盘对象保留，墓碑作压制凭据）。"""
+        if not file_id:
+            return
+        with self._lock:
+            st = self._states.pop(file_id, None)
+            if st is not None and self._by_path.get(st.name) == file_id:
+                self._by_path.pop(st.name, None)
+        if self._storage is not None:
+            self._storage.remove_file(file_id=file_id)
 
     def _forward(self, signal: dict, except_end_id: str):
         """防回声转发：向除 src_id 外所有直连对端（本地已收敛/忽略时同样转发）。"""
@@ -1711,8 +2108,17 @@ class Distributor(QObject):
         ts = signal['ts']
         vv = signal.get('vv') or {src_id: op_no}
         fid = signal.get('id') or ''
+        is_dir = bool(signal.get('is_dir'))
         try:
-            if op == self.OP_ADD:
+            if op == self.OP_DIR_CREATE:
+                # 显式目录身份：不涉及哈希/字节，只登记路径与身份
+                exists = self._path_is_dir(file)
+                self._forget_tombstone(file, fid)
+                self._store(FileState(
+                    name=file, op_no=op_no, state=STATE_CHANGE,
+                    exists=exists, clock=clock, ts=ts, vv=vv, file_id=fid,
+                    hash='', hash_state='none', is_dir=True))
+            elif op == self.OP_ADD:
                 exists = os.path.exists(self._safe_join(file))
                 # 本地 emit：磁盘 mtime 与声明 ts 对齐（拉取端据此识别陈旧源）
                 try:
@@ -1734,30 +2140,38 @@ class Distributor(QObject):
                     return
                 self._store(FileState(name=file, op_no=op_no, state=STATE_CHANGE,
                                       exists=False, clock=clock, ts=ts,
-                                      vv=vv, file_id=fid))
-                self._record_tombstone(file, fid, origin='delete',
-                                       op_no=op_no, clock=clock, ts=ts, vv=vv)
+                                      vv=vv, file_id=fid, is_dir=is_dir))
+                self._record_tombstone(file, fid, is_dir=is_dir,
+                                       origin='delete', op_no=op_no,
+                                       clock=clock, ts=ts, vv=vv)
             elif op in (self.OP_RENAME, self.OP_MOVE):
                 old = signal.get('old', file)
                 old_st = self.get_state(old) or self.get_state(file)
                 if not fid:
                     fid = old_st.file_id if old_st else new_file_id()
+                moved_dir = bool(is_dir or (old_st.is_dir if old_st else False))
                 exists = os.path.exists(self._safe_join(file))
                 self._forget_tombstone(file, fid)
                 # 内容随改名移动（字节未变）：身份/哈希延续到新名
                 self._store(FileState(name=file, op_no=op_no, state=STATE_CHANGE,
                                       exists=exists, clock=clock, ts=ts,
                                       vv=vv, file_id=fid,
-                                      hash=old_st.hash if old_st else '',
-                                      hash_state=(old_st.hash_state if old_st
-                                                  else 'pending'),
-                                      size=old_st.size if old_st else 0))
+                                      hash='' if moved_dir else
+                                      (old_st.hash if old_st else ''),
+                                      hash_state='none' if moved_dir else
+                                      (old_st.hash_state if old_st
+                                       else 'pending'),
+                                      size=old_st.size if old_st else 0,
+                                      is_dir=moved_dir))
                 if old and old != file:
                     old_vv = merge_vv(dict(old_st.vv) if old_st else {}, vv)
-                    self._record_tombstone(old, fid, origin='rename',
-                                           op_no=op_no, clock=clock, ts=ts,
-                                           vv=old_vv)
+                    self._record_tombstone(old, fid, is_dir=moved_dir,
+                                           origin='rename', op_no=op_no,
+                                           clock=clock, ts=ts, vv=old_vv)
                     self._move_descendant_states(old, file)
+                    if moved_dir:
+                        self._prune_empty_dirs(
+                            os.path.dirname(old).replace('\\', '/'))
             else:
                 return
         except ValueError as e:
@@ -1810,8 +2224,9 @@ class Distributor(QObject):
     def _move_descendant_states(self, old: str, new: str):
         """目录改名/移动：把 old/ 下的活条目路径前缀平移到 new/。
 
-        目录不是实体，不写目录状态/墓碑；身份、哈希、版本原样保留。目录重命名
-        信号若覆盖不到（离线端），回归后由快照按 ID 换路径收敛。
+        每个被平移的子项都按「自身也改了一次名」处理：路径变化必须伴随版本
+        递增。否则离线端手里的旧路径与本端新路径版本完全相同，快照仲裁只能
+        按字典序裁决，旧路径可能胜出并把整棵子树搬回去（目录改名回滚）。
         """
         if not old or not new or old == new:
             return
@@ -1821,15 +2236,53 @@ class Distributor(QObject):
             children = [(fid, st) for fid, st in self._states.items()
                         if st.exists and st.name.startswith(pfx)]
         for fid, st in children:
-            # 旧子路径留 rename 墓碑：压制延迟到达的旧路径 add（不下发）
-            self._record_tombstone(st.name, fid, origin='rename',
-                                   op_no=st.op_no, clock=st.clock,
-                                   ts=st.ts, vv=dict(st.vv))
+            # 旧子路径留 rename 墓碑（旧版本）：压制延迟到达的旧路径 add
+            self._record_tombstone(st.name, fid, is_dir=st.is_dir,
+                                   origin='rename', op_no=st.op_no,
+                                   clock=st.clock, ts=st.ts, vv=dict(st.vv))
+            op_no, clock = self._bump_version(fid, st)
+            ts = time.time()
+            vv = dict(st.vv)
+            vv[self.end_id] = op_no
             self._store(FileState(
-                name=new_pfx + st.name[len(pfx):], op_no=st.op_no,
-                state=st.state, exists=True, clock=st.clock, ts=st.ts,
-                vv=dict(st.vv), file_id=fid, hash=st.hash,
-                hash_state=st.hash_state, size=st.size))
+                name=new_pfx + st.name[len(pfx):], op_no=op_no,
+                state=st.state, exists=True, clock=clock, ts=ts,
+                vv=vv, file_id=fid, hash=st.hash,
+                hash_state=st.hash_state, size=st.size, is_dir=st.is_dir))
+
+    def _adopt_unregistered_dir_rename(self, old: str, target: str, fid: str):
+        """对端目录改名落地，而本端没有该身份：把旧路径上的目录整体搬过去。
+
+        本端未登记该身份时，旧路径上的目录通常就是同一次改名的物理对象
+        （旧通道建出、或两端身份已分叉）。只在新路径 makedirs 会把旧目录
+        留成空壳，随后被补扫登记成新空目录身份并反向广播，表现为「改名后
+        旧目录复活」。目标已存在时不动字节（同名交给身份对账），只摘除旧
+        路径上失效的目录身份并收敛空壳。
+        """
+        try:
+            old_path = self._safe_join(old)
+            target_path = self._safe_join(target)
+        except ValueError:
+            return
+        if not os.path.isdir(old_path):
+            return
+        stale = self.get_state(old)
+        if not os.path.exists(target_path):
+            try:
+                self._rename_local(old, target)
+            except OSError as e:
+                self._notify_log(f"变更失败: {old}→{target}: {e}")
+                return
+            self._move_descendant_states(old, target)
+        if stale is not None and stale.file_id != fid and stale.is_dir:
+            # 旧路径上的另一份目录身份随物理目录一起失效：记合并墓碑并摘除，
+            # 否则它会以「活身份」继续阻止空目录收敛。
+            self._record_tombstone(stale.name, stale.file_id, is_dir=True,
+                                   origin='merge', op_no=stale.op_no,
+                                   clock=stale.clock, ts=stale.ts,
+                                   vv=dict(stale.vv))
+            self._drop_identity(stale.file_id)
+        self._prune_empty_dirs(old)
 
     def _claim_path(self, fid: str, target: str, clock: int, ts: float) -> str:
         """同路径不同身份：clock 高者占路径，落败方加后缀保留。"""
@@ -1938,8 +2391,14 @@ class Distributor(QObject):
                 from sync.file_manager import safe_rmtree
                 safe_rmtree(new_path)
             else:
+                self._clear_readonly(new_path)
                 os.remove(new_path)
-        os.rename(old_path, new_path)
+        try:
+            os.rename(old_path, new_path)
+        except OSError:
+            # Windows 下只读目录/文件拒绝移动（WinError 5）：清属性后重试
+            self._clear_readonly(old_path)
+            os.rename(old_path, new_path)
         return True
 
     # ---- 生命周期 ----
