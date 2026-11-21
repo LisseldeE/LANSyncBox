@@ -12,7 +12,7 @@
 > 项目调整：LANSyncBox 标准版与 Pro 版本已正式合并。
 
 <p align="center">
-  <a href="https://github.com/LisseldeE/LANSyncBox/releases/tag/main-R1.2.3.0"><img src="https://img.shields.io/badge/releases-R1.2.3.0-3b82f6" alt="releases R1.2.3.0"></a>
+  <a href="https://github.com/LisseldeE/LANSyncBox/releases/tag/main-R1.2.4.0"><img src="https://img.shields.io/badge/releases-R1.2.4.0-3b82f6" alt="releases R1.2.4.0"></a>
   <a href="LICENSE"><img src="https://img.shields.io/github/license/LisseldeE/LANSyncBox" alt="开源协议"></a>
   <img src="https://img.shields.io/badge/platform-Windows-blue?logo=windows" alt="支持平台">
   <img src="https://img.shields.io/badge/platform-Linux-orange?logo=linux" alt="支持平台">

@@ -4,11 +4,12 @@ Copyright (c) 2026 Lisselde_E <Lisselde.E@outlook.com>.
 Licensed under the GNU General Public License v3.0.
 """
 import os
-import shutil
 import sqlite3
+import time
 import uuid
 
 from config import Config
+from sync.file_manager import safe_rmtree
 
 JOIN_NO_DB_EMPTY = 'no_db_empty'
 JOIN_NO_DB_NONEMPTY = 'no_db_nonempty'
@@ -105,29 +106,44 @@ def inspect_join(db_path: str, room_folder, remote_id: str) -> str:
 
 
 def discard_room_db(db_path: str) -> bool:
-    """删除房间 db（含 WAL/SHM 附属文件），不触碰房间文件。"""
+    """删除房间 db（含 WAL/SHM 附属文件），不触碰房间文件。
+
+    Windows 上句柄释放后仍可能被索引/杀毒软件短暂占用，删除失败时短暂
+    重试；仍失败则返回 False 并打印具体文件，便于定位占用来源。
+    """
     if not db_path:
         return True
     for suffix in ('', '-wal', '-shm', '-journal'):
-        try:
-            os.remove(db_path + suffix)
-        except FileNotFoundError:
-            continue
-        except OSError:
-            return False
+        target = db_path + suffix
+        for attempt in range(3):
+            try:
+                os.remove(target)
+                break
+            except FileNotFoundError:
+                break
+            except OSError as exc:
+                if attempt == 2:
+                    print(f"删除房间库失败 {target}: {exc}")
+                    return False
+                time.sleep(0.1)
     return True
 
 
 def clear_room_cache(room_folder, db_path: str) -> bool:
-    """先清空房间目录，全部成功后才删除房间 db；失败保留 db。"""
+    """先清空房间目录，全部成功后才删除房间 db；失败保留 db。
+
+    房间目录可能包含从只读源同步来的文件/目录，Windows 下直接
+    shutil.rmtree 会因 ReadOnly 属性失败；改用 safe_rmtree 清属性后重试。
+    """
     folder = str(room_folder)
     try:
         if os.path.isdir(folder):
-            shutil.rmtree(folder)
+            safe_rmtree(folder)
             os.makedirs(folder, exist_ok=True)
         elif os.path.exists(folder):
             os.remove(folder)
             os.makedirs(folder, exist_ok=True)
-    except OSError:
+    except OSError as exc:
+        print(f"清理房间目录失败 {folder}: {exc}")
         return False
     return discard_room_db(db_path)

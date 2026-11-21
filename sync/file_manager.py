@@ -6,11 +6,29 @@ Licensed under the GNU General Public License v3.0.
 """
 import os
 import stat
+import sys
 import hashlib
 import shutil
 from pathlib import Path
 from typing import List, Dict, Optional
 from datetime import datetime
+
+
+def clear_readonly(path) -> bool:
+    """清除只读属性，跨平台安全。
+
+    Windows 的只读是独立属性位，chmod 只影响该位；POSIX 上 chmod 会整体
+    替换权限位，直接写 S_IWRITE 会让目录丢掉 r/x、文件变成不可读。因此按
+    平台区分：Windows 清只读位，POSIX 在原有权限上叠加属主写位。
+    """
+    try:
+        if sys.platform.startswith('win'):
+            os.chmod(path, stat.S_IWRITE)
+        else:
+            os.chmod(path, os.stat(path).st_mode | stat.S_IWUSR)
+        return True
+    except OSError:
+        return False
 
 
 def safe_rmtree(path, onerror=None):
@@ -24,10 +42,7 @@ def safe_rmtree(path, onerror=None):
         onerror: 自定义错误处理回调（兼容 shutil.rmtree 的 onerror 签名）
     """
     def _default_onerror(func, p, exc_info):
-        try:
-            os.chmod(p, stat.S_IWRITE)
-        except Exception:
-            pass
+        clear_readonly(p)
         try:
             func(p)
         except Exception as e:

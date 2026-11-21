@@ -58,6 +58,13 @@ class _CacheClearWorker(QThread):
             safe_rmtree(str(self._path))
         except Exception:
             pass
+        # 缓存目录清除后同步删除该房间的库：否则 db 会一直遗留，
+        # 下次以同一房间号加入时可能判定为「同号旧缓存」。
+        try:
+            from sync import room_instance as room_inst
+            room_inst.discard_room_db(room_inst.room_db_path(self._path.name))
+        except Exception:
+            pass
         self.cleared.emit(self._path.name)
 
 

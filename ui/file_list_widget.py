@@ -6,7 +6,6 @@ Copyright (c) 2026 Lisselde_E <Lisselde.E@outlook.com>.
 Licensed under the GNU General Public License v3.0.
 """
 import os
-import stat
 import threading
 import shutil
 import time
@@ -1657,10 +1656,8 @@ class FileListWidget(QWidget):
         try:
             return src.rename(dst)
         except OSError:
-            try:
-                os.chmod(str(src), stat.S_IWRITE)
-            except OSError:
-                pass
+            from sync.file_manager import clear_readonly
+            clear_readonly(str(src))
             return src.rename(dst)
 
     @staticmethod
@@ -1669,10 +1666,8 @@ class FileListWidget(QWidget):
         try:
             path.unlink()
         except OSError:
-            try:
-                os.chmod(str(path), stat.S_IWRITE)
-            except OSError:
-                pass
+            from sync.file_manager import clear_readonly
+            clear_readonly(str(path))
             path.unlink()
 
     def _refresh_after_mutation(self):

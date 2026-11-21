@@ -1250,10 +1250,8 @@ class Distributor(QObject):
 
     def _clear_readonly(self, path: str):
         """清除只读属性：Windows 下只读对象拒绝删除/移动，失败则忽略。"""
-        try:
-            os.chmod(path, stat.S_IWRITE)
-        except OSError:
-            pass
+        from sync.file_manager import clear_readonly
+        clear_readonly(path)
 
     def _rmdir_force(self, path: str) -> bool:
         """删除空目录；Windows 下只读目录（WinError 5）先清属性再重试。

@@ -12,7 +12,7 @@
 > Project update: the LANSyncBox Standard and Pro editions have officially merged.
 
 <p align="center">
-  <a href="https://github.com/LisseldeE/LANSyncBox/releases/tag/main-R1.2.3.0"><img src="https://img.shields.io/badge/releases-R1.2.3.0-3b82f6" alt="releases R1.2.3.0"></a>
+  <a href="https://github.com/LisseldeE/LANSyncBox/releases/tag/main-R1.2.4.0"><img src="https://img.shields.io/badge/releases-R1.2.4.0-3b82f6" alt="releases R1.2.4.0"></a>
   <a href="LICENSE"><img src="https://img.shields.io/github/license/LisseldeE/LANSyncBox" alt="License"></a>
   <img src="https://img.shields.io/badge/platform-Windows-blue?logo=windows" alt="Platform">
   <img src="https://img.shields.io/badge/platform-Linux-orange?logo=linux" alt="Platform">
