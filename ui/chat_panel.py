@@ -1389,6 +1389,65 @@ class ChatPanel(QWidget):
             return
         self._send_text()
 
+    # ---- 网页端（手机浏览器）私信接口：与桌面私信共用同一份会话 ----
+
+    def web_peers(self) -> list:
+        """供网页端读取的对端快照（主线程调用）。"""
+        self._sync_peers()
+        result = []
+        for end_id, entry in self._peers.items():
+            texts = [i for i in self._history.get(end_id, [])
+                     if i.get('kind') == 'text']
+            last = texts[-1] if texts else None
+            result.append({
+                'id': end_id,
+                'name': nickname(end_id),
+                'ip': entry.get('ip', ''),
+                'online': bool(entry.get('online')),
+                'unread': int(entry.get('unread', 0) or 0),
+                'last': (last or {}).get('text', ''),
+                'lastTs': float((last or {}).get('ts', 0) or 0),
+            })
+        result.sort(key=lambda p: (not p['online'], -p['lastTs']))
+        return result
+
+    def web_history(self, end_id: str) -> list:
+        """某端的文本消息历史（文件消息不下发网页端）。"""
+        result = []
+        for item in self._history.get(end_id, []):
+            if item.get('kind') != 'text':
+                continue
+            result.append({
+                'mine': bool(item.get('mine')),
+                'text': item.get('text', ''),
+                'ts': float(item.get('ts', 0) or 0),
+            })
+        return result
+
+    def web_send_text(self, end_id: str, text: str) -> bool:
+        """网页端发文本：与桌面端同一发送路径，成功后同步写入聊天历史。"""
+        text = str(text or '').strip()
+        if not text or not end_id:
+            return False
+        mesh = self._mesh()
+        data = Protocol.create_chat_text(self._local_end_id(), uuid.uuid4().hex, text)
+        ok = bool(mesh and mesh.send_to_peer(end_id, data))
+        if not ok:
+            return False
+        self._ensure_peer(end_id)
+        self._append_item(end_id, {'kind': 'text', 'mine': True, 'text': text,
+                                   'ts': time.time()})
+        self._refresh_peer_rows()
+        return True
+
+    def web_mark_read(self, end_id: str):
+        """网页端打开会话时清除该端未读。"""
+        entry = self._peers.get(end_id)
+        if entry is None:
+            return
+        entry['unread'] = 0
+        self._refresh_peer_rows()
+
     def eventFilter(self, obj, event):
         if obj is self._input and event.type() == QEvent.KeyPress:
             if event.key() in (Qt.Key_Return, Qt.Key_Enter) \

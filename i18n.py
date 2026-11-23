@@ -446,6 +446,19 @@ class I18n:
             "update_failed": "更新失败：{error}",
             "about_network_error": "网络连接失败：{error}",
             "about_check_failed": "检查失败：{error}",
+
+            # 手机网页访问
+            "mobile_access": "手机访问",
+            "mobile_access_hint": "手机与电脑连接同一局域网，用手机浏览器扫码访问当前房间。",
+            "mobile_access_switch": "开启网页访问",
+            "mobile_access_off": "未开启",
+            "mobile_access_waiting": "等待手机连接…",
+            "mobile_access_connected": "已连接 {count} 台设备",
+            "mobile_access_copy": "复制链接",
+            "mobile_access_copied": "已复制",
+            "mobile_access_footer": "仅限可信局域网使用；关闭开关或退出房间后立即失效。",
+            "mobile_access_qr_placeholder": "开启后显示二维码",
+            "mobile_access_starting": "正在启动…",
         },
         "en_US": {
             # App name
@@ -878,6 +891,19 @@ class I18n:
             "update_failed": "Update failed: {error}",
             "about_network_error": "Network error: {error}",
             "about_check_failed": "Check failed: {error}",
+
+            # Mobile web access
+            "mobile_access": "Phone Access",
+            "mobile_access_hint": "Connect your phone to the same LAN and scan the code to open this room.",
+            "mobile_access_switch": "Enable web access",
+            "mobile_access_off": "Off",
+            "mobile_access_waiting": "Waiting for a phone…",
+            "mobile_access_connected": "{count} device(s) connected",
+            "mobile_access_copy": "Copy link",
+            "mobile_access_copied": "Copied",
+            "mobile_access_footer": "For trusted LAN only. Access ends when you turn it off or leave the room.",
+            "mobile_access_qr_placeholder": "QR code appears after enabling",
+            "mobile_access_starting": "Starting…",
         }
     }
     

@@ -100,6 +100,13 @@ _SVG_SEARCH_CLOSE = (
     'stroke-linecap="round" stroke-linejoin="round">'
     '<path d="M6 6l12 12"/><path d="M18 6L6 18"/></svg>'
 )
+# 手机访问入口图标
+_SVG_PHONE = (
+    '<svg viewBox="0 0 24 24" fill="none" stroke="%C%" stroke-width="1.8" '
+    'stroke-linecap="round" stroke-linejoin="round">'
+    '<rect x="7" y="2.5" width="10" height="19" rx="2.2"/>'
+    '<path d="M10.5 18.5h3"/></svg>'
+)
 
 # 总体同步状态图标（操作栏右侧状态胶囊；%C% 占位符替换为状态色）
 # viewBox 紧贴图形外沿（含描边），使渲染后的可见高度与文字墨迹高度一致
@@ -961,6 +968,7 @@ class FileListWidget(QWidget):
     dir_created = Signal(str)  # 目录创建信号（本地操作触发）
     chat_files_dropped = Signal(list)  # 私信投递：拖至列表右侧 1/3 松手（文件列表）
     chat_zone_hover = Signal(bool)  # 拖拽是否悬停私信分区（转发自表格，联动私信手柄）
+    mobile_access_requested = Signal()  # 点击顶栏手机图标：展开手机访问浮层
 
     def __init__(self, folder_path: Path, parent=None):
         super().__init__(parent)
@@ -1134,6 +1142,20 @@ class FileListWidget(QWidget):
         """)
         self.search_btn.clicked.connect(self.toggle_search_mode)
         toolbar_layout.addWidget(self.search_btn)
+
+        # 手机访问按钮（路径框右侧）：点击展开手机访问浮层（开关 / 二维码）
+        self.mobile_btn = QPushButton(self)
+        self.mobile_btn.setToolTip(I18n.tr('mobile_access'))
+        self.mobile_btn.setFixedSize(30, _bar_h)
+        self.mobile_btn.setCursor(Qt.PointingHandCursor)
+        self.mobile_btn.setIcon(self._render_svg_icon(_SVG_PHONE))
+        self.mobile_btn.setIconSize(QSize(16, 16))
+        self.mobile_btn.setStyleSheet(f"""
+            QPushButton {{ background: transparent; border: none; border-radius: 6px; }}
+            QPushButton:hover {{ background: {self._act_hover}; }}
+        """)
+        self.mobile_btn.clicked.connect(lambda: self.mobile_access_requested.emit())
+        toolbar_layout.addWidget(self.mobile_btn)
 
         # 搜索输入：路径框在搜索态切换为可编辑；回车立即搜索、Esc 退出
         self.path_edit.installEventFilter(self)

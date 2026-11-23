@@ -38,6 +38,25 @@ from utils.nickname import nickname
 from network.file_provider import FileProvider, pull_file
 
 
+def _preload_mobile_modules():
+    """后台预热手机访问依赖（只 import，不创建 Qt 对象）。
+
+    先导入轻量的调用桥与浮层模块，再导入 qrcode / web.service（约 1 秒），
+    这样首次点图标只需创建控件，首次开开关也不必再等导入。
+    """
+    try:
+        import web.bridge             # noqa: F401
+        import ui.mobile_access_card  # noqa: F401
+    except Exception:
+        pass
+    try:
+        import qrcode
+        import qrcode.image.svg  # noqa: F401
+        import web.service       # noqa: F401
+    except Exception:
+        pass
+
+
 def _render_mode_swap_icon() -> QIcon:
     """渲染模式切换按钮的双向箭头线条图标（同轴双头 ↔，白色正常态 / 浅灰禁用态）。
 
@@ -667,6 +686,10 @@ class SyncWindow(QMainWindow):
         self._room_ready = False
         self._delivery_popup = None
         self._delivery_btn = None
+
+        # 手机网页访问：主线程调用桥与浮层（懒创建）
+        self.web_bridge = None
+        self._mobile_card = None
         
         # 传输进度跟踪
         self._transfer_rows = {}  # 文件名 -> 行号映射
@@ -772,6 +795,9 @@ class SyncWindow(QMainWindow):
         self.init_network()
         # 应用持久化的投递配置（房间就绪前监听保持关闭）
         self._apply_delivery_settings()
+        # 后台预热手机访问模块（只做 import，不建控件/不导入到主线程），
+        # 避免进房间时同步导入 fastapi/uvicorn 造成界面卡顿
+        threading.Thread(target=_preload_mobile_modules, daemon=True).start()
     
     def init_ui(self):
         """初始化界面"""
@@ -950,6 +976,8 @@ class SyncWindow(QMainWindow):
         self.file_list.file_deleted.connect(self.on_file_deleted)
         self.file_list.file_renamed.connect(self.on_file_renamed)
         self.file_list.dir_created.connect(self.on_dir_created)
+        # 顶栏手机图标：展开手机网页访问浮层
+        self.file_list.mobile_access_requested.connect(self._toggle_mobile_access)
         # 设置取消传输回调（直接调用，避免 Qt 信号异步性问题）
         self.file_list.set_cancel_transfer_callback(self.on_cancel_transfer)
         splitter.addWidget(self.file_list)
@@ -4199,6 +4227,85 @@ class SyncWindow(QMainWindow):
 
     # ---------- 投递设置 ----------
 
+    # ---------- 手机网页访问 ----------
+
+    def _ensure_mobile_access(self, silent: bool = False) -> bool:
+        """创建（或复用）主线程调用桥与手机访问浮层。
+
+        首次调用时模块已在后台预热过，这里只做轻量实例化。
+        """
+        if self.web_bridge is None:
+            try:
+                from web.bridge import WebToolBridge
+                self.web_bridge = WebToolBridge(self)
+            except Exception as exc:
+                if not silent:
+                    QMessageBox.warning(self, I18n.tr('mobile_access'),
+                                        f'网页服务依赖缺失：{exc}')
+                return False
+        if self._mobile_card is None:
+            try:
+                from ui.mobile_access_card import MobileAccessCard
+                self._mobile_card = MobileAccessCard(self)
+            except Exception as exc:
+                if not silent:
+                    QMessageBox.warning(self, I18n.tr('mobile_access'),
+                                        f'网页服务依赖缺失：{exc}')
+                return False
+        return True
+
+    def _toggle_mobile_access(self):
+        """点击顶栏手机图标：展开/收起手机访问浮层。"""
+        card = self._mobile_card
+        if card is not None and card.isVisible():
+            card.close_animated()
+            return
+        if card is not None and card.just_hidden():
+            return
+        if not self._ensure_mobile_access():
+            return
+        self._mobile_card.open_at_widget(self.file_list.mobile_btn)
+
+    def web_after_file_added(self, abs_path: str):
+        """网页端上传/新建落盘后：走既有同步链路并刷新列表。"""
+        self.on_file_added(abs_path)
+        self.file_list.load_files()
+
+    def web_after_file_deleted(self, abs_path: str):
+        self.on_file_deleted(abs_path)
+        self.file_list.load_files()
+
+    def web_after_file_renamed(self, old_path: str, new_path: str):
+        self.on_file_renamed(old_path, new_path)
+        self.file_list.load_files()
+
+    def web_after_dir_created(self, abs_path: str):
+        self.on_dir_created(abs_path)
+        self.file_list.load_files()
+
+    def web_room_state(self) -> dict:
+        """供网页端 /api/info 使用的房间状态。"""
+        devices = 1
+        try:
+            mesh = self._mesh_of()
+            if mesh is not None:
+                ids = set(mesh.connected_end_ids())
+                local = getattr(mesh, 'end_id', None)
+                if local:
+                    ids.discard(local)
+                devices = len(ids) + 1
+        except Exception:
+            pass
+        return {'devices': devices, 'readonly': self.is_web_readonly()}
+
+    def is_web_readonly(self) -> bool:
+        """同步模式下只读权限的成员不允许网页端写入。"""
+        try:
+            return (self._mode == "sync" and self.client is not None
+                    and getattr(self.client, 'perm', 'rw') == 'ro')
+        except Exception:
+            return False
+
     def _toggle_delivery_popup(self):
         """点击底部「投递设置」胶囊：展开/收起浮层"""
         popup = self._delivery_popup
@@ -4256,6 +4363,14 @@ class SyncWindow(QMainWindow):
             return
 
         self._close_confirmed = True
+
+        # 手机网页访问：停止内嵌 HTTP 服务并作废会话
+        card = getattr(self, '_mobile_card', None)
+        if card is not None:
+            try:
+                card.shutdown()
+            except Exception:
+                pass
 
         # 搜索任务收尾：取消并限时等待后台扫描，避免 QThread 运行中销毁
         try:
