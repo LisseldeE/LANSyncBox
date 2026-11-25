@@ -1156,6 +1156,7 @@ class FileListWidget(QWidget):
         """)
         self.mobile_btn.clicked.connect(lambda: self.mobile_access_requested.emit())
         toolbar_layout.addWidget(self.mobile_btn)
+        self._mobile_active = False
 
         # 搜索输入：路径框在搜索态切换为可编辑；回车立即搜索、Esc 退出
         self.path_edit.installEventFilter(self)
@@ -1357,6 +1358,12 @@ class FileListWidget(QWidget):
     def set_sync_state(self, state: str):
         """设置操作栏总体同步状态：syncing / synced / waiting（由 SyncWindow 驱动）。"""
         self._sync_chip.set_state(state)
+
+    def set_mobile_active(self, active: bool):
+        """手机网页访问服务是否开启：开启时顶栏手机图标显示强调色。"""
+        self._mobile_active = bool(active)
+        normal = '#339af0' if self._mobile_active else None
+        self.mobile_btn.setIcon(self._render_svg_icon(_SVG_PHONE, normal=normal))
 
     def _update_action_states(self):
         """刷新快捷操作栏按钮启用状态与右侧状态指示（与右键菜单同一套判定逻辑）。"""

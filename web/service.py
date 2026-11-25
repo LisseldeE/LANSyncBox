@@ -99,6 +99,31 @@ def _remove_file(path: str):
         os.remove(path)
 
 
+def clear_upload_cache() -> bool:
+    """清空网页上传临时缓存（配置目录/web-cache）。
+
+    上传中断或进程崩溃会留下 up-*.part；服务启动、停止与进入房间时各清一次，
+    删除失败不抛错，避免影响主流程。
+    """
+    directory = Config.get_web_cache_dir()
+    if not directory.is_dir():
+        return True
+    ok = True
+    try:
+        entries = list(directory.iterdir())
+    except OSError:
+        return False
+    for entry in entries:
+        try:
+            if entry.is_dir():
+                safe_rmtree(str(entry))
+            else:
+                _remove_file(str(entry))
+        except OSError:
+            ok = False
+    return ok
+
+
 class MobileWebService:
     """手机网页访问服务：启动/停止、鉴权、文件与私信 API。"""
 
@@ -106,7 +131,8 @@ class MobileWebService:
                  *, on_added=None, on_deleted=None, on_renamed=None,
                  on_dir_created=None, chat_peers=None, chat_history=None,
                  chat_send=None, chat_read=None, room_state=None,
-                 readonly=None, version: str = '', asset_path=None):
+                 readonly=None, version: str = '', asset_path=None,
+                 token: str = ''):
         self._root = os.path.realpath(str(room_root))
         self._room_code = str(room_code or '')
         self._is_host = bool(is_host)
@@ -127,11 +153,13 @@ class MobileWebService:
         self._lock = threading.Lock()
         self._sessions = {}          # sid -> 过期时间
         self._fail_log = {}          # ip -> [失败时间]
-        self._token = ''
+        self._token = token          # 上层复用：重启服务后已打开的页面仍可凭新校验码重新进入
+        self._code = ''              # 四位校验码：扫码后还需在网页输入
         self._port = 0
         self._uv = None
         self._thread = None
-        self._tmp_dir = os.path.join(tempfile.gettempdir(), 'LANSyncBox-web')
+        # 上传缓存放在配置目录里，由程序统一清理（不占系统 temp）
+        self._tmp_dir = str(Config.get_web_cache_dir())
 
     # ---------- 生命周期 ----------
 
@@ -161,10 +189,14 @@ class MobileWebService:
         with self._lock:
             if self.running:
                 return self._url_info()
-            self._token = secrets.token_urlsafe(24)
+            if not self._token:
+                self._token = secrets.token_urlsafe(24)
+            self._code = f'{secrets.randbelow(10000):04d}'
             self._sessions.clear()
             self._fail_log.clear()
 
+        # 上次异常退出可能留下半截上传文件，开服前先清掉
+        clear_upload_cache()
         port = self._pick_port()
         app = self._build_app()
         import uvicorn
@@ -199,6 +231,7 @@ class MobileWebService:
         self._thread = None
         self._port = 0
         self._token = ''
+        self._code = ''
         with self._lock:
             self._sessions.clear()
             self._fail_log.clear()
@@ -206,6 +239,8 @@ class MobileWebService:
             uv.should_exit = True
         if thread is not None and thread.is_alive():
             thread.join(timeout=4.0)
+        # 关服时把仍在传的文件与历史残留一起清掉，再删除空目录
+        clear_upload_cache()
         try:
             os.rmdir(self._tmp_dir)
         except OSError:
@@ -262,6 +297,7 @@ class MobileWebService:
         return {
             'port': self._port,
             'token': self._token,
+            'code': self._code,
             'ips': ips,
             'urls': urls,
             'addresses': [f'http://{ip}:{self._port}/' for ip in ips],
@@ -385,12 +421,27 @@ class MobileWebService:
                 if self._rate_limited(ip):
                     raise HTTPException(403, '尝试过于频繁，请稍后再扫码')
                 raise HTTPException(403, '链接已失效，请重新扫码')
+            # 四位校验码：只认桌面端二维码下方展示的数字，错误计入失败次数
+            code = str((data or {}).get('code') or '').strip()
+            if not code:
+                return JSONResponse({'ok': False, 'needCode': True,
+                                     'error': '请输入校验码'},
+                                    status_code=403)
+            if not self._code or not hmac.compare_digest(code, self._code):
+                if self._rate_limited(ip):
+                    return JSONResponse({'ok': False, 'needCode': True,
+                                         'error': '尝试过于频繁，请稍后再试'},
+                                        status_code=403)
+                return JSONResponse({'ok': False, 'needCode': True,
+                                     'error': '校验码错误'},
+                                    status_code=403)
             sid = secrets.token_urlsafe(18)
             with self._lock:
                 self._sessions[sid] = time.time() + SESSION_TTL
             resp = JSONResponse({'ok': True, 'room': self._room_code,
                                  'isHost': self._is_host})
-            resp.set_cookie(COOKIE_NAME, sid, max_age=SESSION_TTL,
+            # 不设 max_age：浏览器关闭即失效，重新进入页面需再次输入校验码
+            resp.set_cookie(COOKIE_NAME, sid,
                             httponly=True, samesite='strict', path='/')
             return resp
 

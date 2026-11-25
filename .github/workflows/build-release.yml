@@ -58,6 +58,9 @@ jobs:
             '--include-package-data=certifi',
             '--include-package=comtypes',
             '--include-package=cryptography',
+            '--include-package=uvicorn',
+            '--include-package-data=web',
+            '--nofollow-import-to=PIL',
             '--msvc=latest',
             '--jobs=4',
             '--remove-output',
@@ -114,7 +117,11 @@ jobs:
       - name: PyInstaller 打包
         run: |
           pyinstaller --noconfirm --clean --onedir --name "${{ env.LINUX_PKG }}" \
-            --add-data "icon.png:." --add-data "icon.ico:." --distpath dist "${{ env.ENTRY }}"
+            --add-data "icon.png:." --add-data "icon.ico:." \
+            --add-data "web/assets/index.html:web/assets" \
+            --collect-submodules uvicorn \
+            --exclude-module PIL \
+            --distpath dist "${{ env.ENTRY }}"
 
       - name: 生成 .deb
         run: |
@@ -147,7 +154,12 @@ jobs:
 
       - name: PyInstaller 打包
         run: |
-          pyinstaller --noconfirm --windowed --icon icon.icns --add-data "icon.icns:." --name "${{ env.APP_NAME }}" "${{ env.ENTRY }}"
+          pyinstaller --noconfirm --windowed --icon icon.icns \
+            --add-data "icon.icns:." \
+            --add-data "web/assets/index.html:web/assets" \
+            --collect-submodules uvicorn \
+            --exclude-module PIL \
+            --name "${{ env.APP_NAME }}" "${{ env.ENTRY }}"
           # .app 的版本号注入（PyInstaller 的 BUNDLE 默认写 0.0.0，CLI 无法指定）
           VER="${GITHUB_REF_NAME#main-R}"
           PLIST="dist/${{ env.APP_NAME }}.app/Contents/Info.plist"

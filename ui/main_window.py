@@ -709,6 +709,10 @@ class MainWindow(QMainWindow):
         """打开同步窗口"""
         from ui.sync_window import SyncWindow
 
+        # 无论创建、加入还是主机回归，进入房间时都清掉残留的网页上传缓存
+        from web.service import clear_upload_cache
+        clear_upload_cache()
+
         # 隐藏主窗口
         self.hide()
 

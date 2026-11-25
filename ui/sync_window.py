@@ -4247,6 +4247,9 @@ class SyncWindow(QMainWindow):
             try:
                 from ui.mobile_access_card import MobileAccessCard
                 self._mobile_card = MobileAccessCard(self)
+                # 服务开关状态驱动顶栏手机图标：开启时变蓝，关闭恢复
+                self._mobile_card.running_changed.connect(
+                    self.file_list.set_mobile_active)
             except Exception as exc:
                 if not silent:
                     QMessageBox.warning(self, I18n.tr('mobile_access'),

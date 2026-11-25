@@ -208,6 +208,15 @@ class Config:
         return directory
 
     @staticmethod
+    def get_web_cache_dir() -> Path:
+        """网页上传临时缓存目录（配置目录/web-cache）。
+
+        上传中的文件先落在这里，收完再移入房间目录；进程崩溃或连接中断
+        留下的 .part 也在这里，由服务启动、进入房间或设置页手动清理。
+        """
+        return Config.get_data_dir() / 'web-cache'
+
+    @staticmethod
     def get_downloads_folder() -> Path:
         """获取 Windows 下载文件夹路径（动态获取，应对用户修改默认位置）"""
         if Config.IS_WINDOWS:
@@ -325,28 +334,41 @@ class Config:
             缓存目录大小（字节），如果目录不存在返回 0
         """
         sync_folder = Config.get_sync_folder()
-        if not sync_folder.exists():
-            return 0
-
         total_size = 0
-        try:
-            for dirpath, dirnames, filenames in os.walk(sync_folder):
-                # 忽略 preview 预览文件夹（不算缓存占用）
-                dirnames[:] = [d for d in dirnames if d != "preview"]
-                for filename in filenames:
-                    if Config.is_sync_notice(filename):
-                        continue  # 本地提示文件不算缓存占用
-                    filepath = os.path.join(dirpath, filename)
-                    # 忽略符号链接等特殊情况
-                    if os.path.isfile(filepath):
-                        try:
-                            total_size += os.path.getsize(filepath)
-                        except (OSError, PermissionError):
-                            # 单个文件访问失败,跳过继续计算
-                            pass
-        except (OSError, PermissionError):
-            # 遍历失败时返回 0
-            pass
+        if sync_folder.exists():
+            try:
+                for dirpath, dirnames, filenames in os.walk(sync_folder):
+                    # 忽略 preview 预览文件夹（不算缓存占用）
+                    dirnames[:] = [d for d in dirnames if d != "preview"]
+                    for filename in filenames:
+                        if Config.is_sync_notice(filename):
+                            continue  # 本地提示文件不算缓存占用
+                        filepath = os.path.join(dirpath, filename)
+                        # 忽略符号链接等特殊情况
+                        if os.path.isfile(filepath):
+                            try:
+                                total_size += os.path.getsize(filepath)
+                            except (OSError, PermissionError):
+                                # 单个文件访问失败,跳过继续计算
+                                pass
+            except (OSError, PermissionError):
+                # 遍历失败时继续统计网页缓存
+                pass
+
+        # 网页上传缓存（配置目录/web-cache）：崩溃残留在清理前也算占用
+        web_cache = Config.get_web_cache_dir()
+        if web_cache.is_dir():
+            try:
+                for dirpath, _dirnames, filenames in os.walk(web_cache):
+                    for filename in filenames:
+                        filepath = os.path.join(dirpath, filename)
+                        if os.path.isfile(filepath):
+                            try:
+                                total_size += os.path.getsize(filepath)
+                            except (OSError, PermissionError):
+                                pass
+            except (OSError, PermissionError):
+                pass
 
         return total_size
 

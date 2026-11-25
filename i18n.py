@@ -45,6 +45,7 @@ class I18n:
             "settings_section_notify": "通知",
             "settings_section_delivery": "投递",
             "settings_section_cache": "缓存目录",
+            "settings_web_cache": "网页上传缓存",
             "settings_section_trust": "已信任的端",
             "settings_trust_empty": "暂无信任记录",
             "settings_trust_error": "信任表读取失败",
@@ -459,6 +460,7 @@ class I18n:
             "mobile_access_footer": "仅限可信局域网使用；关闭开关或退出房间后立即失效。",
             "mobile_access_qr_placeholder": "开启后显示二维码",
             "mobile_access_starting": "正在启动…",
+            "mobile_access_code": "校验码（手机端需输入）",
         },
         "en_US": {
             # App name
@@ -490,6 +492,7 @@ class I18n:
             "settings_section_notify": "Notifications",
             "settings_section_delivery": "Delivery",
             "settings_section_cache": "Cache folders",
+            "settings_web_cache": "Web upload cache",
             "settings_section_trust": "Trusted endpoints",
             "settings_trust_empty": "No trusted endpoints yet",
             "settings_trust_error": "Failed to read the trust store",
@@ -904,6 +907,7 @@ class I18n:
             "mobile_access_footer": "For trusted LAN only. Access ends when you turn it off or leave the room.",
             "mobile_access_qr_placeholder": "QR code appears after enabling",
             "mobile_access_starting": "Starting…",
+            "mobile_access_code": "Verification code (enter on phone)",
         }
     }
     

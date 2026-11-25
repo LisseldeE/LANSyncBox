@@ -1,6 +1,6 @@
 """
 设置对话框
-主界面入口：左侧分类菜单（常规/系统/缓存）+ 右侧内容区，切换带淡出淡入动画
+主界面入口：左侧分类菜单（常规/系统/缓存）+ 右侧内容区
 Copyright (c) 2026 Lisselde_E <Lisselde.E@outlook.com>.
 Licensed under the GNU General Public License v3.0.
 """
@@ -9,10 +9,9 @@ from pathlib import Path
 
 from PySide6.QtWidgets import (
     QDialog, QWidget, QVBoxLayout, QHBoxLayout, QLabel,
-    QScrollArea, QFrame, QApplication, QMessageBox, QStackedWidget,
-    QGraphicsOpacityEffect
+    QScrollArea, QFrame, QApplication, QMessageBox, QStackedWidget
 )
-from PySide6.QtCore import Qt, Signal, QRectF, QVariantAnimation, QAbstractAnimation, QEasingCurve, QUrl, QThread
+from PySide6.QtCore import Qt, Signal, QRectF, QUrl, QThread
 from PySide6.QtGui import QPainter, QColor, QFont, QPalette, QDesktopServices
 
 from config import Config, UserConfig
@@ -49,9 +48,10 @@ class _CacheClearWorker(QThread):
     """后台删除缓存目录：大目录递归删除时不再阻塞界面"""
     cleared = Signal(str)  # 目录名
 
-    def __init__(self, path: Path, parent=None):
+    def __init__(self, path: Path, parent=None, discard_db: bool = True):
         super().__init__(parent)
         self._path = path
+        self._discard_db = discard_db
 
     def run(self):
         try:
@@ -60,11 +60,13 @@ class _CacheClearWorker(QThread):
             pass
         # 缓存目录清除后同步删除该房间的库：否则 db 会一直遗留，
         # 下次以同一房间号加入时可能判定为「同号旧缓存」。
-        try:
-            from sync import room_instance as room_inst
-            room_inst.discard_room_db(room_inst.room_db_path(self._path.name))
-        except Exception:
-            pass
+        # 网页上传缓存不属于房间，跳过这一步。
+        if self._discard_db:
+            try:
+                from sync import room_instance as room_inst
+                room_inst.discard_room_db(room_inst.room_db_path(self._path.name))
+            except Exception:
+                pass
         self.cleared.emit(self._path.name)
 
 
@@ -211,7 +213,6 @@ class SettingsDialog(QDialog):
 
         self._menu = None
         self._stack = None
-        self._cat_anim = None
         self._auto_update_row = None
         self._toggles = {}
         self._cache_rows = {}          # 目录名 -> 行 widget
@@ -550,47 +551,14 @@ class SettingsDialog(QDialog):
         sw.setChecked(enabled, animate=False)
         sw.blockSignals(False)
 
-    # ---------- 分类切换动画 ----------
+    # ---------- 分类切换 ----------
 
     def _switch_category(self, idx: int):
+        """切换分类：菜单高亮与内容同帧切换（不做过渡动画）。"""
         if idx < 0 or idx >= self._stack.count() or idx == self._stack.currentIndex():
             return
-        if self._cat_anim is not None:
-            self._cat_anim.stop()
-            self._cat_anim = None
-        stack = self._stack
-        eff = QGraphicsOpacityEffect(stack)
-        stack.setGraphicsEffect(eff)
-
-        def _finish_anim(a):
-            if stack.graphicsEffect() is eff:
-                stack.setGraphicsEffect(None)
-            if self._cat_anim is a:
-                self._cat_anim = None
-
-        def _do_switch():
-            self._menu.set_active(idx)
-            stack.setCurrentIndex(idx)
-            eff.setOpacity(0.0)
-            a2 = QVariantAnimation(stack)
-            a2.setDuration(130)
-            a2.setStartValue(0.0)
-            a2.setEndValue(1.0)
-            a2.setEasingCurve(QEasingCurve.OutCubic)
-            a2.valueChanged.connect(lambda v: eff.setOpacity(float(v)))
-            a2.finished.connect(lambda: _finish_anim(a2))
-            a2.start(QAbstractAnimation.DeletionPolicy.DeleteWhenStopped)
-            self._cat_anim = a2
-
-        a1 = QVariantAnimation(stack)
-        a1.setDuration(110)
-        a1.setStartValue(1.0)
-        a1.setEndValue(0.0)
-        a1.setEasingCurve(QEasingCurve.OutCubic)
-        a1.valueChanged.connect(lambda v: eff.setOpacity(float(v)))
-        a1.finished.connect(lambda: (eff.setOpacity(0.0), _do_switch()))
-        a1.start(QAbstractAnimation.DeletionPolicy.DeleteWhenStopped)
-        self._cat_anim = a1
+        self._menu.set_active(idx)
+        self._stack.setCurrentIndex(idx)
 
     # ---------- 缓存页 ----------
 
@@ -644,6 +612,10 @@ class SettingsDialog(QDialog):
             for d in sync_folder.iterdir():
                 if d.is_dir() and d.name != "preview":
                     dirs.append(d)
+        # 网页上传缓存：上传中断/崩溃的残留会留在这里，允许手动清除
+        web_cache = Config.get_web_cache_dir()
+        if web_cache.is_dir():
+            dirs.append(web_cache)
         dirs.sort(key=lambda p: p.name)
 
         # 丢弃已不存在目录的历史统计值
@@ -651,7 +623,8 @@ class SettingsDialog(QDialog):
         self._cache_sizes = {k: v for k, v in self._cache_sizes.items() if k in names}
 
         for d in dirs:
-            self._add_cache_row(d)
+            label = I18n.tr('settings_web_cache') if d == web_cache else ''
+            self._add_cache_row(d, label)
 
         empty = not dirs
         if self._cache_empty_label is None:
@@ -667,7 +640,7 @@ class SettingsDialog(QDialog):
         self._refresh_watcher()
         self._start_size_scan(dirs)
 
-    def _add_cache_row(self, path: Path):
+    def _add_cache_row(self, path: Path, label: str = ''):
         row = QWidget()
         lay = QHBoxLayout(row)
         lay.setContentsMargins(0, 2, 0, 2)
@@ -675,7 +648,7 @@ class SettingsDialog(QDialog):
         dark = _is_dark(self)
 
         # 目录名使用默认调色板文字色（与创建/加入对话框字段一致）
-        name_label = QLabel(path.name)
+        name_label = QLabel(label or path.name)
         name_label.setToolTip(str(path))
         lay.addWidget(name_label)
 
@@ -714,7 +687,8 @@ class SettingsDialog(QDialog):
         if btn is not None:
             btn.setEnabled(False)
             btn.setText(I18n.tr('settings_clearing'))
-        worker = _CacheClearWorker(path, self)
+        worker = _CacheClearWorker(path, self,
+                                   discard_db=path != Config.get_web_cache_dir())
         worker.cleared.connect(self._on_cleared)
         worker.finished.connect(lambda w=worker: self._forget_worker(self._clear_workers, w))
         self._clear_workers.append(worker)

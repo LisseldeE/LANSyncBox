@@ -407,6 +407,17 @@ button { background: none; border: 0; padding: 0; cursor: pointer; touch-action:
 .transfer-top { display: flex; align-items: baseline; gap: 8px; font-size: 12px; }
 .transfer-name { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .transfer-pct { flex: 0 0 auto; font-size: 11px; color: var(--text-2); }
+.transfer-cancel {
+  flex: 0 0 auto;
+  width: 18px; height: 18px;
+  display: grid; place-items: center;
+  align-self: center;
+  border-radius: 4px;
+  color: var(--text-3);
+  font-size: 13px;
+  line-height: 1;
+}
+.transfer-cancel:hover { background: var(--surface-2); color: var(--text); }
 .bar { height: 3px; margin-top: 6px; border-radius: 2px; background: var(--surface-2); overflow: hidden; }
 .bar i { display: block; width: 0; height: 100%; background: var(--accent); transition: width .2s linear; }
 .transfer.done .bar i { background: var(--success); }
@@ -643,6 +654,62 @@ button { background: none; border: 0; padding: 0; cursor: pointer; touch-action:
   .chip.syncing .sync-icon { animation: none; }
   .searchbar, .notice { transition: none; }
 }
+
+/* 校验码入口：每次重新进入网页（浏览器大退后）先输四位数字 */
+.gate {
+  position: fixed;
+  inset: 0;
+  z-index: 300;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 24px;
+  background: var(--page);
+}
+.gate-card { width: 100%; max-width: 320px; text-align: center; }
+.gate-icon {
+  width: 46px; height: 46px; margin: 0 auto 14px;
+  display: flex; align-items: center; justify-content: center;
+  border-radius: 12px; background: var(--accent-soft); color: var(--accent);
+}
+.gate-title { font-size: 17px; font-weight: 600; }
+.gate-sub { margin-top: 7px; font-size: 12px; line-height: 1.6; color: var(--text-2); }
+.code-wrap {
+  position: relative;
+  display: flex; gap: 10px; justify-content: center;
+  margin-top: 22px;
+}
+.code-cell {
+  width: 48px; height: 56px;
+  display: flex; align-items: center; justify-content: center;
+  border: 1px solid var(--stroke); border-radius: 9px;
+  background: var(--surface); color: var(--text);
+  font-size: 24px; font-weight: 600;
+  transition: border-color .15s, box-shadow .15s;
+}
+.code-cell.active { border-color: var(--accent); box-shadow: 0 0 0 3px var(--accent-soft); }
+.code-wrap input {
+  position: absolute; inset: 0; width: 100%; height: 100%;
+  border: 0; padding: 0; background: transparent;
+  color: transparent; caret-color: transparent; font-size: 16px;
+  opacity: 0;
+}
+.gate-error { min-height: 18px; margin-top: 10px; font-size: 12px; color: var(--danger); }
+.gate-btn {
+  width: 100%; height: 44px; margin-top: 6px;
+  border-radius: 10px; background: var(--accent); color: #fff;
+  font-size: 14px; font-weight: 500;
+}
+.gate-btn:hover { background: var(--accent-hover); }
+.gate-btn:disabled { opacity: .6; }
+.gate-btn.spaced { margin-top: 22px; }
+.gate-icon.muted { background: var(--surface-2); color: var(--text-2); }
+.gate.shake .code-wrap { animation: gate-shake .3s; }
+@keyframes gate-shake {
+  0%, 100% { transform: translateX(0); }
+  20%, 60% { transform: translateX(-6px); }
+  40%, 80% { transform: translateX(6px); }
+}
 </style>
 </head>
 <body>
@@ -808,6 +875,33 @@ button { background: none; border: 0; padding: 0; cursor: pointer; touch-action:
 
 <input type="file" id="uploadInput" multiple hidden>
 
+<div class="gate" id="gate" hidden>
+  <div class="gate-card">
+    <div class="gate-icon" id="gateIcon"></div>
+    <div class="gate-title">输入校验码</div>
+    <div class="gate-sub">请输入电脑端二维码下方的四位数字</div>
+    <div class="code-wrap" id="codeWrap">
+      <div class="code-cell"></div>
+      <div class="code-cell"></div>
+      <div class="code-cell"></div>
+      <div class="code-cell"></div>
+      <input id="codeInput" type="text" inputmode="numeric" pattern="[0-9]*"
+             maxlength="4" autocomplete="one-time-code" aria-label="校验码">
+    </div>
+    <div class="gate-error" id="gateError"></div>
+    <button class="gate-btn" id="gateSubmit">进入</button>
+  </div>
+</div>
+
+<div class="gate" id="offline" hidden>
+  <div class="gate-card">
+    <div class="gate-icon muted" id="offlineIcon"></div>
+    <div class="gate-title">Web UI 访问已关闭</div>
+    <div class="gate-sub">电脑端的「手机访问」未开启，或手机与电脑已断开连接。请在电脑端重新开启后点击重试。</div>
+    <button class="gate-btn spaced" id="offlineRetry">重试</button>
+  </div>
+</div>
+
 <script>
 const $ = (s) => document.querySelector(s);
 
@@ -850,19 +944,198 @@ async function api(url, opts = {}) {
     init.body = opts.body;
   }
   if (init.method !== "GET") Object.assign(init.headers, writeHeaders);
-  const res = await fetch(url, init);
+  let res;
+  try {
+    res = await fetch(url, init);
+  } catch (e) {
+    // 连不上服务：桌面端已关闭「手机访问」，或网络断开
+    const err = new Error("无法连接到电脑端");
+    err.status = 0;
+    err.offline = true;
+    if (!blocked && !offline) showOffline();
+    throw err;
+  }
   let data = null;
   try { data = await res.json(); } catch (e) {}
   if (!res.ok || (data && data.ok === false)) {
     const err = new Error((data && data.error) || "请求失败（" + res.status + "）");
     err.status = res.status;
+    err.data = data || null;
+    // 会话失效：暂停轮询并回到校验码页，避免反复 401 把界面顶回登录
+    if (res.status === 401 && !blocked) {
+      stopPolling();
+      ready = false;
+      showGate();
+    }
     throw err;
   }
   return data || {};
 }
 
-function showBlocked() {
-  $("#fileList").innerHTML = '<div class="empty-row">访问链接已失效，请在桌面端重新打开「手机访问」并扫码</div>';
+/* ---------- 校验码 ---------- */
+
+const TOKEN_KEY = "lsb-token";   // 访问口令：扫码时写入，供下次重新进入使用
+const OK_KEY = "lsb-ok";         // 本次浏览器会话已通过校验码（大退即清空）
+const gate = $("#gate");
+const gateInput = $("#codeInput");
+let gateToken = "";
+let gateBusy = false;
+let blocked = false;             // 链接已失效：停止一切自动重试，等待重新扫码
+let offline = false;             // 服务已关闭/连不上：提示用户去桌面端开启，可重试
+let pollTimers = [];
+
+function stopPolling() {
+  pollTimers.forEach(clearInterval);
+  pollTimers = [];
+}
+
+/* ---------- 服务已关闭 ---------- */
+
+function showOffline() {
+  if (blocked) return;
+  offline = true;
+  stopPolling();
+  ready = false;
+  hideGate();
+  $("#offline").hidden = false;
+  $("#statusText").textContent = "未连接";
+}
+
+function hideOffline() {
+  offline = false;
+  $("#offline").hidden = true;
+}
+
+async function retryConnect() {
+  const btn = $("#offlineRetry");
+  if (btn.disabled) return;
+  btn.disabled = true;
+  hideOffline();
+  try {
+    await boot();
+  } catch (e) {
+    if (e.status === 401) { showGate(gateToken); return; }
+    if (e.status === 0) { showOffline(); return; }
+    showBlocked();
+  } finally {
+    btn.disabled = false;
+  }
+}
+
+function readStoredToken() {
+  try { return localStorage.getItem(TOKEN_KEY) || ""; } catch (e) { return ""; }
+}
+
+function storeToken(token) {
+  try {
+    if (token) localStorage.setItem(TOKEN_KEY, token);
+    else localStorage.removeItem(TOKEN_KEY);
+  } catch (e) {}
+}
+
+function renderCodeCells() {
+  const val = gateInput.value;
+  gate.querySelectorAll(".code-cell").forEach((cell, i) => {
+    cell.textContent = val[i] || "";
+    cell.classList.toggle("active", i === Math.min(val.length, 3));
+  });
+}
+
+function setGateError(msg) {
+  $("#gateError").textContent = msg || "";
+}
+
+function shakeGate() {
+  gate.classList.remove("shake");
+  void gate.offsetWidth;
+  gate.classList.add("shake");
+}
+
+function showGate(token) {
+  if (blocked) return;
+  hideOffline();
+  if (token) gateToken = token;
+  gateToken = gateToken || readStoredToken();
+  if (!gateToken) { showBlocked(); return; }
+  stopPolling();
+  ready = false;
+  gate.hidden = false;
+  gateInput.value = "";
+  setGateError("");
+  renderCodeCells();
+  setTimeout(() => gateInput.focus(), 30);
+}
+
+function hideGate() {
+  gate.hidden = true;
+  gateInput.blur();
+}
+
+async function submitGate() {
+  const code = gateInput.value.trim();
+  if (gateBusy) return;
+  if (!/^\d{4}$/.test(code)) {
+    setGateError("请输入四位数字校验码");
+    shakeGate();
+    return;
+  }
+  gateBusy = true;
+  $("#gateSubmit").disabled = true;
+  let ok = false;
+  try {
+    await api("/api/session", { method: "POST", json: { t: gateToken, code } });
+    ok = true;
+  } catch (e) {
+    // 服务已关闭：保留口令，等桌面端重新开启后再输码，不提示「链接失效」
+    if (e.offline) { showOffline(); return; }
+    if (!(e.data && e.data.needCode)) {
+      // 口令已失效（桌面端重新生成了二维码）：只能重新扫码
+      storeToken("");
+      showBlocked("访问链接已失效，请在桌面端重新打开「手机访问」并扫码");
+      return;
+    }
+    setGateError(e.message || "校验失败");
+    gateInput.value = "";
+    renderCodeCells();
+    shakeGate();
+    setTimeout(() => gateInput.focus(), 30);
+  } finally {
+    gateBusy = false;
+    $("#gateSubmit").disabled = false;
+  }
+  if (!ok) return;
+  try { sessionStorage.setItem(OK_KEY, "1"); } catch (e) {}
+  hideGate();
+  try {
+    await boot();
+  } catch (e) {
+    if (e.offline) showOffline();
+    else if (e.status !== 401) showBlocked();
+  }
+}
+
+$("#gateIcon").innerHTML = svg('<rect x="5" y="10.5" width="14" height="9.5" rx="2"/><path d="M8.5 10.5V7.8a3.5 3.5 0 0 1 7 0v2.7"/>', 22);
+gateInput.addEventListener("input", () => {
+  gateInput.value = gateInput.value.replace(/\D/g, "").slice(0, 4);
+  renderCodeCells();
+  if (gateInput.value.length === 4) submitGate();
+});
+gateInput.addEventListener("keydown", (e) => {
+  if (e.key === "Enter") submitGate();
+});
+$("#gateSubmit").addEventListener("click", submitGate);
+
+$("#offlineIcon").innerHTML = svg('<path d="M12 3.5v8.2"/><path d="M7.1 6.4a7.4 7.4 0 1 0 9.8 0"/>', 22);
+$("#offlineRetry").addEventListener("click", retryConnect);
+
+function showBlocked(msg) {
+  blocked = true;
+  stopPolling();
+  ready = false;
+  hideGate();
+  hideOffline();
+  $("#fileList").innerHTML = '<div class="empty-row">' +
+    esc(msg || "访问链接已失效，请在桌面端重新打开「手机访问」并扫码") + "</div>";
   $("#statusText").textContent = "未连接";
   $("#pathText").textContent = "未连接";
   $("#backBtn").disabled = true;
@@ -1297,11 +1570,13 @@ function startUpload(files) {
     .then(() => reloadCurrent().catch(() => {}));
 }
 
+const UPLOAD_IDLE_MS = 15000;   // 断网后长时间没有进度，主动中止，避免假进度卡死队列
+
 function uploadOne(file, dir) {
   return new Promise((resolve) => {
     const el = document.createElement("div");
     el.className = "transfer";
-    el.innerHTML = `<div class="transfer-top"><span class="transfer-name">${esc(file.name)}</span><span class="transfer-pct">0%</span></div><div class="bar"><i></i></div>`;
+    el.innerHTML = `<div class="transfer-top"><span class="transfer-name">${esc(file.name)}</span><span class="transfer-pct">0%</span><button class="transfer-cancel" type="button" title="取消上传" aria-label="取消上传">×</button></div><div class="bar"><i></i></div>`;
     $("#transferList").appendChild(el);
     const item = { file, pct: 0, done: false, el };
     transfers.push(item);
@@ -1313,9 +1588,14 @@ function uploadOne(file, dir) {
       el.querySelector(".transfer-pct").textContent = Math.round(pct) + "%";
       el.querySelector(".bar i").style.width = pct + "%";
     };
+    let idleTimer = 0;
+    let abortReason = "";
     const finish = (ok, message) => {
       if (item.done) return;
       item.done = true;
+      clearTimeout(idleTimer);
+      const cancelBtn = el.querySelector(".transfer-cancel");
+      if (cancelBtn) cancelBtn.remove();
       if (ok) el.classList.add("done");
       el.querySelector(".transfer-pct").textContent = message;
       updateSyncChip();
@@ -1324,10 +1604,28 @@ function uploadOne(file, dir) {
     };
 
     const xhr = new XMLHttpRequest();
+    // 上传进度报告的是「已交给系统」的字节，断网后仍会假性前进；
+    // 因此以「多久没有新进度」判定断线，而不是看百分比
+    const armIdle = () => {
+      clearTimeout(idleTimer);
+      idleTimer = setTimeout(() => {
+        if (document.hidden) { armIdle(); return; }   // 后台定时器会被节流，不据此刻判定
+        abortReason = "timeout";
+        xhr.abort();
+      }, UPLOAD_IDLE_MS);
+    };
+
+    el.querySelector(".transfer-cancel").addEventListener("click", () => {
+      if (item.done) return;
+      abortReason = "cancel";
+      xhr.abort();
+    });
+
     xhr.open("PUT", "/api/upload?dir=" + encodeURIComponent(dir) +
       "&name=" + encodeURIComponent(file.name));
     xhr.setRequestHeader("X-LSB", "1");
     xhr.upload.onprogress = (ev) => {
+      armIdle();
       if (ev.lengthComputable && ev.total > 0) setPct((ev.loaded / ev.total) * 100);
     };
     xhr.onload = () => {
@@ -1350,9 +1648,17 @@ function uploadOne(file, dir) {
       notify(`「${file.name}」上传中断`, { error: true });
     };
     // 中止/超时也必须收尾，否则 done 永久为 false 会拖住后续轮询
-    xhr.onabort = () => finish(false, "已取消");
+    xhr.onabort = () => {
+      if (abortReason === "timeout") {
+        finish(false, "网络中断");
+        notify(`「${file.name}」上传中断：网络无响应`, { error: true });
+      } else {
+        finish(false, "已取消");
+      }
+    };
     xhr.ontimeout = () => finish(false, "超时");
     xhr.send(file);
+    armIdle();
   });
 }
 
@@ -1906,41 +2212,66 @@ document.addEventListener("keydown", (e) => {
 
 document.addEventListener("visibilitychange", () => {
   // 回到前台立即补一次（后台时定时器会被节流/暂停）
-  if (document.hidden || !ready) return;
+  if (document.hidden) return;
+  // 停留在「访问已关闭」提示时，切回浏览器自动试连一次
+  if (offline) { retryConnect(); return; }
+  if (!ready) return;
   pollFiles();
   loadInfo().catch(() => {});
   loadChatPeers().catch(() => {});
 });
 
-async function init() {
-  const hash = location.hash || "";
-  const m = hash.match(/[#&]t=([^&]+)/);
-  const token = m ? decodeURIComponent(m[1]) : "";
-  if (token) {
-    try {
-      await api("/api/session", { method: "POST", json: { t: token } });
-      history.replaceState(null, "", location.pathname + location.search);
-    } catch (e) {
-      // 旧会话可能仍有效，继续验证
-    }
-  }
-  try {
-    await loadInfo();
-  } catch (e) {
-    showBlocked();
-    return;
-  }
+async function boot() {
+  await loadInfo();
+  blocked = false;
   ready = true;
   try {
     await loadDir([], 0);
   } catch (e) {
+    if (e.status !== 401) showBlocked();
+    return;
+  }
+  if (!pollTimers.length) {
+    pollTimers.push(setInterval(pollFiles, 3000));
+    pollTimers.push(setInterval(() => {
+      if (ready && !document.hidden) loadInfo().catch(() => {});
+    }, 8000));
+  }
+}
+
+async function init() {
+  const hash = location.hash || "";
+  const m = hash.match(/[#&]t=([^&]+)/);
+  const token = m ? decodeURIComponent(m[1]) : readStoredToken();
+  if (m) {
+    storeToken(token);
+    history.replaceState(null, "", location.pathname + location.search);
+  }
+  if (!token) {
     showBlocked();
     return;
   }
-  setInterval(pollFiles, 3000);
-  setInterval(() => {
-    if (ready && !document.hidden) loadInfo().catch(() => {});
-  }, 8000);
+  gateToken = token;
+  let verified = false;
+  try { verified = sessionStorage.getItem(OK_KEY) === "1"; } catch (e) {}
+  // 大退（浏览器会话结束）后必须重新输入校验码
+  if (!verified) {
+    showGate(token);
+    return;
+  }
+  try {
+    await boot();
+  } catch (e) {
+    if (e.status === 401) {
+      showGate(token);
+      return;
+    }
+    if (e.status === 0) {
+      showOffline();
+      return;
+    }
+    showBlocked();
+  }
 }
 
 init();
