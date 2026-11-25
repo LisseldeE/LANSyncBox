@@ -7,6 +7,9 @@ SyncFolder/
 old/
 dist/
 test/
+nuitka/
+web/
+wiki/
 
 *.exe
 *.bat
