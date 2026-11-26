@@ -407,7 +407,7 @@ class UserConfig:
             "fixed_room_code": "",
             "clean_cache_enabled": False,
             "confirm_leave_no_ask": False,
-            "auto_check_update": False,
+            "auto_check_update": True,
             "receive_announcements": True,
             "delivery_mode": "all",
             "delivery_text_enabled": True,
@@ -654,7 +654,7 @@ class UserConfig:
     @classmethod
     def get_auto_check_update(cls) -> bool:
         """获取「自动检查更新」启用状态"""
-        return bool(cls.get("auto_check_update", False))
+        return bool(cls.get("auto_check_update", True))
 
     @classmethod
     def set_auto_check_update(cls, enabled: bool):

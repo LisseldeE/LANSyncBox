@@ -366,24 +366,27 @@ class SettingsDialog(QDialog):
 
         # 缓存目录标题 + 管理文件夹按钮同一行（标题居左，按钮居右）
         top = QHBoxLayout()
-        top.setSpacing(12)
+        top.setSpacing(8)
         sec_label = self._make_section_label(I18n.tr('settings_section_cache'))
+        # 行高被右侧按钮撑高：文字顶对齐，保持与其它页标题同一基线
+        sec_label.setAlignment(Qt.AlignLeft | Qt.AlignTop)
         top.addWidget(sec_label)
-        top.setAlignment(sec_label, Qt.AlignVCenter)
         top.addStretch()
-        manage_btn = AnimatedButton(I18n.tr('settings_manage_folders'))
-        manage_btn.setCursor(Qt.PointingHandCursor)
-        # 与 11px 分组标题同一层级：文字链接式按钮，不再用 32px 高的实心色块
+        # 右侧「管理文件夹」：可点击文字，与标题同为 11px 且顶部对齐，
+        # 避免按钮内边距造成文字低于标题
         dark = _is_dark(self)
-        manage_btn.setStyleSheet(
-            "QPushButton { padding: 4px 6px; font-size: 12px; border: none;"
-            f" background: transparent; color: {'#4dabf7' if dark else '#228be6'}; }}"
-            f"QPushButton:hover {{ color: {'#74c0fc' if dark else '#339af0'}; }}"
-            f"QPushButton:pressed {{ color: {'#a5d8ff' if dark else '#1c7ed6'}; }}"
-        )
-        manage_btn.clicked.connect(self._on_manage_folders)
-        top.addWidget(manage_btn)
+        link_color = '#4dabf7' if dark else '#228be6'
+        manage_link = QLabel(
+            f'<a href="manage" style="color: {link_color};'
+            f' text-decoration: none;">{I18n.tr("settings_manage_folders")}</a>')
+        manage_link.setTextFormat(Qt.RichText)
+        manage_link.setTextInteractionFlags(Qt.LinksAccessibleByMouse)
+        manage_link.setCursor(Qt.PointingHandCursor)
+        manage_link.setStyleSheet('font-size: 11px;')
+        manage_link.linkActivated.connect(lambda _href: self._on_manage_folders())
+        top.addWidget(manage_link, 0, Qt.AlignTop)
         lay.addLayout(top)
+        lay.addWidget(self._make_divider())
 
         # 退出房间时清理缓存（与同步界面底部开关共用同一份配置）
         clean_row, self._clean_cache_switch = self._make_switch_row(

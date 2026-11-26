@@ -20,11 +20,6 @@
 </p>
 
 <p align="center">
-  <a href="#反馈"><img src="https://img.shields.io/badge/QQ群-1074184946-12B7F5?logo=tencentqq&logoColor=white" alt="QQ 交流群"></a>
-  <a href="https://space.bilibili.com/3546562137426810"><img src="https://img.shields.io/badge/Bilibili-关注-FB7299?logo=bilibili&logoColor=white" alt="Bilibili"></a>
-</p>
-
-<p align="center">
   <a href="https://lansyncbox.com">官方网站：lansyncbox.com</a>
 </p>
 

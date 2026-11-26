@@ -20,11 +20,6 @@
 </p>
 
 <p align="center">
-  <a href="#feedback"><img src="https://img.shields.io/badge/QQ%20Group-1074184946-12B7F5?logo=tencentqq&logoColor=white" alt="QQ Group"></a>
-  <a href="https://space.bilibili.com/3546562137426810"><img src="https://img.shields.io/badge/Bilibili-Follow-FB7299?logo=bilibili&logoColor=white" alt="Bilibili"></a>
-</p>
-
-<p align="center">
   <a href="https://lansyncbox.com">Official Website: lansyncbox.com</a>
 </p>
 
