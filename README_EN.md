@@ -12,7 +12,7 @@
 > Project update: the LANSyncBox Standard and Pro editions have officially merged.
 
 <p align="center">
-  <a href="https://github.com/LisseldeE/LANSyncBox/releases/tag/main-R1.2.4.0"><img src="https://img.shields.io/badge/releases-R1.2.4.0-3b82f6" alt="releases R1.2.4.0"></a>
+  <a href="https://github.com/LisseldeE/LANSyncBox/releases/tag/main-R1.2.5.0"><img src="https://img.shields.io/badge/releases-R1.2.5.0-3b82f6" alt="releases R1.2.5.0"></a>
   <a href="LICENSE"><img src="https://img.shields.io/github/license/LisseldeE/LANSyncBox" alt="License"></a>
   <img src="https://img.shields.io/badge/platform-Windows-blue?logo=windows" alt="Platform">
   <img src="https://img.shields.io/badge/platform-Linux-orange?logo=linux" alt="Platform">
@@ -70,6 +70,7 @@ It also introduces several capabilities: **Delivery** (cross-device copy & paste
 
 - **Real-time Sync**: additions, edits, deletions, and renames sync to all clients instantly; auto-aligns differences on first connect
 - **Room Sharing**: custom 6-digit room codes, optional password protection, sync-logic version compatibility check when joining
+- **Phone Access**: open the current room from a phone browser on the same LAN — browse, search, upload, download and organize files, and exchange text messages; protected by a four-digit verification code and revoked when the switch is turned off or you leave the room
 - **Large File Transfer**: streaming chunked transfer with resume support; transfers fail without corrupting files; up to 5 files in parallel, same-name pulls serialized for byte consistency
 - **TLS Encryption**: from R1.2.2.0 onward, every TCP connection — room control, peer-to-peer, file transfer, and chat — runs over TLS (1.2 minimum; a failed handshake is dropped, never downgraded to plaintext); devices use self-signed certificates pinned by TOFU fingerprint, plus a per-connection key signature
 - **File Operations**: add, create, copy, cut, paste, delete, rename; double-click for read-only preview
@@ -97,6 +98,16 @@ Peer-to-peer, one-to-one private messaging inside a room — **text** and **file
 - **Unread badge**: the peer list carries an unread badge, clearable at once with "Mark all read"
 - **Cleanup**: leaving the room destroys this endpoint's chat sessions and content — nothing is persisted
 - **Limit**: files only — folders are not supported ("Folders are not supported; please select files")
+
+### Phone Access
+
+Work with the current room directly from a phone browser on the same LAN — no client install required:
+
+- **Enable**: click the phone icon in the top bar, open the Phone Access card and turn on web access; the card shows the QR code, access URL and four-digit verification code, with NIC switching and a copy-link button
+- **Connect**: keep the phone and computer on the same LAN, scan the code (or type the URL), then enter the four-digit code shown on the desktop; a new code is generated each time the service starts
+- **What you can do**: browse and search room files; multi-select download; upload files with progress and cancel; create folders, rename, move and delete; exchange text private messages with other endpoints, including history and unread state
+- **Permissions**: a read-only room stays read-only on the web
+- **Security / lifecycle**: for trusted LAN use only; nothing listens until enabled; turning the switch off or leaving the room invalidates access immediately
 
 ## System Support
 
