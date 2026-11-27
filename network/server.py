@@ -63,10 +63,13 @@ class SyncServer(QObject):
     # 数据块大小（64KB）
     CHUNK_SIZE = 64 * 1024
     
-    def __init__(self, room_code: str, password: str = "", parent=None):
+    def __init__(self, room_code: str, password: str = "", parent=None, *,
+                 probe_instance: bool = True):
         super().__init__(parent)
         self.room_code = room_code
         self.password = password
+        # 创建新房间时无需探活继承编号：房间本来就不存在，直接生成
+        self._probe_instance = bool(probe_instance)
         # 房间实例编号（阶段 D）：主机建房时读取/继承，随 AUTH_RESP 下发
         self._room_instance_id = ''
         self._inherited_room_instance_id = ''
@@ -1022,7 +1025,8 @@ class SyncServer(QObject):
                                                 room_db_path)
                 self._room_instance_id = resolve_host_instance_id(
                     room_db_path(self.room_code),
-                    probe=self._probe_room_instance_id)
+                    probe=(self._probe_room_instance_id
+                           if self._probe_instance else None))
         return self._room_instance_id
 
     def _handle_auth(self, client_id: str, content: bytes):

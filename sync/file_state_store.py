@@ -43,6 +43,9 @@ class FileStateStore(QObject):
     PULL_CONCURRENCY = 5   # 自同步拉取并发 worker 数：一轮对比入队的多个差异
                            # 文件并发拉取（设计：发送/接收端均支持 5 并发）；
                            # 发送端 FileProvider 每条连接独立线程，天然并行服务
+    PULL_REROUTE_TTL = 30.0  # 换源标记有效期（秒）：某文件刚从此源拉取失败后，
+                             # 短窗口内优先换其他源重建拉取；到期自动解除，不永久
+                             # 压制真实文件，也不影响未失败文件的稳态入队规则
     ALIGN_HASH_RETRIES = 3  # 静默对齐残留哈希失败重试上限：对齐期文件被改写时
                             # 重算；超限放弃静默对齐，交由正常新增链路同步，
                             # 避免空 hash 残留让 _align_mode 永久不结束
@@ -99,6 +102,11 @@ class FileStateStore(QObject):
         # 避免空转打日志/刷 UI「正在补齐」。冷却到期或对端出现更高版本时自动放行，
         # 不永久丢弃真实文件。__lock__ 保护。
         self._pull_cooldowns = {}
+        # 换源标记（阶段 5 补充）：name -> {src, op_no, clock, ts, until}。某文件
+        # 刚从此源拉取失败时登记；短窗口内该文件的重建优先接受其他源（同版本也
+        # 允许顶掉失败源条目，排到队尾），避免失败源每轮抢先重建导致健康源永远
+        # 拉不到。只在失败后生效，稳态入队/去重规则不变。__cond__ 保护。
+        self._pull_reroute = {}
         # 同名拉取串行化锁（name -> Lock）：worker 池跨文件 5 并发，但同一文件的
         # 多份在途拉取（不同 RESP 槽先后弹出）必须串行——后者在前者完成后重新做
         # 新鲜度裁决，防止低版本槽迟到落盘覆盖胜者字节（并发池化引入的拉取交错）
@@ -132,6 +140,8 @@ class FileStateStore(QObject):
         # 由宿主（client.py）在 FILE_BEGIN..FILE_END 窗口内置真；抑制只发生在窗口内，
         # 结束后对账轮可照常补拉，不永久丢弃真实文件。
         self._host_push_guard = None  # callable(relpath)->bool；True=主机直推正在投递
+        self._resync_timer = None  # 失败换源查询去抖定时器
+        self._resync_failed = 0    # 本批失败文件数（并入一次汇总日志）
 
         # 启动清扫：进程重启后同步目录内遗留的传输临时文件（.tcp_*.part）已无
         # 对应传输，清除以防占盘/被误当正式文件。仅清 .tcp_*.part，不碰用户 .tmp。
@@ -704,18 +714,56 @@ class FileStateStore(QObject):
         return (slot.get('id') or '', slot.get('hash') or '',
                 int(slot.get('size') or 0))
 
-    def _merge_slot_locked(self, cand: dict) -> bool:
+    def _connected_end_ids(self):
+        """本端当前直连端集合；无 mesh（单测/离线）返回 None（不启用离线抢占）。
+
+        注意：必须在持 _cond 之外调用（mesh 有自己的锁，避免锁序反转）。
+        """
+        mesh = self.mesh
+        if mesh is None:
+            return None
+        try:
+            return set(mesh.connected_end_ids())
+        except Exception:
+            return None
+
+    def _offline_source_preempt(self, prev: dict, cand: dict, online) -> bool:
+        """旧槽的源已离线、候选源在线且版本不低：允许同内容候选抢占死槽。
+
+        只解决「源已离线但槽还堵在队头、健康端的同内容候选被去重丢弃」的
+        饥饿；两端都在线时仍走原有去重，避免正常对账轮来回顶槽。
+        """
+        if not online:
+            return False
+        prev_src = prev.get('end_id') or ''
+        cand_src = cand.get('end_id') or ''
+        if not prev_src or not cand_src or prev_src == cand_src:
+            return False
+        if prev_src in online or cand_src not in online:
+            return False
+        if self._slot_key(prev) != self._slot_key(cand):
+            return False
+        return (int(cand.get('clock', 0) or 0), float(cand.get('ts', 0.0) or 0.0)) \
+            >= (int(prev.get('clock', 0) or 0),
+                float(prev.get('ts', 0.0) or 0.0))
+
+    def _merge_slot_locked(self, cand: dict, online=None) -> bool:
         """候选槽并入拉取队列（调用方须持 _cond）：每文件仅一个槽。
 
         同一目标（id+hash+size 相同）不重复入队；不同目标按 (clock, ts)
         择新者，避免迟到败者顶掉已入队的胜者版本。
+        例外：现有槽的源已离线（online 由调用方在锁外取），在线源的同内容
+        候选可顶掉死槽——否则死槽会一直堵在队头，健康源每轮都被去重丢弃。
         """
         name = cand['name']
         prev = self._pulls.get(name)
         if prev is not None:
             if self._slot_key(prev) == self._slot_key(cand):
-                return False  # 同一对象同一内容：已在队，去重
-            if (int(prev.get('clock', 0) or 0), float(prev.get('ts', 0.0) or 0.0)) \
+                if not self._offline_source_preempt(prev, cand, online):
+                    return False  # 同一对象同一内容：已在队，去重
+                # 死槽移除后再追加：换源条目排到队尾（不插队、不占死槽位置）
+                self._pulls.pop(name, None)
+            elif (int(prev.get('clock', 0) or 0), float(prev.get('ts', 0.0) or 0.0)) \
                     >= (int(cand.get('clock', 0) or 0),
                         float(cand.get('ts', 0.0) or 0.0)):
                 return False
@@ -723,6 +771,29 @@ class FileStateStore(QObject):
         # notify_all：一轮对比可能一次入队多个文件，多个等待 worker 可同时取件
         self._cond.notify_all()
         return True
+
+    # ---- 换源标记（失败后短窗口内优先换源） ----
+
+    def _reroute_marker_locked(self, name: str):
+        """取有效换源标记（调用方须持 _cond）；过期即清理。"""
+        rec = self._pull_reroute.get(name)
+        if rec is None:
+            return None
+        if float(rec.get('until', 0.0)) <= time.time():
+            self._pull_reroute.pop(name, None)
+            return None
+        return rec
+
+    def _mark_pull_reroute(self, name: str, item: dict):
+        """拉取失败后登记换源标记：短窗口内该文件优先换其他源重建。"""
+        with self._lock:
+            self._pull_reroute[name] = {
+                'src': item.get('end_id') or '',
+                'op_no': int(item.get('op_no') or 0),
+                'clock': int(item.get('clock', 0) or 0),
+                'ts': float(item.get('ts', 0.0) or 0.0),
+                'until': time.time() + self.PULL_REROUTE_TTL,
+            }
 
     def _enqueue_pull(self, name: str, src_id: str, remote: FileState, session,
                       force: bool = False) -> bool:
@@ -765,24 +836,68 @@ class FileStateStore(QObject):
             self.log_message.emit(
                 f"冷却抑制重复拉取 {name}（源端未提供该文件），暂停本轮重试")
             return False
+        cand = self._slot_from_remote(name, src_id, remote, session)
+        # 直连端集合在锁外取（mesh 有自己的锁）：用于判定旧槽的源是否已离线，
+        # 离线死槽不再挡住在线源的同内容候选。
+        online = self._connected_end_ids()
         with self._cond:
+            # 换源标记：该文件刚从此源拉取失败，短窗口内优先换其他源重建拉取。
+            # 只作用于“失败后的重建”，稳态入队/去重规则完全不变；force（冲突
+            # 覆盖）不参与换源，避免普通候选顶掉仲裁胜者版本。
+            marker = None if force else self._reroute_marker_locked(name)
+            if marker is not None and src_id != marker['src']:
+                # 换源候选：版本不得低于失败版本与当前队列条目的版本，否则
+                # 落盘前会被 _slot_stale 判过时、白拉一次
+                floor = (int(marker['clock']), float(marker['ts']))
+                prev = self._pulls.get(name)
+                if prev is not None:
+                    floor = max(floor, (int(prev.get('clock', 0) or 0),
+                                        float(prev.get('ts', 0.0) or 0.0)))
+                if (int(cand.get('clock', 0) or 0),
+                        float(cand.get('ts', 0.0) or 0.0)) < floor:
+                    return False
+                if name in self._in_flight:
+                    # 在途时队列里没有可移的条目：换源候选替换待办，收尾即用。
+                    # 待办若已是别的健康源且版本不低，则保留，避免健康源互相顶。
+                    held = self._pull_deferred.get(name)
+                    if (held is None
+                            or self._offline_source_preempt(held, cand, online)
+                            or (held.get('end_id') or '') == marker['src']
+                            or (int(cand.get('clock', 0) or 0),
+                                float(cand.get('ts', 0.0) or 0.0)) > (
+                                int(held.get('clock', 0) or 0),
+                                float(held.get('ts', 0.0) or 0.0))):
+                        self._pull_deferred[name] = cand
+                    return False
+                prev = self._pulls.get(name)
+                if prev is not None and (prev.get('end_id') or '') != marker['src'] \
+                        and (int(cand.get('clock', 0) or 0),
+                             float(cand.get('ts', 0.0) or 0.0)) == (
+                             int(prev.get('clock', 0) or 0),
+                             float(prev.get('ts', 0.0) or 0.0)):
+                    # 同版本且现槽已不是失败源：保留现槽，避免健康源之间来回顶
+                    return False
+                # 先移除旧条目再追加：换源条目排到队尾，同内容不同源不再被去重
+                self._pulls.pop(name, None)
+                return self._merge_slot_locked(cand, online)
+            if marker is not None and int(cand['op_no']) > int(marker['op_no']):
+                # 失败源报出更高版本（内容已更新）→ 解除换源标记，按正常规则入队
+                self._pull_reroute.pop(name, None)
             if name in self._in_flight:
                 # 该文件正被某 worker 拉取中：不能建第二个槽、不能开第二条并发接收
                 # （避免同一文件两份临时文件同时写盘、字节翻倍撑爆磁盘），但候选也
                 # 不能丢弃——丢弃即遗忘，只能等下一拍对账才补发（上限
                 # RECONCILE_INTERVAL），收敛延迟被对账周期支配。改为记入待办，
                 # worker 收尾时立即并入队列重判。多个候选只保留更优者。
-                cand = self._slot_from_remote(name, src_id, remote, session)
                 held = self._pull_deferred.get(name)
-                if held is None or (
+                if held is None or self._offline_source_preempt(held, cand, online) or (
                         int(cand.get('clock', 0) or 0),
                         float(cand.get('ts', 0.0) or 0.0)) > (
                         int(held.get('clock', 0) or 0),
                         float(held.get('ts', 0.0) or 0.0)):
                     self._pull_deferred[name] = cand  # 候选更新 → 替换待办
                 return False
-            return self._merge_slot_locked(
-                self._slot_from_remote(name, src_id, remote, session))
+            return self._merge_slot_locked(cand, online)
 
     def _adopt_dir_entry(self, name: str, src_id: str, remote) -> bool:
         """采纳对端快照里的目录身份：缺失则建目录 + 登记，冲突则合并/让位。
@@ -970,13 +1085,24 @@ class FileStateStore(QObject):
                 # 拉取结束（成功/失败/未获锁放弃）：解除在途标记，后续轮次可再补拉。
                 # 用 _cond 与 _enqueue_pull 的读侧同步；acquired 在 try 内初始化，
                 # 未进入循环（_stop 置位）时保持 False，finally 不重复释放锁。
+                # 直连端集合在锁外取（mesh 有自己的锁），供死槽抢占判定用。
+                online = self._connected_end_ids()
                 with self._cond:
                     self._in_flight.discard(item['name'])
                     # 在途期间被缓冲的候选立即并入队列重判：不等下一拍对账，
                     # 收敛延迟不再被对账周期支配（并入不成立即抛弃，语义同前）。
                     deferred = self._pull_deferred.pop(item['name'], None)
                     if deferred is not None:
-                        self._merge_slot_locked(deferred)
+                        # 换源窗口内，失败源的旧候选不再重排（否则收尾立刻又拉
+                        # 同一失败源）；等换源标记到期或其他源候选重建。
+                        marker = self._reroute_marker_locked(item['name'])
+                        if (marker is not None
+                                and (deferred.get('end_id') or '') == marker['src']
+                                and int(deferred.get('op_no') or 0)
+                                <= int(marker['op_no'])):
+                            deferred = None
+                    if deferred is not None:
+                        self._merge_slot_locked(deferred, online)
                 if acquired:
                     try:
                         lk.release()
@@ -1156,12 +1282,16 @@ class FileStateStore(QObject):
             if self._source_lacks_file(err):
                 self._record_pull_cooldown(name, item['end_id'], item['op_no'])
             self.log_message.emit(f"自同步拉取失败 {name}: {err}")
+            # 源不可用：记录期望版本并当场换源查询，无匹配则放弃本次拉取
+            self._handle_source_down(name, item)
 
     def _finish_pull(self, name: str, ok: bool):
         """拉取落盘后的收尾：哈希完成才算完成（阶段 B）。"""
         if not ok:
             self.pull_done.emit(name, False)
             return
+        with self._lock:
+            self._pull_reroute.pop(name, None)  # 换源成功 → 解除换源标记
         self._notify_file_added(name)
         self.pull_done.emit(name, True)
         self.log_message.emit(f"自同步拉取完成: {name}")
@@ -1230,6 +1360,43 @@ class FileStateStore(QObject):
                 del recs[src_id]
             # until == 0：仍在累计（失败数未达阈值），保留计数，不拦截
             return False, 0.0
+
+    # ---- 源不可用换源 ----
+
+    def _handle_source_down(self, name: str, item: dict):
+        """拉取失败：放弃本次拉取，当场换源查一次列表；没有匹配的源交给后续对账。"""
+        if self._stop.is_set():
+            return
+        # 换源标记：短窗口内该文件的重建优先换其他源（同版本也允许顶掉旧条目）
+        self._mark_pull_reroute(name, item)
+        with self._lock:
+            self._resync_failed += 1
+        self._schedule_resync()  # 同一批失败只交换一次列表
+
+    def _schedule_resync(self):
+        """失败换源查询去抖：300ms 内的并发失败合并成一次 request_all。"""
+        with self._lock:
+            if self._resync_timer is not None or self._stop.is_set():
+                return
+            timer = threading.Timer(0.3, self._do_resync)
+            timer.daemon = True
+            self._resync_timer = timer
+        timer.start()
+
+    def _do_resync(self):
+        with self._lock:
+            self._resync_timer = None
+            failed = self._resync_failed
+            self._resync_failed = 0
+        if self._stop.is_set():
+            return
+        if failed:
+            self.log_message.emit(
+                f"{failed} 个文件源不可用，已放弃本次拉取，改查其他源")
+        try:
+            self.request_all()
+        except Exception:
+            pass
 
     # ---- 触发一轮对比 ----
 
@@ -1673,6 +1840,13 @@ class FileStateStore(QObject):
 
     def stop(self):
         self._stop.set()
+        with self._lock:
+            if self._resync_timer is not None:
+                try:
+                    self._resync_timer.cancel()
+                except Exception:
+                    pass
+                self._resync_timer = None
         timer = self._align_timer
         if timer is not None:
             try:

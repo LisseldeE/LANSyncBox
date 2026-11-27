@@ -643,11 +643,13 @@ class SyncWindow(QMainWindow):
     # 共享剪贴板回环识别窗口（秒）：本端复制后窗口期内收到同指纹通知视为回声
     _OWN_COPY_WINDOW = 8.0
 
-    def __init__(self, is_host: bool, room_code: str, password: str = "", host_address: str = "", host_port: int = None, existing_client=None, silent_align: bool = False):
+    def __init__(self, is_host: bool, room_code: str, password: str = "", host_address: str = "", host_port: int = None, existing_client=None, silent_align: bool = False, is_create: bool = False):
         super().__init__()
         self.is_host = is_host
         self.room_code = room_code
         self.password = password
+        # 创建新房间：跳过建房时的编号探活，省掉固定等待
+        self._is_create = bool(is_create)
         self.host_address = host_address
         self.host_port = host_port
         self._existing_client = existing_client  # 由 JoinRoomDialog 预验证成功的 client（可选，避免重复连接）
@@ -1077,7 +1079,8 @@ class SyncWindow(QMainWindow):
         """初始化网络"""
         if self.is_host:
             # 主机端：启动服务器和响应服务
-            self.server = SyncServer(self.room_code, self.password)
+            self.server = SyncServer(self.room_code, self.password,
+                                     probe_instance=not self._is_create)
             self.server.silent_align = self._silent_align
             self.server.client_connected.connect(self.on_client_connected)
             self.server.client_disconnected.connect(self.on_client_disconnected)
@@ -3861,9 +3864,10 @@ class SyncWindow(QMainWindow):
     def add_log(self, log_type: str, message: str):
         """添加日志（兼容旧代码）"""
         # 广播文件日志不在表格中显示，但会保留在隐藏日志中供导出
-        # 自同步拉取完成与传输行内容重复，同样只进导出、不占日志列表
+        # 自同步拉取完成/开始与传输行内容重复，同样只进导出、不占日志列表
         if (message.startswith("广播文件:")
-                or message.startswith("自同步拉取完成:")):
+                or message.startswith("自同步拉取完成")
+                or "开始拉取" in message):
             self._hidden_logs.append((log_type, message))
             return
         self._add_record(message, log_type, "")

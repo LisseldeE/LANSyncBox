@@ -318,24 +318,7 @@ class SyncClient(QObject):
             self._state_storage = None
 
         # 清理大文件接收状态：关闭句柄、删除临时文件
-        # 先在锁内收集所有需要清理的条目，然后在锁外执行 IO 操作
-        with self._receiving_lock:
-            items_to_cleanup = list(self.receiving_files.items())
-            self.receiving_files.clear()
-
-        for filename, rf in items_to_cleanup:
-            handle = rf.get('handle')
-            if handle:
-                try:
-                    handle.close()
-                except Exception:
-                    pass
-            temp_path = rf.get('temp_path')
-            if temp_path and os.path.exists(temp_path):
-                try:
-                    os.remove(temp_path)
-                except Exception:
-                    pass
+        self._cleanup_receiving_files()
 
         if self.socket:
             try:
@@ -392,9 +375,33 @@ class SyncClient(QObject):
 
     # ---- 全网状管理平面：故障切换 / 主机回归挂回 ----
 
+    def _cleanup_receiving_files(self):
+        """清理在途直推接收：关闭句柄、删除临时文件。
+
+        管理连接丢失时必须调用，否则跨通道守卫会一直认为该文件仍在直推，
+        自同步拉取永远被跳过，换源链路无法启动。
+        """
+        with self._receiving_lock:
+            items = list(self.receiving_files.items())
+            self.receiving_files.clear()
+        for _filename, rf in items:
+            handle = rf.get('handle')
+            if handle:
+                try:
+                    handle.close()
+                except Exception:
+                    pass
+            temp_path = rf.get('temp_path')
+            if temp_path and os.path.exists(temp_path):
+                try:
+                    os.remove(temp_path)
+                except Exception:
+                    pass
+
     def _handle_management_lost(self):
         """管理连接失效：保留数据平面（mesh/distributor/store），关闭管理 socket，
         进入自动重连（按序试连可用端点）。"""
+        self._cleanup_receiving_files()
         self._close_mgmt_socket()
         self._start_reconnect()
 

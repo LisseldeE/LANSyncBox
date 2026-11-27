@@ -112,9 +112,11 @@ def main():
             pass  # 静默失败，不影响程序启动
 
     # 设置AppUserModelID（必须在QApplication创建之前）
+    # 用带点的稳定标识，避免 Windows 把本进程当成 python.exe 分组/取图标
     if Config.IS_WINDOWS:
         try:
-            ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID(Config.APP_NAME)
+            ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID(
+                Config.APP_AUMID)
         except (AttributeError, OSError):
             pass
 

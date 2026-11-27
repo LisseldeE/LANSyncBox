@@ -153,6 +153,7 @@ class MobileWebService:
         self._lock = threading.Lock()
         self._sessions = {}          # sid -> 过期时间
         self._fail_log = {}          # ip -> [失败时间]
+        self._stopping = threading.Event()  # 关服信号：在途上传据此尽快中断
         self._token = token          # 上层复用：重启服务后已打开的页面仍可凭新校验码重新进入
         self._code = ''              # 四位校验码：扫码后还需在网页输入
         self._port = 0
@@ -194,6 +195,7 @@ class MobileWebService:
             self._code = f'{secrets.randbelow(10000):04d}'
             self._sessions.clear()
             self._fail_log.clear()
+            self._stopping.clear()
 
         # 上次异常退出可能留下半截上传文件，开服前先清掉
         clear_upload_cache()
@@ -202,7 +204,7 @@ class MobileWebService:
         import uvicorn
         config = uvicorn.Config(app, host='0.0.0.0', port=port,
                                 log_level='warning', access_log=False,
-                                lifespan='off')
+                                lifespan='off', timeout_graceful_shutdown=1)
         server = uvicorn.Server(config)
         thread = threading.Thread(target=self._run_server, args=(server,),
                                   name='lsb-mobile-web', daemon=True)
@@ -225,6 +227,7 @@ class MobileWebService:
 
     def stop(self):
         """停止监听、作废 token 与全部会话。"""
+        self._stopping.set()   # 先通知在途上传中断，避免优雅关闭继续写完
         uv = self._uv
         thread = self._thread
         self._uv = None
@@ -585,6 +588,8 @@ class MobileWebService:
         async def upload(request: Request, dir: str = '', name: str = '',
                          overwrite: int = 0):
             self._require(request, write=True)
+            if self._stopping.is_set():
+                raise HTTPException(503, '网页服务已关闭，上传已中断')
             base = self._safe_rel(dir)
             if not os.path.isdir(base):
                 raise HTTPException(404, '目录不存在')
@@ -599,6 +604,8 @@ class MobileWebService:
             try:
                 with os.fdopen(fd, 'wb') as fh:
                     async for chunk in request.stream():
+                        if self._stopping.is_set():
+                            raise HTTPException(503, '网页服务已关闭，上传已中断')
                         if not chunk:
                             continue
                         total += len(chunk)

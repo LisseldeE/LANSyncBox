@@ -401,8 +401,9 @@ class MainWindow(QMainWindow):
             room_code = dialog.get_room_code()
             password = dialog.get_password()
             
-            # 打开同步窗口
-            self.open_sync_window(is_host=True, room_code=room_code, password=password)
+            # 打开同步窗口（新建房间：跳过编号探活）
+            self.open_sync_window(is_host=True, room_code=room_code,
+                                  password=password, is_create=True)
     
     def on_join_room(self):
         """加入房间"""
@@ -705,7 +706,7 @@ class MainWindow(QMainWindow):
         dialog = AboutDialog(self)
         dialog.exec()
     
-    def open_sync_window(self, is_host: bool, room_code: str, password: str = "", host_address: str = "", host_port: int = None, existing_client=None, silent_align: bool = False):
+    def open_sync_window(self, is_host: bool, room_code: str, password: str = "", host_address: str = "", host_port: int = None, existing_client=None, silent_align: bool = False, is_create: bool = False):
         """打开同步窗口"""
         from ui.sync_window import SyncWindow
 
@@ -725,6 +726,7 @@ class MainWindow(QMainWindow):
             host_port=host_port,
             existing_client=existing_client,
             silent_align=silent_align,
+            is_create=is_create,
         )
         self._sync_window.setWindowTitle(I18n.tr('app_name'))
         self._sync_window.setMinimumSize(Config.WINDOW_MIN_WIDTH, Config.WINDOW_MIN_HEIGHT)

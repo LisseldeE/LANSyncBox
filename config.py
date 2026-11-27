@@ -58,6 +58,7 @@ class Config:
     APP_SERIAL_FULL = ".".join(x for x in (APP_NAME, APP_VERSION, APP_SERIAL) if x)
     APP_VERSION_SERIAL = ".".join(x for x in (APP_VERSION, APP_SERIAL) if x)
     APP_AUTHOR = "Lisselde_E"
+    APP_AUMID = "Lisselde_E.LANSyncBox.App.1"
     APP_AUTHOR_LINK = "https://lisseldee.github.io"  # 作者主页链接
     PLATFORM = _PLATFORM
 
